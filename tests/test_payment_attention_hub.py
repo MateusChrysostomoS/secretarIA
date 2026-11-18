@@ -462,11 +462,12 @@ async def test_the_agenda_deposit_gains_needs_attention_and_keeps_its_other_keys
     # change): additive, a consumer that does not know them ignores them.
     assert by_id["evt-flag"] == {
         "status": "confirmado_pago", "amount_cents": 6000, "needs_attention": True,
-        "held_cents": None, "pending_difference_cents": None,
+        "held_cents": None, "pending_difference_cents": None, "pending_difference_mode": None,
     }
     assert by_id["evt-plain"]["needs_attention"] is False
     assert set(by_id["evt-plain"]) == {
-        "status", "amount_cents", "needs_attention", "held_cents", "pending_difference_cents"
+        "status", "amount_cents", "needs_attention", "held_cents", "pending_difference_cents",
+        "pending_difference_mode",
     }
 
 
@@ -507,7 +508,25 @@ async def test_awaiting_payment_lists_only_live_payable_reservations_without_pii
     body = (await client.get("/tenants/me/calendar/awaiting-payment", params=_window())).json()
     (row,) = body
     assert row["id"] == str(hold_id) and row["service"] == "Consulta"
-    assert set(row) == {"id", "start", "end", "service", "expires_at", "professional_id"}
+    # TASK-085 R: `kind` ("booking" here) and `appointment_id` (null: no consultation yet); 3rd
+    # round (UH): `change_summary` (null: no change).
+    assert set(row) == {
+        "id",
+        "start",
+        "end",
+        "service",
+        "expires_at",
+        "professional_id",
+        "kind",
+        "appointment_id",
+        "change_summary",
+        # UH2 (UF review I3): the patient facts of a "rebook" row - always null on a booking.
+        "patient_name",
+        "attendee_name",
+        "patient_channel",
+    }
+    assert (row["kind"], row["appointment_id"], row["change_summary"]) == ("booking", None, None)
+    assert (row["patient_name"], row["attendee_name"], row["patient_channel"]) == (None, None, None)
     text = str(body)
     assert "pay_secret" not in text and "Maria" not in text and "6000" not in text
 

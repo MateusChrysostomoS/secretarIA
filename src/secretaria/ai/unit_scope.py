@@ -125,6 +125,29 @@ def service_id_of(catalog: list | None, service_name: str | None) -> UUID | None
     return None
 
 
+async def owner_service_catalog(tenant_id: UUID, professional: Any | None) -> list[dict]:
+    """THIS professional's own catalog as stored dicts (each with its `service_id`), resolved
+    through the clinic's canonical catalog - what the service-per-unit rule reads.
+
+    The turn's effective catalog (`TenantRuntimeConfig.appointment_types`) is a list of
+    `RuntimeAppointmentType` objects with no `service_id` (TASK-085 final review): the unit
+    tools of a one-doctor clinic read this instead. [] without a professional of `tenant_id`.
+    """
+    if professional is None or getattr(professional, "tenant_id", None) != tenant_id:
+        return []
+    from secretaria.core.database import async_session_factory
+    from secretaria.models import Tenant
+    from secretaria.services.service_catalog import load_service_catalog
+    from secretaria.services.tenant_config import professional_appointment_types
+
+    async with async_session_factory() as session:
+        tenant = await session.get(Tenant, tenant_id)
+        if tenant is None:
+            return []
+        services = await load_service_catalog(session, tenant_id)
+        return professional_appointment_types(professional, tenant, services)
+
+
 async def valid_unit_options(
     tenant_id: UUID, professional: Any | None, service_id: UUID | None
 ) -> list[UnitOption]:
@@ -214,6 +237,7 @@ __all__ = [
     "OUTSIDE_UNIT_HOURS_ERROR",
     "SERVICE_NOT_AT_UNIT_ERROR",
     "outside_unit_hours",
+    "owner_service_catalog",
     "professional_unit_options",
     "resolve_tool_unit",
     "service_id_of",

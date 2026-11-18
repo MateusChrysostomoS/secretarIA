@@ -287,9 +287,12 @@ async def test_create_with_offer_makes_the_service_bookable(
         "long_description": None,
         # The catalog owns the orientations of a linked entry.
         "requirements": [],
+        # TASK-085: the read model always carries the per-unit exceptions (none here).
+        "unit_terms": [],
     }
     _t, p = await _reload(db, tenant.id, doctor.id)
-    assert p.appointment_types == [entry]
+    # ...but they are never stored in the professional's JSON.
+    assert p.appointment_types == [{k: v for k, v in entry.items() if k != "unit_terms"}]
 
 
 async def test_create_without_offer_is_unchanged(client: AsyncClient, db, tenant, doctor) -> None:

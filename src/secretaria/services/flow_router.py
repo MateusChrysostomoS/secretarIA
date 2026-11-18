@@ -21,12 +21,13 @@ Design:
 
 from __future__ import annotations
 
+import hashlib
 import re
 from collections.abc import Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, Literal
 from uuid import UUID
 from zoneinfo import ZoneInfo
@@ -52,6 +53,7 @@ from secretaria.core.whatsapp_limits import (
     MAX_INTERACTIVE_BODY_CHARS,
     MAX_LIST_ROW_DESCRIPTION_CHARS,
     MAX_LIST_ROW_TITLE_CHARS,
+    MAX_TEXT_MESSAGE_CHARS,
     decorate,
     decorate_and_truncate,
     decorate_if_fits,
@@ -86,7 +88,7 @@ from secretaria.services.availability import (
     slot_taken_at_confirm,
     without_holds,
 )
-from secretaria.services.booking_details import is_convenio, service_price_text
+from secretaria.services.booking_details import is_convenio, price_text, service_price_text
 from secretaria.services.booking_hold import BookingGate
 from secretaria.services.booking_scope import (
     canonical_service_name,
@@ -101,7 +103,6 @@ from secretaria.services.calendar import (
     build_patient_link_details,
 )
 from secretaria.services.insurance_catalog import match_plan
-from secretaria.services.insurance_payment_copy import insurance_payment_description
 from secretaria.services.local_calendar import create_event_exclusive, update_event_exclusive
 from secretaria.services.patient_context import as_utc
 from secretaria.services.payments import payer_data
@@ -114,6 +115,7 @@ from secretaria.services.service_catalog import (
     normalize,
     professionals_offering,
 )
+from secretaria.services.service_terms import resolve_terms
 from secretaria.services.tenant_config import (
     active_appointment_types,
     professional_appointment_types,
@@ -1285,6 +1287,37 @@ def _service_duration(service: dict, tenant: Tenant) -> int:
         return tenant.appointment_duration_min or 30
 
 
+def _service_duration_at(
+    service: dict, tenant: Tenant, professional: Any | None, unit_id: UUID | None
+) -> int:
+    """`_service_duration` at `unit_id` for `professional` (TASK-085 D2/D7).
+
+    The unit's own duration (`professional.service_unit_terms`, carried by the snapshot) when it
+    has one; otherwise exactly `_service_duration` - no unit, no professional, no exception or a
+    row that only changes the price is today's value, byte for byte.
+    """
+    resolved = flow_units.terms_at(professional, service, unit_id)
+    if resolved.own and resolved.duration_min is not None:
+        return resolved.duration_min
+    return _service_duration(service, tenant)
+
+
+def _priced_entry(service: dict, professional: Any | None, unit_id: UUID | None = None) -> dict:
+    """`service` as a text may price it (TASK-085 D3/R2, `flow_units.shown_terms`).
+
+    The SAME dict when the price to show is the entry's own (every clinic without exceptions);
+    a copy with the unit's price when it differs; a copy WITHOUT a price when it differs between
+    the units and the unit is not known yet - never a range. Callers format it as before
+    (`booking_details.service_price_text`).
+    """
+    shown = flow_units.shown_terms(professional, service, unit_id)
+    if shown.price_hidden:
+        return {**service, "price": None}
+    if shown.price == resolve_terms(service, None, None).price:
+        return service
+    return {**service, "price": shown.price}
+
+
 def _match_service(services: list[dict], body: str | None) -> dict | None:
     """Find the active service whose (list-truncated) name matches `body`.
 
@@ -2053,7 +2086,13 @@ async def _route(
 
     if state == FlowState.MANAGE_BOOKING:
         return await _manage_step(
-            conversation, tenant, calendar, inbound_body, upcoming_appointments or [], professionals
+            conversation,
+            tenant,
+            calendar,
+            inbound_body,
+            upcoming_appointments or [],
+            professionals,
+            patient_name=patient_name,
         )
 
     if state == FlowState.EDIT_BOOKING:
@@ -2873,7 +2912,7 @@ def _handle_catalog_service(
     offering = _professionals_offering(tenant, professionals, service_name)
     if len(offering) == 1:
         professional = offering[0]
-        result = _enter_service_detail(service, conversation, tenant)
+        result = _enter_service_detail(service, conversation, tenant, professional)
         result.flow_selected_professional_id = professional.id
         return result
     if not offering:
@@ -2929,7 +2968,7 @@ def _handle_service_professional(
         # Deactivated between the two taps: fall back to that doctor's own
         # list rather than booking a service they no longer offer.
         return _enter_professional_services(professional, tenant)
-    result = _enter_service_detail(service, conversation, tenant)
+    result = _enter_service_detail(service, conversation, tenant, professional)
     result.flow_selected_professional_id = professional.id
     return result
 
@@ -3194,16 +3233,21 @@ INSURANCE_PINNED_ROWS: tuple[tuple[str, str, str | None], ...] = (
 )
 
 
+def insurance_plans_have_clinic_notes(plans: list) -> bool:
+    """Does any of these plans carry the clinic's own note (TASK-085 R U1b)?
+
+    The clinic's "Outro" plans and, in `independent` mode, a doctor's own "Outro" carry
+    `note`; catalog plans and legacy names never do. One non-blank note is enough for the
+    Portal to offer "Ver regras de pagamento dos convênios" (owner, 2026-11-18) - the same
+    plans `patient_insurance_overview` then lists.
+    """
+    return any(isinstance(plan.get("note"), str) and plan["note"].strip() for plan in plans)
+
+
 def portal_insurance_rows(plans: list) -> list[tuple[str, str, str | None]]:
-    """Every clinic plan as a Portal row: the full name + how payment works for it."""
-    return [
-        (
-            f"ins|{plan['name']}",
-            str(plan["name"]),
-            insurance_payment_description(plan.get("mechanism")),
-        )
-        for plan in plans
-    ]
+    """Every clinic plan as a Portal row: the full name, no description (TASK-085 R D-R12: the
+    per-plan payment text was removed - owner: "TIRE ISSO")."""
+    return [(f"ins|{plan['name']}", str(plan["name"]), None) for plan in plans]
 
 
 def insurance_more_row(next_page: int | None) -> list[tuple[str, str]]:
@@ -3239,15 +3283,10 @@ def _enter_insurance(
     """
     plans = _tenant_insurance_plans(tenant)
     shown, next_page = insurance_page(plans, page)
-    # The row description says how payment works for the plan (the catalog mechanism): public,
-    # fixed copy - never the clinic's own note, never anything that decides the deposit.
+    # Title only (TASK-085 R D-R12): the per-plan payment text under each convênio was removed
+    # (owner: "TIRE ISSO"); the clinic's own note is still never shown before the choice.
     rows: list[tuple] = [
-        (
-            f"ins|{plan['name']}",
-            truncate_list_row_title(str(plan["name"])),
-            insurance_payment_description(plan.get("mechanism")),
-        )
-        for plan in shown
+        (f"ins|{plan['name']}", truncate_list_row_title(str(plan["name"]))) for plan in shown
     ]
     rows.extend(insurance_more_row(next_page))
     rows.append(("ins|particular", LABEL_INSURANCE_PARTICULAR))
@@ -3258,6 +3297,7 @@ def _enter_insurance(
         scope={},
         items=portal_insurance_rows(plans),
         pinned=list(INSURANCE_PINNED_ROWS),
+        has_clinic_notes=insurance_plans_have_clinic_notes(plans),
     )
     logger.info(
         "insurance_step_presented",
@@ -3485,7 +3525,11 @@ async def _handle_professional_help(
 
 
 async def _handle_service_help(
-    conversation: Conversation, tenant: Tenant, body: str, services: list[dict]
+    conversation: Conversation,
+    tenant: Tenant,
+    body: str,
+    services: list[dict],
+    professional: Any | None = None,
 ) -> FlowRouterResult:
     final_round = conversation.flow_step == STEP_SERVICE_HELP_FINAL
     # Same accounting as _handle_professional_help above.
@@ -3498,7 +3542,9 @@ async def _handle_service_help(
     try:
         outcome = await run_service_help(
             conversation_id=getattr(conversation, "id", None),
-            services=services,
+            # TASK-085 D3: the model reads the prices the service card would show - a price
+            # that differs between the doctor's units is not given to it before the unit.
+            services=[_priced_entry(service, professional) for service in services],
             patient_message=body,
             final_round=final_round,
         )
@@ -3509,7 +3555,8 @@ async def _handle_service_help(
         service = _match_service(services, outcome.choice)
         if service is not None:
             return _with_pick_message(
-                _enter_service_detail(service, conversation, tenant), outcome.message
+                _enter_service_detail(service, conversation, tenant, professional),
+                outcome.message,
             )
         logger.warning("flow_service_help_pick_unresolved")
         return _delegate_llm_keeping_draft(conversation)
@@ -3655,11 +3702,11 @@ async def _catalog_step(
         if service is None:
             return _preserve(conversation, "delegate_llm")
         return _resume_parked_draft(
-            conversation, _enter_service_detail(service, conversation, tenant)
+            conversation, _enter_service_detail(service, conversation, tenant, booking_owner)
         )
 
     if step in (STEP_SERVICE_HELP, STEP_SERVICE_HELP_FINAL):
-        return await _handle_service_help(conversation, tenant, body, services)
+        return await _handle_service_help(conversation, tenant, body, services, booking_owner)
 
     if step == STEP_AWAITING_SERVICE_CONFIRM:
         if _norm(body) == _norm(LABEL_BOOK_SERVICE):
@@ -3707,7 +3754,7 @@ async def _catalog_step(
             tenant,
             calendar,
             body,
-            duration_minutes=_booking_duration(conversation, tenant, services),
+            duration_minutes=_booking_duration(conversation, tenant, services, professionals),
             branch=BOOKING_DAY_BRANCH,
             services=services,
             back_target=back_target,
@@ -3720,7 +3767,7 @@ async def _catalog_step(
             tenant,
             calendar,
             body,
-            duration_minutes=_booking_duration(conversation, tenant, services),
+            duration_minutes=_booking_duration(conversation, tenant, services, professionals),
             branch=BOOKING_DAY_BRANCH,
             services=services,
             back_target=back_target,
@@ -3757,11 +3804,23 @@ async def _catalog_step(
     return _preserve(conversation, "delegate_llm")
 
 
-def _service_detail_text(service: dict, tenant: Tenant, insurance: str | None = None) -> str:
+def _service_detail_text(
+    service: dict,
+    tenant: Tenant,
+    insurance: str | None = None,
+    *,
+    professional: Any | None = None,
+    unit_id: UUID | None = None,
+) -> str:
     """The service card body. Under a convênio the particular price is left out
-    and the plan is named instead ("Primeira Consulta — convênio Unimed")."""
+    and the plan is named instead ("Primeira Consulta — convênio Unimed").
+
+    TASK-085 D3/R2: the card comes BEFORE the unit, so the price is `professional`'s at
+    `unit_id` (a unit already picked for this service), at the only unit doing the service, or -
+    when it differs between the units - not on the card at all (no price line, exactly like a
+    service without a price). Without exceptions the card is today's."""
     name = str(service.get("name", "Consulta"))
-    price = service_price_text(service, insurance)
+    price = service_price_text(_priced_entry(service, professional, unit_id), insurance)
     long_description = service.get("long_description") or service.get("description")
     if price:
         headline = f"{name} {price}"
@@ -3776,8 +3835,22 @@ def _service_detail_text(service: dict, tenant: Tenant, insurance: str | None = 
     return "\n\n".join(parts)
 
 
+def _service_card_unit_id(
+    conversation: Any, professional: Any | None, service: dict
+) -> UUID | None:
+    """The unit the service card may price at: the conversation's pick, only when it is one
+    where `professional` does THIS service (else None - the card follows D3)."""
+    unit = flow_units.find_unit(
+        professional, flow_units.selected_unit_id(conversation), entry_service_id(service)
+    )
+    return unit.id if unit is not None else None
+
+
 def _enter_service_detail(
-    service: dict, conversation: Conversation, tenant: Tenant
+    service: dict,
+    conversation: Conversation,
+    tenant: Tenant,
+    professional: Any | None = None,
 ) -> FlowRouterResult:
     """The matched service's detail + Sim/Outro serviço confirm card.
 
@@ -3785,13 +3858,20 @@ def _enter_service_detail(
     scoped service-help node (`_handle_service_help`) re-enters the
     deterministic flow through this exact result after a validated pick —
     mirroring how `_enter_professional_services` serves both the tap and the
-    LLM hand-backs.
+    LLM hand-backs. `professional` is whose `service` entry it is (TASK-085: its per-unit
+    prices decide what the card shows); None prices it as stored.
     """
     return FlowRouterResult(
         action="reply",
         bubbles=[
             ButtonBubble(
-                body=_service_detail_text(service, tenant, _selected_insurance(conversation)),
+                body=_service_detail_text(
+                    service,
+                    tenant,
+                    _selected_insurance(conversation),
+                    professional=professional,
+                    unit_id=_service_card_unit_id(conversation, professional, service),
+                ),
                 confirm_label=LABEL_BOOK_SERVICE,
                 cancel_label=LABEL_OTHER_SERVICE,
             )
@@ -4408,17 +4488,36 @@ async def _handle_slot_controls(
     return None
 
 
+# `_booking_duration`'s default: the unit is the booking's own (`flow_units.effective_unit`).
+_BOOKING_UNIT = object()
+
+
 def _booking_duration(
-    conversation: Conversation, tenant: Tenant, services: list[dict] | None
+    conversation: Conversation,
+    tenant: Tenant,
+    services: list[dict] | None,
+    professionals: list | None = None,
+    *,
+    unit: Any = _BOOKING_UNIT,
 ) -> int:
-    """Minutes the booking branch should slot on: the chosen service's own."""
+    """Minutes the booking branch should slot on: the chosen service's own.
+
+    TASK-085 (D2/D7): at the booking's unit - `unit` when the caller already holds it (the unit
+    step: the pick is not on the conversation yet), else the one picked or the only one on offer
+    - with the booking owner's per-unit duration (`_service_duration_at`). No unit known, no
+    professional, or no exception: the service's base, exactly as before. The day list, the slot
+    list, the hold and the event all read this one value for the same unit.
+    """
     service = _match_service(
         services if services is not None else active_appointment_types(tenant),
         conversation.flow_selected_type,
     )
     if service is None:
         return tenant.appointment_duration_min or 30
-    return _service_duration(service, tenant)
+    owner = _booking_professional(conversation, professionals)
+    if unit is _BOOKING_UNIT:
+        unit = flow_units.effective_unit(conversation, owner, entry_service_id(service))
+    return _service_duration_at(service, tenant, owner, getattr(unit, "id", None))
 
 
 def _notice_now(tz) -> datetime:
@@ -4513,7 +4612,9 @@ async def _ask_day(
         conversation,
         tenant,
         _unit_calendar(calendar, unit),
-        duration_minutes=_booking_duration(conversation, tenant, services),
+        duration_minutes=_booking_duration(
+            conversation, tenant, services, professionals, unit=unit
+        ),
         branch=BOOKING_DAY_BRANCH,
         back_target=_back_target_for(choice),
         professionals=professionals,
@@ -4521,7 +4622,7 @@ async def _ask_day(
     )
     if unit is not None and result.flow_state is FlowState.SERVICE_CATALOG:
         result.flow_selected_unit_id = unit.id
-    return result
+    return _with_unit_terms_line(result, conversation, tenant, services, professionals, unit)
 
 
 # --------------------------------------------------------------------------
@@ -4618,6 +4719,71 @@ def _service_entry_name(conversation: Any, entry: dict | None) -> str:
     """The service's name as the patient sees it: the catalog entry's, else the stored one."""
     name = entry.get("name") if entry is not None else None
     return str(name or getattr(conversation, "flow_selected_type", None) or "")
+
+
+# TASK-085 D3 (owner's example: "Consulta na Unidade Centro: R$ 250,00 · 30 min"). Without a
+# price at that unit the "{preco} · " part is dropped.
+UNIT_TERMS_LINE = "{servico} na {unidade}: {preco} · {duracao} min"
+UNIT_TERMS_LINE_NO_PRICE = "{servico} na {unidade}: {duracao} min"
+_UNIT_WORD = re.compile(r"unidade\b", re.IGNORECASE)
+
+
+def _unit_terms_text(service_name: str, unit: Any, price: str | None, minutes: int) -> str:
+    """The D3 confirmation line. A unit already named "Unidade ..." is not prefixed again
+    ("Consulta na Unidade Centro", never "na Unidade Unidade Centro")."""
+    name = str(getattr(unit, "name", None) or "").strip()
+    place = name if _UNIT_WORD.match(name) else f"Unidade {name}"
+    values = {"servico": service_name.strip(), "unidade": place, "duracao": minutes}
+    shown = price_text(price)
+    if shown:
+        return UNIT_TERMS_LINE.format(preco=shown, **values)
+    return UNIT_TERMS_LINE_NO_PRICE.format(**values)
+
+
+def _with_unit_terms_line(
+    result: FlowRouterResult,
+    conversation: Any,
+    tenant: Tenant,
+    services: list[dict] | None,
+    professionals: list | None,
+    unit: Any | None,
+) -> FlowRouterResult:
+    """TASK-085 D3: the price the service card hid, said once the unit is known.
+
+    When the day picker opens for `unit` and the card left the price out (it differs between
+    the units where the doctor does the service: `flow_units.shown_terms(...).price_hidden`),
+    ONE text bubble goes before the picker with that unit's price and duration - the same
+    duration the slots use (`_booking_duration`). Nothing at all when the price did not differ
+    (no exception, the same price everywhere, one unit: the card already showed it), under a
+    convênio (the card never shows the private price there, R14), or when `unit` is already the
+    conversation's chosen unit (a day picker drawn again for it - resume, re-entry - never
+    repeats the line). `conversation` is the conversation as it arrived, not the step's carrier.
+    """
+    if (
+        unit is None
+        or result.action != "reply"
+        or result.flow_step not in _BOOKING_DAY_STEPS
+        or unit.id == flow_units.selected_unit_id(conversation)
+        or is_convenio(_selected_insurance(conversation))
+    ):
+        return result
+    owner = _booking_professional(conversation, professionals)
+    entry = _booking_service_entry(conversation, tenant, services, owner)
+    if entry is None or not flow_units.shown_terms(owner, entry).price_hidden:
+        return result
+    at_unit = flow_units.shown_terms(owner, entry, unit.id)
+    line = _unit_terms_text(
+        _service_entry_name(conversation, entry),
+        unit,
+        at_unit.price,
+        _booking_duration(conversation, tenant, services, professionals, unit=unit),
+    )
+    logger.info(
+        "flow_unit_terms_line_shown", conversation_id=str(getattr(conversation, "id", None))
+    )
+    bubble = TextBubble(body=truncate_plain(line, MAX_TEXT_MESSAGE_CHARS))
+    result.bubbles = [bubble, *result.bubbles]
+    return result
 
 
 def _enter_unit_choice(
@@ -4863,15 +5029,19 @@ async def _handle_unit_step(
         flow_attendee_name=_attendee_name(conversation),
         flow_selected_unit_id=unit.id,
     )
-    return await enter_day_picker(
+    result = await enter_day_picker(
         state,
         tenant,
         _unit_calendar(calendar, unit),
-        duration_minutes=_booking_duration(conversation, tenant, services),
+        # The pick is in `state`, not on the conversation yet: the unit is passed explicitly.
+        duration_minutes=_booking_duration(
+            conversation, tenant, services, professionals, unit=unit
+        ),
         branch=BOOKING_DAY_BRANCH,
         back_target=_back_target_for(choice),
         professionals=professionals,
     )
+    return _with_unit_terms_line(result, conversation, tenant, services, professionals, unit)
 
 
 async def _handle_unit_confirm_step(
@@ -4930,15 +5100,18 @@ async def _handle_unit_confirm_step(
         flow_attendee_name=_attendee_name(conversation),
         flow_selected_unit_id=unit.id,
     )
-    return await enter_day_picker(
+    result = await enter_day_picker(
         state,
         tenant,
         _unit_calendar(calendar, unit),
-        duration_minutes=_booking_duration(conversation, tenant, services),
+        duration_minutes=_booking_duration(
+            conversation, tenant, services, professionals, unit=unit
+        ),
         branch=BOOKING_DAY_BRANCH,
         back_target=_back_target_for(choice),
         professionals=professionals,
     )
+    return _with_unit_terms_line(result, conversation, tenant, services, professionals, unit)
 
 
 async def enter_guided_booking(
@@ -5038,7 +5211,7 @@ async def _relist_stored_day(
     text; with nothing stored (or the day since gone) it falls back to the
     picker instead of guessing.
     """
-    duration = _booking_duration(conversation, tenant, services)
+    duration = _booking_duration(conversation, tenant, services, professionals)
     if calendar is None:
         return _calendar_unavailable(conversation, BOOKING_DAY_BRANCH, STEP_AWAITING_DAY)
     target = _parse_day(conversation.flow_selected_day, datetime.now(calendar.tzinfo))
@@ -5257,8 +5430,16 @@ async def _handle_confirmation(
     if services is None:
         services = active_appointment_types(tenant)
     service = _match_service(services, service_type)
-    duration = _service_duration(service, tenant) if service else (
-        tenant.appointment_duration_min or 30
+    # The doctor (the pick, or a one-doctor clinic's only one: R13 - then `services` is the
+    # tenant snapshot, which IS that doctor's own list) and the unit of this booking.
+    booking_owner = _booking_professional(conversation, professionals)
+    unit = _booking_unit(conversation, tenant, services, booking_owner)
+    # TASK-085 A6: the SAME length the day/slot lists offered at this unit, so the hold, the
+    # re-checks and the event are never a different window than the slot the patient tapped.
+    duration = (
+        _service_duration_at(service, tenant, booking_owner, getattr(unit, "id", None))
+        if service
+        else (tenant.appointment_duration_min or 30)
     )
     start = datetime.fromisoformat(conversation.flow_selected_slot)
     if start.tzinfo is None:
@@ -5283,10 +5464,9 @@ async def _handle_confirmation(
 
     # The doctor's minimum notice, asked one last time at the write: the list or the AI's
     # card may be older than the rule's boundary (or the AI may have proposed the time).
-    booking_owner = _booking_professional(conversation, professionals)
-    # TASK-083 spec §8: where the visit happens. The write goes through the unit's agenda (its
-    # id on a local event, its location on a Google event) and the hold / row record it.
-    unit = _booking_unit(conversation, tenant, services, booking_owner)
+    # TASK-083 spec §8: where the visit happens (`unit`, resolved above). The write goes through
+    # the unit's agenda (its id on a local event, its location on a Google event) and the hold /
+    # row record it.
     calendar = _unit_calendar(calendar, unit)
     unit_kwargs: dict = {"unit_id": unit.id} if unit is not None else {}
     floor = booking_notice_floor(booking_owner, _notice_now(calendar.tzinfo))
@@ -5904,6 +6084,8 @@ async def _manage_step(
     body: str,
     appointments: list[dict],
     professionals: list | None = None,
+    *,
+    patient_name: str | None = None,
 ) -> FlowRouterResult:
     step = conversation.flow_step
     if step in (*_MANAGE_DAY_STEPS, STEP_MANAGE_SLOT, STEP_MANAGE_CONFIRM):
@@ -5990,7 +6172,13 @@ async def _manage_step(
 
     if step == STEP_MANAGE_CONFIRM:
         return await _manage_reschedule(
-            conversation, tenant, calendar, body, appointments, professionals
+            conversation,
+            tenant,
+            calendar,
+            body,
+            appointments,
+            professionals,
+            patient_name=patient_name,
         )
 
     # Unknown step -> let the LLM recover, keep state.
@@ -6104,6 +6292,8 @@ async def _manage_reschedule(
     body: str,
     appointments: list[dict],
     professionals: list | None = None,
+    *,
+    patient_name: str | None = None,
 ) -> FlowRouterResult:
     # PROMPT 4 hook: when the payment lifecycle lands, carry the existing
     # deposit onto the new slot (no refund, no re-charge), subject to
@@ -6128,6 +6318,23 @@ async def _manage_reschedule(
         start = start.replace(tzinfo=calendar.tzinfo)
     duration = _appt_duration_minutes(appt, tenant)
     end = start + timedelta(minutes=duration)
+
+    rebook = _rebook_ids(appt)
+    if rebook is not None:
+        # TASK-085 R (D-R11): "Outro horário" - the consultation's event already left the
+        # agenda; a NEW event is created instead of moving it.
+        return await _manage_rebook(
+            conversation,
+            tenant,
+            calendar,
+            appt,
+            start,
+            end,
+            duration=duration,
+            rebook=rebook,
+            professionals=professionals,
+            patient_name=patient_name,
+        )
 
     # Same last read as the booking "Confirmar" (`_handle_confirmation`), on the
     # appointment's OWN agenda - the one the patch below goes to. The event
@@ -6201,6 +6408,259 @@ async def _manage_reschedule(
             "google_event_id": event_id,
             "start_at": start,
             "end_at": end,
+        },
+    )
+
+
+# --------------------------------------------------------------------------
+# TASK-085 R (D-R11, mapa-u §1.5): "Outro horário" - the old consultation of an abandoned change
+# (its event already OFF the agenda) gets a new day and time through this same reschedule flow.
+# --------------------------------------------------------------------------
+
+# The one line when the old event's removal could not be confirmed (the agenda did not answer):
+# nothing was created; the confirmation card follows so "Confirmar" can be tapped again.
+REBOOK_RETRY_TEXT = "Não consegui agora, tente de novo em instantes."
+
+
+# UA3 review I1: how many ids one window may use (the plain one + numbered salts).
+REBOOK_ID_TRIES = 4
+
+
+def patient_rebook_event_id(
+    adjustment_id: UUID, *, calendar, start: datetime, end: datetime, salt: int = 0
+) -> str:
+    """The id of the event "Outro horário" creates for `adjustment_id` at [start, end).
+
+    The hub's scheme (UH fix round 1, `api/hub/calendar.py::_hub_rebook_event_id`): UA1's
+    `old_slot.rebook_event_id(source="patient")` (`difmove<hex>`, `loc_` on the secretarIA agenda)
+    + 16 hex digits of sha256("<change>|<UTC start>|<UTC end>"); `salt` > 0 appends "|<n>" to the
+    hashed text (a spent id of the same window). Only 0-9a-f are added: Google's base32hex holds;
+    at most 58 characters."""
+    first, last = (as_utc(value).astimezone(UTC).isoformat() for value in (start, end))
+    window = f"{first}|{last}"
+    text = f"{adjustment_id}|{window}" + (f"|{salt}" if salt else "")
+    digest = hashlib.sha256(text.encode()).hexdigest()[:16]
+    from secretaria.services.payments import old_slot  # lazy: a heavy module, one branch only
+
+    return old_slot.rebook_event_id(adjustment_id, calendar=calendar, source="patient") + digest
+
+
+async def _rebook_id_spent(calendar, event_id: str) -> bool:
+    """Whether `event_id` was created and then DELETED on this agenda (it reads `cancelled`).
+    False when the agenda cannot say (the caller reports its own failure)."""
+    try:
+        existing = await calendar.get_event(event_id)
+    except Exception as exc:  # noqa: BLE001 - cannot tell
+        logger.warning("flow_rebook_event_unreadable", error_type=type(exc).__name__)
+        return False
+    return bool(existing) and str(existing.get("status") or "") == "cancelled"
+
+
+def _event_instant(value: Any) -> datetime | None:
+    if isinstance(value, dict):
+        value = value.get("dateTime")
+    if isinstance(value, str):
+        try:
+            value = datetime.fromisoformat(value)
+        except ValueError:
+            return None
+    return as_utc(value) if isinstance(value, datetime) else None
+
+
+def _event_in_window(event: dict, start: datetime, end: datetime) -> bool:
+    """False only when the agenda's answer SAYS another window (Google `{"dateTime": ...}`, an
+    ISO string or a datetime); an answer without a window cannot be checked and stands."""
+    got_start, got_end = _event_instant(event.get("start")), _event_instant(event.get("end"))
+    if got_start is None or got_end is None:
+        return True
+    return (got_start, got_end) == (as_utc(start), as_utc(end))
+
+
+def _rebook_ids(appt: dict) -> tuple[UUID, UUID] | None:
+    """(clinic id, change id) of a consultation listed for "Outro horário"
+    (`patient_context.load_upcoming_appointments(rebooking_id=)`), else None."""
+    try:
+        adjustment_id = appt.get("rebook_adjustment_id")
+        tenant_id = appt.get("rebook_tenant_id")
+        if not adjustment_id or not tenant_id:
+            return None
+        return UUID(str(tenant_id)), UUID(str(adjustment_id))
+    except (TypeError, ValueError):
+        return None
+
+
+async def _ensure_rebook_old_event_gone(tenant_id: UUID, adjustment_id: UUID) -> bool:
+    """`old_slot.ensure_old_event_gone` on a session of its own (clean by construction: it
+    commits). The ONE database step of this router, and only on the rebook branch: the old
+    consultation's event must be off the agenda BEFORE its new one is created (UA1 fix round 1,
+    I1). Never raises: False = "try again"."""
+    from secretaria.core import database
+    from secretaria.services.payments import old_slot
+
+    try:
+        async with database.async_session_factory() as session:
+            return await old_slot.ensure_old_event_gone(
+                session, tenant_id=tenant_id, adjustment_id=adjustment_id
+            )
+    except Exception as exc:  # noqa: BLE001 - the patient is asked to try again
+        logger.warning("flow_rebook_ensure_failed", error_type=type(exc).__name__)
+        return False
+
+
+def _rebook_event_texts(
+    appt: dict, professionals: list | None, patient_name: str | None
+) -> tuple[str, str]:
+    """The new event's title and description, as every event of a consultation reads
+    (`service_change.agenda_summary` + `build_event_description` with the unit's lines)."""
+    service = str(appt.get("appointment_type") or "Consulta")
+    attendee = appt.get("attendee_name")
+    owner = unit = None
+    try:
+        if appt.get("professional_id"):
+            owner = _find_professional_by_id(professionals, UUID(str(appt["professional_id"])))
+        if appt.get("unit_id"):
+            unit = flow_units.find_unit(owner, UUID(str(appt["unit_id"])))
+    except (TypeError, ValueError):
+        owner = unit = None
+    description = build_event_description(
+        service=service,
+        insurance=appt.get("insurance"),
+        attendee_name=attendee,
+        **event_unit_fields(unit, owner),
+    )
+    return f"{service} - {attendee or patient_name or 'Paciente'}", description
+
+
+def _manage_confirm_unavailable(conversation: Conversation) -> FlowRouterResult:
+    """The confirmation card's agenda answered with an outage: a person takes over and the
+    conversation stays on the card (`_manage_reschedule`'s shape)."""
+    return FlowRouterResult(
+        action="calendar_unavailable",
+        flow_state=FlowState.MANAGE_BOOKING,
+        flow_step=STEP_MANAGE_CONFIRM,
+        flow_managing_appointment_id=_selected_managing_appointment_id(conversation),
+        flow_selected_day=conversation.flow_selected_day,
+        flow_selected_slot=conversation.flow_selected_slot,
+    )
+
+
+async def _manage_rebook(
+    conversation: Conversation,
+    tenant: Tenant,
+    calendar: CalendarService,
+    appt: dict,
+    start: datetime,
+    end: datetime,
+    *,
+    duration: int,
+    rebook: tuple[UUID, UUID],
+    professionals: list | None,
+    patient_name: str | None,
+) -> FlowRouterResult:
+    """"Confirmar" of "Outro horário" (mapa-u §1.5, UA1's order). 1) the old event is gone
+    (`_ensure_rebook_old_event_gone`; False -> one line + the card again, nothing created);
+    2) the new window is free on the consultation's own agenda (`slot_taken_at_confirm`, nothing
+    ignored - the consultation has no event there now); 3) the event is created OUTSIDE any
+    transaction under the id of THIS window (`patient_rebook_event_id`; a spent id is retried
+    with a numbered salt, at most REBOOK_ID_TRIES; exclusively on the secretarIA agenda); an
+    answer at another window is never bound nor deleted (retry text + the card). The row is
+    written by `flow_runner` with `old_slot.finish_rebook` in one transaction
+    (`appointment_reschedule["rebook"]`); a change decided meanwhile there discards this event.
+    Same service, doctor, unit and convênio."""
+    tenant_id, adjustment_id = rebook
+    managing_id = _selected_managing_appointment_id(conversation)
+    conversation_id = getattr(conversation, "id", None)
+    if not await _ensure_rebook_old_event_gone(tenant_id, adjustment_id):
+        retry = _manage_confirm_result(managing_id, appt, start, conversation.flow_selected_day)
+        retry.bubbles = [TextBubble(body=REBOOK_RETRY_TEXT), *retry.bubbles]
+        return retry
+
+    async def _reoffer() -> FlowRouterResult:
+        return await _reoffer_taken_slot(
+            conversation,
+            tenant,
+            calendar,
+            start,
+            duration_minutes=duration,
+            branch=MANAGE_DAY_BRANCH,
+            back_target=None,
+            professionals=professionals,
+        )
+
+    if await slot_taken_at_confirm(
+        calendar, start, end, source="flow_rebook", conversation_id=conversation_id
+    ):
+        return await _reoffer()
+    summary, description = _rebook_event_texts(appt, professionals, patient_name)
+    event = None
+    for salt in range(REBOOK_ID_TRIES):
+        # UA3 review I1: the id belongs to THIS window (a double tap is idempotent; another window
+        # is a fresh id); a SPENT id (created and deleted by an attempt that did not stand -
+        # agendas never re-use one) is retried with a numbered salt.
+        event_id = patient_rebook_event_id(
+            adjustment_id, calendar=calendar, start=start, end=end, salt=salt
+        )
+        try:
+            event = await create_event_exclusive(
+                calendar,
+                start=start,
+                end=end,
+                summary=summary,
+                description=description,
+                event_id=event_id,
+            )
+        except CalendarSlotTakenError:
+            return await _reoffer()
+        except Exception as exc:
+            # Google refuses a deleted id ("event id is taken"): only a confirmed-dead id is
+            # retried; anything else is a real outage.
+            if await _rebook_id_spent(calendar, event_id):
+                event = None
+                continue
+            if not isinstance(exc, CalendarUnavailableError):
+                logger.warning("flow_rebook_create_failed", error_type=type(exc).__name__)
+            return _manage_confirm_unavailable(conversation)
+        if str(event.get("status") or "") == "cancelled":
+            # The secretarIA agenda hands the deleted row back: spent as well.
+            event = None
+            continue
+        break
+    if event is None:
+        # Every id we may use for this window is spent: a person takes over.
+        logger.error("flow_rebook_event_ids_spent", adjustment_id=str(adjustment_id))
+        return _manage_confirm_unavailable(conversation)
+    if not _event_in_window(event, start, end):
+        # An event under our id at ANOTHER window (never ours to bind here, never ours to
+        # delete - it may be a twin's): nothing is written; the patient tries again.
+        logger.warning("flow_rebook_event_other_window", adjustment_id=str(adjustment_id))
+        retry = _manage_confirm_result(managing_id, appt, start, conversation.flow_selected_day)
+        retry.bubbles = [TextBubble(body=REBOOK_RETRY_TEXT), *retry.bubbles]
+        return retry
+    return FlowRouterResult(
+        action="reply",
+        bubbles=[
+            TextBubble(
+                body=(
+                    "Pronto! Sua consulta foi remarcada. ✅\n\n"
+                    f"{start.strftime('%d/%m/%Y às %H:%M')}"
+                )
+            )
+        ],
+        flow_state=FlowState.IDLE,
+        flow_step=None,
+        appointment_reschedule={
+            # The row is still found by the event it had (its id is never cleared).
+            "google_event_id": str(appt.get("google_event_id") or ""),
+            "start_at": start,
+            "end_at": end,
+            "rebook": {
+                "adjustment_id": adjustment_id,
+                "event_id": str(event.get("id") or event_id),
+                "event_link": event.get("htmlLink"),
+                # For `flow_runner`'s compensation (the event is discarded when the row is not
+                # written), as `appointment_edit["calendar"]`.
+                "calendar": calendar,
+            },
         },
     )
 
@@ -6451,7 +6911,11 @@ async def _resume_bubbles(
             [
                 ButtonBubble(
                     body=_service_detail_text(
-                        service, tenant, _selected_insurance(conversation)
+                        service,
+                        tenant,
+                        _selected_insurance(conversation),
+                        professional=booking_owner,
+                        unit_id=_service_card_unit_id(conversation, booking_owner, service),
                     ),
                     confirm_label=LABEL_BOOK_SERVICE,
                     cancel_label=LABEL_OTHER_SERVICE,

@@ -232,9 +232,9 @@ class TenantInsurance:
     `_load_independent_insurance`) - never a bare catalog id, because a custom
     "Outro" plan has none. `note` is `custom_payment_note` for a custom plan,
     else None (catalog metadata is never patient-facing prose). `mechanism` is the catalog
-    entry's payment mechanism ("desconhecido" for a custom plan or a legacy string); it is the
-    ONE catalog field the patient sees, as the list row's description
-    (`insurance_payment_copy.py`), and it never decides whether a deposit is charged.
+    entry's payment mechanism ("desconhecido" for a custom plan or a legacy string); the patient no
+    longer sees it (TASK-085 R D-R12 removed the list row's payment text) and it never decides
+    whether a deposit is charged.
     `accepted_by` maps professional id (str) -> the plan ids (str, same `id`
     space as `plans`) that doctor accepts; a doctor with no rows maps to
     nothing, which the flow renders as "not marked" - never as hidden.
@@ -628,28 +628,24 @@ async def _drop_tenant_plans(
 
 
 async def set_tenant_plans(
-    session: AsyncSession, tenant: Tenant, plans: Sequence[tuple[UUID, bool]]
+    session: AsyncSession, tenant: Tenant, catalog_ids: Sequence[UUID]
 ) -> None:
-    """Replace the clinic's CATALOG-BACKED plan set with `plans` = [(catalog_id,
-    charge_deposit)].
+    """Replace the clinic's CATALOG-BACKED plan set with `catalog_ids`.
 
     Only touches rows with `catalog_id IS NOT NULL` - the clinic's custom
-    "Outro" rows (TASK-008) are managed separately
-    (`create_tenant_custom_plan` / `update_tenant_plan_charge_deposit`) and are
-    never wiped by this replace, since the frontend has no way to enumerate
-    them by catalog id in the first place.
+    "Outro" rows (TASK-008) are managed separately (`create_tenant_custom_plan`)
+    and are never wiped by this replace, since the frontend has no way to
+    enumerate them by catalog id in the first place.
 
-    A plan kept keeps its row (and its doctors); only `charge_deposit` is
-    updated. A plan removed disappears from every doctor too. A plan added is
+    A plan kept keeps its row untouched (and its doctors). A plan removed
+    disappears from every doctor too. A plan added is
     accepted by NO doctor yet - the hub asks each doctor explicitly (decision
     2: a doctor's plans are chosen, not inherited - except the TASK-008 default
     for `clinic_with_exceptions`, which is about a doctor who never customized
     at all, not about a plan freshly added). Raises UnknownCatalogIds before
     writing anything. No commit.
     """
-    wanted: dict[UUID, bool] = {}
-    for catalog_id, charge_deposit in plans:
-        wanted[UUID(str(catalog_id))] = bool(charge_deposit)
+    wanted = list(dict.fromkeys(UUID(str(catalog_id)) for catalog_id in catalog_ids))
     catalog = {entry.id: entry for entry in await list_catalog(session)}
     unknown = [str(catalog_id) for catalog_id in wanted if catalog_id not in catalog]
     if unknown:
@@ -661,16 +657,9 @@ async def set_tenant_plans(
         if plan.catalog_id is not None
     }
     await _drop_tenant_plans(session, tenant.id, [cid for cid in current if cid not in wanted])
-    for catalog_id, charge_deposit in wanted.items():
-        existing = current.get(catalog_id)
-        if existing is not None:
-            existing.charge_deposit = charge_deposit
-        else:
-            session.add(
-                TenantInsurancePlan(
-                    tenant_id=tenant.id, catalog_id=catalog_id, charge_deposit=charge_deposit
-                )
-            )
+    for catalog_id in wanted:
+        if catalog_id not in current:
+            session.add(TenantInsurancePlan(tenant_id=tenant.id, catalog_id=catalog_id))
     await session.flush()
     _mirror_legacy(
         tenant,
@@ -685,7 +674,6 @@ async def create_tenant_custom_plan(
     *,
     custom_name: str,
     custom_payment_note: str | None,
-    charge_deposit: bool = True,
 ) -> TenantInsurancePlan:
     """The clinic's "Outro" convênio (TASK-008 §3.3) - outside the catalog.
 
@@ -695,28 +683,10 @@ async def create_tenant_custom_plan(
         tenant_id=tenant.id,
         custom_name=custom_name.strip()[:120],
         custom_payment_note=(custom_payment_note or "").strip()[:2000] or None,
-        charge_deposit=charge_deposit,
     )
     session.add(plan)
     await session.flush()
     logger.info("hub_insurance_custom_plan_created", tenant_id=str(tenant.id))
-    return plan
-
-
-async def update_tenant_plan_charge_deposit(
-    session: AsyncSession, tenant: Tenant, plan_id: UUID, charge_deposit: bool
-) -> TenantInsurancePlan:
-    """Toggle `charge_deposit` for ONE of the clinic's plans, catalog or custom.
-
-    A single small mutation for a field `set_tenant_plans`' catalog-only
-    replace cannot reach for custom rows (TASK-008 implementation decision -
-    see docs/CHECKPOINT_convenio_catalogo.md). Raises PlanNotFound. No commit.
-    """
-    plan = await session.get(TenantInsurancePlan, plan_id)
-    if plan is None or plan.tenant_id != tenant.id:
-        raise PlanNotFound(str(plan_id))
-    plan.charge_deposit = charge_deposit
-    await session.flush()
     return plan
 
 
@@ -726,7 +696,6 @@ async def create_professional_custom_plan(
     *,
     custom_name: str,
     custom_payment_note: str | None,
-    charge_deposit: bool = True,
 ) -> ProfessionalInsurancePlan:
     """A doctor's OWN "Outro" convênio - `independent` mode only (caller-gated).
 
@@ -737,7 +706,6 @@ async def create_professional_custom_plan(
         tenant_id=professional.tenant_id,
         custom_name=custom_name.strip()[:120],
         custom_payment_note=(custom_payment_note or "").strip()[:2000] or None,
-        charge_deposit=charge_deposit,
     )
     session.add(plan)
     await session.flush()
@@ -764,8 +732,8 @@ async def sync_legacy_insurances(
     the rest are kept verbatim in `Tenant.insurances` and logged as a count.
     Because this path has no per-doctor control, a plan ADDED here is granted
     to every active doctor - exactly what "the clinic accepts X" meant before
-    per-doctor acceptance existed. Plans already enabled keep their
-    `charge_deposit` and doctors. No commit.
+    per-doctor acceptance existed. Plans already enabled keep their row and
+    doctors. No commit.
     """
     entries = [{"id": entry.id, "name": entry.name} for entry in await list_catalog(session)]
     matched_ids: list[UUID] = []
@@ -992,8 +960,7 @@ async def reconcile_unmatched_insurances(
     extends the aliases of) a catalog entry. For each unresolved
     `insurance_catalog_unmatched` row whose normalized text is now one of
     `catalog_match_keys(catalog_entry)`: creates a `tenant_insurance_plans` row
-    for that tenant (idempotent - skipped if one already exists,
-    `charge_deposit=True` default) and stamps `resolved_at` +
+    for that tenant (idempotent - skipped if one already exists) and stamps `resolved_at` +
     `resolved_insurance_catalog_id`. Returns the count resolved. No commit.
     """
     keys = catalog_match_keys(catalog_entry)
@@ -1037,15 +1004,15 @@ async def reconcile_unmatched_insurances(
 
 @dataclass(frozen=True)
 class AppointmentPlan:
-    """One convênio row as the agenda shows it: an identity, a name, a flag.
+    """One convênio row as the agenda shows it: an identity and a name.
 
     Never carries `custom_payment_note` or catalog metadata - the read model is
-    the wrong place to widen what leaves the clinic's own screen.
+    the wrong place to widen what leaves the clinic's own screen. No sinal flag
+    either (TASK-085 R D-R12: a convênio never exempts the sinal).
     """
 
     id: UUID
     name: str
-    charge_deposit: bool
 
 
 @dataclass(frozen=True)
@@ -1060,11 +1027,11 @@ class AppointmentPlanLookup:
     ) -> AppointmentPlan | None:
         """The plan one appointment points at, or None.
 
-        Same precedence as `deposit_lifecycle._insurance_charges_deposit`: a
-        professional row (only ever set under `independent` mode) decides ALONE.
-        If it does not resolve (another clinic's id, a doctor row that carries no
-        name of its own) the answer is None - it never falls back to the clinic
-        row, or the agenda and the deposit guard would name different plans.
+        A professional row (only ever set under `independent` mode) decides
+        ALONE. If it does not resolve (another clinic's id, a doctor row that
+        carries no name of its own) the answer is None - it never falls back to
+        the clinic row, so the agenda never names a plan the booking did not
+        point at.
         """
         if professional_plan_id is not None:
             return self.professional.get(professional_plan_id)
@@ -1074,13 +1041,12 @@ class AppointmentPlanLookup:
 
 
 def _plan_from_row(
-    plan_id: UUID, charge_deposit: bool | None, custom_name: str | None, catalog_name: str | None
+    plan_id: UUID, custom_name: str | None, catalog_name: str | None
 ) -> AppointmentPlan | None:
     name = (catalog_name or custom_name or "").strip()
     if not name:
         return None
-    # `is not False`: same reading as the deposit guard - only an explicit false waives.
-    return AppointmentPlan(id=plan_id, name=name, charge_deposit=charge_deposit is not False)
+    return AppointmentPlan(id=plan_id, name=name)
 
 
 async def load_appointment_plans(
@@ -1104,7 +1070,6 @@ async def load_appointment_plans(
         rows = await session.execute(
             select(
                 TenantInsurancePlan.id,
-                TenantInsurancePlan.charge_deposit,
                 TenantInsurancePlan.custom_name,
                 InsuranceCatalog.name,
             )
@@ -1115,8 +1080,8 @@ async def load_appointment_plans(
                 TenantInsurancePlan.id.in_(clinic_ids),
             )
         )
-        for plan_id, charge, custom_name, catalog_name in rows.all():
-            resolved = _plan_from_row(plan_id, charge, custom_name, catalog_name)
+        for plan_id, custom_name, catalog_name in rows.all():
+            resolved = _plan_from_row(plan_id, custom_name, catalog_name)
             if resolved is not None:
                 clinic[plan_id] = resolved
 
@@ -1125,7 +1090,6 @@ async def load_appointment_plans(
         rows = await session.execute(
             select(
                 ProfessionalInsurancePlan.id,
-                ProfessionalInsurancePlan.charge_deposit,
                 ProfessionalInsurancePlan.custom_name,
                 InsuranceCatalog.name,
             )
@@ -1138,8 +1102,8 @@ async def load_appointment_plans(
                 ProfessionalInsurancePlan.id.in_(doctor_ids),
             )
         )
-        for plan_id, charge, custom_name, catalog_name in rows.all():
-            resolved = _plan_from_row(plan_id, charge, custom_name, catalog_name)
+        for plan_id, custom_name, catalog_name in rows.all():
+            resolved = _plan_from_row(plan_id, custom_name, catalog_name)
             if resolved is not None:
                 doctor[plan_id] = resolved
 

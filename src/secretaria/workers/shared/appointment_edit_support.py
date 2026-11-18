@@ -16,19 +16,30 @@ from secretaria.services.appointment_edit_flow import enter_edit_menu
 from secretaria.services.calendar import CalendarService
 from secretaria.services.flow_router import FlowRouterResult
 from secretaria.services.patient_context import load_upcoming_appointments
-from secretaria.services.payments import deposit_lifecycle
+from secretaria.services.payments import adjustment_suspension, deposit_lifecycle
 from secretaria.services.tenant_config import resolve_professional_calendar
 
 logger = get_logger(__name__)
 
+async def visit_suspended(session, tenant: Tenant, appointment: Appointment) -> bool:
+    """Is this consultation suspended by a change waiting for its Pix (S0's guard)? Every entry
+    that builds an `EditContext` sets `suspended` from it (TASK-085 R, contrato §3.8): the router
+    then refuses the edit with `SUSPENDED_VISIT_TEXT`."""
+    return (
+        await adjustment_suspension.open_suspension(
+            session, tenant_id=tenant.id, appointment_id=appointment.id
+        )
+        is not None
+    )
+
 
 async def edit_guards(session, tenant: Tenant, appointment: Appointment) -> tuple[bool, bool]:
-    """(paid_deposit, reschedule_blocked): what the menu must hide for a paid Pix deposit.
+    """(paid_deposit, reschedule_blocked): the Pix guards of the edit.
 
-    A PAID deposit hides doctor / convênio and turns a service change into a money decision
-    at Confirmar (2026-10-26: `service_change.request_service_change` settles the difference);
-    a deposit whose reschedule counter reached `tenant.pix_reschedule_limit` also hides
-    date / time.
+    A PAID deposit turns a change of any money field (service, unit, doctor, convênio -
+    TASK-085 R D-R1/D-R3) into a money decision at Confirmar
+    (`service_change.request_paid_change` settles the difference); a deposit whose reschedule
+    counter reached `tenant.pix_reschedule_limit` also hides date / time.
     """
     deposit = await deposit_lifecycle.get_deposit_for_appointment(session, appointment.id)
     paid = deposit is not None and deposit.status == PixDepositStatus.PAID
@@ -60,13 +71,16 @@ async def build_edit_context(
                 error_type=type(exc).__name__,
             )
             calendars[str(row.id)] = None
-    paid = blocked = False
+    paid = blocked = suspended = False
     appointment_id = getattr(conversation, "flow_managing_appointment_id", None)
     if appointment_id is not None:
         appointment = await session.get(Appointment, appointment_id)
         if appointment is not None and appointment.tenant_id == tenant.id:
             paid, blocked = await edit_guards(session, tenant, appointment)
-    return EditContext(calendars=calendars, paid_deposit=paid, reschedule_blocked=blocked)
+            suspended = await visit_suspended(session, tenant, appointment)
+    return EditContext(
+        calendars=calendars, paid_deposit=paid, reschedule_blocked=blocked, suspended=suspended
+    )
 
 
 async def typed_edit_entry(session, tenant: Tenant, patient_id) -> FlowRouterResult | None:
@@ -81,6 +95,9 @@ async def typed_edit_entry(session, tenant: Tenant, patient_id) -> FlowRouterRes
         return None
     appointment = await session.get(Appointment, UUID(upcoming[0]["id"]))
     paid, blocked = await edit_guards(session, tenant, appointment)
+    suspended = await visit_suspended(session, tenant, appointment)
     return enter_edit_menu(
-        tenant, upcoming[0], EditContext(paid_deposit=paid, reschedule_blocked=blocked)
+        tenant,
+        upcoming[0],
+        EditContext(paid_deposit=paid, reschedule_blocked=blocked, suspended=suspended),
     )

@@ -23,7 +23,7 @@ import asyncio
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 from uuid import UUID
 
 from sqlalchemy import select
@@ -48,6 +48,9 @@ from secretaria.services.channel_sender import CHANNEL_WHATSAPP
 from secretaria.services.payments.provider import PaymentAccount
 from secretaria.services.service_catalog import load_service_catalog, normalize, resolve_entries
 
+if TYPE_CHECKING:
+    from secretaria.services.flow_units import ShownTerms
+
 logger = get_logger(__name__)
 
 # --------------------------------------------------------------------------
@@ -66,6 +69,10 @@ class RuntimeAppointmentType:
     long_description: str | None = None
     # Pre-consult orientations shown to the patient, e.g. "Jejum de 8 horas".
     requirements: list[str] = field(default_factory=list)
+    # TASK-085 D3: True when the price differs between the units where the (single)
+    # professional does the service, so `price` is None until the patient picks the unit. The
+    # prompt and `get_service_info` then say "depends on the unit" - never a number or a range.
+    price_hidden: bool = False
 
 
 @dataclass(frozen=True)
@@ -1034,6 +1041,63 @@ async def can_activate_professional_aware(
 # --------------------------------------------------------------------------
 
 
+def entry_shown_terms(professional, entry: dict) -> "ShownTerms | None":
+    """TASK-085 D3 for one of `professional`'s catalog entries, for a text shown BEFORE the unit.
+
+    `professional` is a router-shaped snapshot (services/unit_booking.py: `units`,
+    `service_units`, `service_unit_terms`). Returns `flow_units.shown_terms(professional, entry)`
+    only when this professional has a per-unit value for the entry's service; None otherwise, and
+    the caller keeps the entry's own price/duration byte for byte (a clinic that does not use the
+    feature notices nothing).
+    """
+    # Lazy: flow_units -> unit_booking import this module at load time.
+    from secretaria.services import flow_units
+    from secretaria.services.service_terms import terms_for_entry
+
+    if professional is None or not terms_for_entry(
+        flow_units.service_unit_terms_of(professional), entry
+    ):
+        return None
+    return flow_units.shown_terms(professional, entry)
+
+
+async def _sole_professional_terms_view(
+    session: AsyncSession, tenant: Tenant, professional: Professional
+):
+    """The single professional's router-shaped view for D3, or None when they have no per-unit
+    value at all - then ONE query is the whole cost and nothing else is read."""
+    from secretaria.services.service_terms import load_terms
+    from secretaria.services.unit_booking import professional_terms_view
+
+    if not await load_terms(session, tenant.id, professional.id):
+        return None
+    return await professional_terms_view(session, tenant, professional)
+
+
+def _runtime_appointment_type(t: dict, tenant: Tenant, terms_view) -> RuntimeAppointmentType:
+    """One entry as the LLM sees it. With a per-unit value for its service (`terms_view`), the
+    D3 rule decides the price/duration (`entry_shown_terms`); otherwise the entry's own, as
+    always."""
+    price = t.get("price")
+    duration = int(t.get("duration_min", tenant.appointment_duration_min))
+    price_hidden = False
+    shown = entry_shown_terms(terms_view, t)
+    if shown is not None:
+        price, price_hidden = shown.price, shown.price_hidden
+        if shown.duration_min is not None:
+            duration = shown.duration_min
+    return RuntimeAppointmentType(
+        name=t["name"],
+        description=t.get("description"),
+        duration_min=duration,
+        price=price,
+        long_description=t.get("long_description"),
+        # Old stored dicts predate this field, so it may be absent entirely.
+        requirements=list(t.get("requirements") or []),
+        price_hidden=price_hidden,
+    )
+
+
 async def load_tenant_config(session: AsyncSession, tenant: Tenant) -> TenantRuntimeConfig:
     """Resolve a tenant row into the fully-decrypted runtime config.
 
@@ -1051,6 +1115,10 @@ async def load_tenant_config(session: AsyncSession, tenant: Tenant) -> TenantRun
     unchanged (multi-professional tenants are served by the
     `multi_professional` plugin tools instead, which resolve each
     professional's own config individually per tool call).
+
+    TASK-085: with one active professional, a service whose price differs between the units
+    where they do it gets `price=None, price_hidden=True` (D3 - never shown before the unit);
+    done at ONE unit only, that unit's price/duration (R2). See `entry_shown_terms`.
     """
     refresh_token = await get_google_refresh_token(session, tenant.id)
     business_hours = active_business_hours(tenant)
@@ -1065,6 +1133,7 @@ async def load_tenant_config(session: AsyncSession, tenant: Tenant) -> TenantRun
     context_doctor_message: str | None = None
     specialty: str | None = None
     about: str | None = None
+    terms_view = None
 
     active_professionals = (
         await session.scalars(
@@ -1091,19 +1160,11 @@ async def load_tenant_config(session: AsyncSession, tenant: Tenant) -> TenantRun
         context_doctor_message = professional.context_doctor_message
         specialty = professional.specialty
         about = professional.about
+        # TASK-085: the list is THIS professional's, so their per-unit values apply (D3).
+        # A clinic with 2+ professionals keeps the tenant's legacy list: no row can apply.
+        terms_view = await _sole_professional_terms_view(session, tenant, professional)
 
-    types = [
-        RuntimeAppointmentType(
-            name=t["name"],
-            description=t.get("description"),
-            duration_min=int(t.get("duration_min", tenant.appointment_duration_min)),
-            price=t.get("price"),
-            long_description=t.get("long_description"),
-            # Old stored dicts predate this field, so it may be absent entirely.
-            requirements=list(t.get("requirements") or []),
-        )
-        for t in active_types
-    ]
+    types = [_runtime_appointment_type(t, tenant, terms_view) for t in active_types]
     # What somebody can actually book: the effective list (the tenant's, or the sole
     # professional's) plus every active professional's own. `professional_appointment_types`
     # already honours NULL-vs-empty and drops inactive entries and retired catalog rows.

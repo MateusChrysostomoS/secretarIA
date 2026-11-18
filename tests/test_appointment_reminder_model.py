@@ -12,9 +12,12 @@ from tests._reminder_fixtures import NOW, db, make_appointment, tenant  # noqa: 
 
 
 def test_string_constants_are_the_spec_vocabulary():
-    assert ar.REMINDER_KINDS == ("custom", "day", "hour", "chat", "staff_confirm", "staff_edit")
+    assert ar.REMINDER_KINDS == (
+        "custom", "day", "hour", "chat", "staff_confirm", "staff_edit", "price_change",
+    )
     assert ar.REMINDER_KINDS_STAFF == ("staff_confirm", "staff_edit")
-    assert ar.REMINDER_KINDS_UNPLANNED == ("chat", "staff_confirm", "staff_edit")
+    # TASK-085 R 3rd round (D-R14): the price-change e-mail's link row is shown, never planned.
+    assert ar.REMINDER_KINDS_UNPLANNED == ("chat", "staff_confirm", "staff_edit", "price_change")
     assert all(len(kind) <= 16 for kind in ar.REMINDER_KINDS)  # kind is VARCHAR(16)
     assert ar.REMINDER_STATUSES == (
         "pending",

@@ -104,7 +104,8 @@ class Message(Base):
     # too (services/channel_sender.py::BrainMessageSender); a Portal catalogue list
     # (TASK-082) holds page 1 only, with full titles, plus
     #   "source": {"v", "kind", "scope", "pinned_ids", "total", "next_cursor"}
-    # - the pointer services/list_options.py resolves for the rest of the list.
+    # - the pointer services/list_options.py resolves for the rest of the list; a convênio
+    # card's pointer also has "has_clinic_notes" (TASK-085 R U1b).
     # `scope` is server-only: the wire projection never carries it.
     # `none_as_null=True`, like `attachment` below (same reasoning): a text message
     # must be SQL NULL here, never the JSON literal 'null', because

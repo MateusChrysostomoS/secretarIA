@@ -47,7 +47,7 @@ from secretaria.models.appointment_reminder import (
 )
 from secretaria.services import reminder_hooks, reminder_schedule
 from secretaria.services.flow_router import main_menu_buttons, menu_label
-from secretaria.services.payments import deposit_lifecycle
+from secretaria.services.payments import adjustment_suspension, deposit_lifecycle
 from secretaria.services.reminder_text import (
     ACTION_BOOK_ANOTHER,
     ACTION_CANCEL,
@@ -119,6 +119,9 @@ async def _also_scheduled(session, tenant: Tenant, appointment: Appointment, now
 
 
 _EDIT_ACTIONS = (ACTION_EDIT, ACTION_OTHER, ACTION_RESCHEDULE_THIS, ACTION_BOOK_ANOTHER)
+# TASK-085 R (contrato §3.8): on a SUSPENDED consultation an old card may only cancel it - that is
+# "Cancelar ambas" (the normal cancellation settles the change waiting for its Pix).
+_ALLOWED_ON_SUSPENDED = (ACTION_CANCEL, ACTION_GIVE_UP, ACTION_GIVE_UP_CONFIRM)
 
 
 async def _send_recurring_menu(client, patient_ref: str, tenant: Tenant) -> None:
@@ -196,6 +199,13 @@ async def handle_reminder_button(
             or _as_utc(appointment.start_at) <= now
         ):
             await client.send_text_message(to=reply.patient_ref, body=NOT_ACTIVE_TEXT)
+            return None
+        if action not in _ALLOWED_ON_SUSPENDED and await adjustment_suspension.is_suspended(
+            session, tenant_id=tenant.id, appointment_id=appointment.id
+        ):
+            await client.send_text_message(
+                to=reply.patient_ref, body=adjustment_suspension.SUSPENDED_VISIT_TEXT
+            )
             return None
         when = _format_appointment_when(appointment.start_at, tenant.timezone)
         if _as_utc(reminder.appointment_start_at) != _as_utc(appointment.start_at):

@@ -23,16 +23,21 @@ small on purpose. Two concerns:
   closed (`cancelled`) so a late "Sim" cannot open a second item for money the cancellation
   already counts.
 
+TASK-085 R: which consultations a change on a sinal SUSPENDS (`suspended_clause`,
+`visible_to_patient_clause`, `is_suspended`) lives in `adjustment_suspension` (models-only imports,
+so the patient-facing queries can use it without an import cycle) and is re-exported here.
+
 Nothing here refunds money (decision D15) and nothing commits. LGPD: logs carry ids, a status
 and an error type only.
 """
 
+import asyncio
 from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import datetime
 from uuid import UUID
 
-from sqlalchemy import select, update
+from sqlalchemy import event, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import object_session
 
@@ -41,23 +46,37 @@ from secretaria.models import PixDeposit, Tenant
 from secretaria.models.deposit_adjustment import (
     KIND_DECREASE,
     KIND_INCREASE,
+    MODE_SUSPEND,
+    OLD_SLOT_RELEASED,
     STATUS_APPLIED,
     STATUS_ASKED,
+    STATUS_AWAITING_CHOICE,
     STATUS_AWAITING_PAYMENT,
     STATUS_CANCELLED,
     STATUS_CANCELLED_VOID_PENDING,
     STATUS_COLLECT_DUE,
+    STATUS_OLD_SLOT_LOST,
     STATUS_REFUND_REQUESTED,
+    STATUS_RESTORING,
     DepositAdjustment,
 )
 from secretaria.models.payment_attention_item import (
     ATTENTION_OPEN,
     ATTENTION_RESOLVED,
     REASON_SERVICE_DIFF_COLLECT_DUE,
+    REASON_SERVICE_DIFF_UNPAID,
     PaymentAttentionItem,
 )
-from secretaria.services import tenant_config as cfg
-from secretaria.services.payments import attention, registry
+from secretaria.models.pix_deposit import FULFILLMENT_NEEDS_ATTENTION, FULFILLMENT_RESOLVED
+from secretaria.services import booking_hold, tenant_config as cfg
+from secretaria.services.payments import attention, old_slot, registry
+from secretaria.services.payments.adjustment_suspension import (
+    SUSPENDED_VISIT_TEXT,
+    is_suspended,
+    open_suspension,
+    suspended_clause,
+    visible_to_patient_clause,
+)
 from secretaria.services.payments.provider import PaymentStatus
 
 logger = get_logger(__name__)
@@ -75,6 +94,12 @@ SETTLED_CANCELLED_UNVOIDED = "cancelled_unvoided"
 SETTLED_PAYMENT_IN_FLIGHT = "payment_in_flight"  # the provider says PAID: left to the webhook
 SETTLED_QUESTION_CLOSED = "question_closed"  # an unanswered refund question: cancelled
 SETTLED_COLLECT_CLOSED = "collect_closed"  # a difference to collect: cancelled, item closed
+# TASK-085 R: the patient's choice after an expired difference Pix (that Pix was already voided)
+SETTLED_CHOICE_CLOSED = "choice_closed"
+# TASK-085 R 3rd round: a suspended change whose old consultation was being brought back
+# (`restoring`) or had lost its slot (`old_slot_lost`; its rebook item is closed too).
+SETTLED_SUSPENSION_CLOSED = "suspension_closed"
+REBOOK_CLOSED_BY_CANCEL_NOTE = "Consulta cancelada: não há mais o que remarcar."
 
 # Follow-up review I3: how a cancellation closes a "cobrar a diferença" item (the clinic's
 # existing resolution fields; no refund is promised - that money was never received).
@@ -90,11 +115,26 @@ def collect_item_key(provider: str, adjustment_id: UUID) -> str:
     )
 
 
+def unpaid_item_key(provider: str, adjustment_id: UUID) -> str:
+    """TASK-085 R D-R5: the dedupe key of the ONE `service_diff_unpaid` item of a change that was
+    applied at once and whose difference Pix expired unpaid (also `collect_due`, no
+    `deposit_id`)."""
+    return attention.attention_dedupe_key(
+        provider, f"adjustment:{adjustment_id}", REASON_SERVICE_DIFF_UNPAID
+    )
+
+
+def _collect_keys(provider: str, adjustment_id: UUID) -> tuple[str, str]:
+    """Both reasons a `collect_due` adjustment's item may carry."""
+    return collect_item_key(provider, adjustment_id), unpaid_item_key(provider, adjustment_id)
+
+
 async def open_collect_adjustments(
     session: AsyncSession, *, tenant_id: UUID, deposit: PixDeposit
 ) -> list[UUID]:
     """The `collect_due` adjustments of this sinal whose collect item is still OPEN (the clinic
-    has not settled the difference yet). Tenant-scoped."""
+    has not settled the difference yet) - `service_diff_collect_due` (the provider was down) or,
+    TASK-085 R, `service_diff_unpaid` (the Pix of an applied change expired). Tenant-scoped."""
     ids = list(
         (
             await session.scalars(
@@ -108,7 +148,7 @@ async def open_collect_adjustments(
     )
     if not ids:
         return []
-    keys = {collect_item_key(deposit.provider, i): i for i in ids}
+    keys = {key: i for i in ids for key in _collect_keys(deposit.provider, i)}
     open_keys = (
         await session.scalars(
             select(PaymentAttentionItem.dedupe_key).where(
@@ -118,7 +158,7 @@ async def open_collect_adjustments(
             )
         )
     ).all()
-    return [keys[key] for key in open_keys]
+    return list(dict.fromkeys(keys[key] for key in open_keys))
 
 
 async def held_total_cents(session: AsyncSession, deposit: PixDeposit) -> int:
@@ -149,6 +189,13 @@ class AdjustmentTotals:
 
     held_delta_cents: int = 0
     pending_difference_cents: int | None = None
+    # TASK-085 R (S4): how the open change waits - "suspend" (D-R4: the visit is suspended; also
+    # while the patient chooses after its Pix expired) or "applied" (D-R5); None = none open, or
+    # a legacy deferred one (`mode` NULL).
+    pending_difference_mode: str | None = None
+    # TASK-085 R (S7a): the `pending_edit` of that open `mode` change (server-side only: the hub
+    # turns it into `pending_change_summary`); None with `pending_difference_mode` None.
+    pending_edit: dict | None = None
 
 
 async def load_adjustment_totals(
@@ -168,29 +215,54 @@ async def load_adjustment_totals(
             DepositAdjustment.status,
             DepositAdjustment.provider_charge_id,
             DepositAdjustment.diff_cents,
+            DepositAdjustment.mode,
+            DepositAdjustment.pending_edit,
         ).where(
             DepositAdjustment.tenant_id == tenant_id,
             DepositAdjustment.deposit_id.in_(ids),
             DepositAdjustment.status.in_(
-                (STATUS_APPLIED, STATUS_REFUND_REQUESTED, STATUS_AWAITING_PAYMENT)
+                (
+                    STATUS_APPLIED,
+                    STATUS_REFUND_REQUESTED,
+                    STATUS_AWAITING_PAYMENT,
+                    STATUS_AWAITING_CHOICE,
+                    STATUS_RESTORING,
+                    STATUS_OLD_SLOT_LOST,
+                )
             ),
         )
     )
     delta: dict[UUID, int] = {}
     pending: dict[UUID, int] = {}
-    for deposit_id, kind, status, charge_id, diff in rows.all():
+    modes: dict[UUID, str] = {}
+    edits: dict[UUID, dict] = {}
+    for deposit_id, kind, status, charge_id, diff, mode, pending_edit in rows.all():
         if kind == KIND_INCREASE and status == STATUS_APPLIED and charge_id is not None:
             delta[deposit_id] = delta.get(deposit_id, 0) + int(diff)
         elif kind == KIND_DECREASE and status == STATUS_REFUND_REQUESTED:
             delta[deposit_id] = delta.get(deposit_id, 0) - int(diff)
         elif status == STATUS_AWAITING_PAYMENT:
             pending[deposit_id] = pending.get(deposit_id, 0) + int(diff)
+            if mode is not None:
+                modes[deposit_id] = mode
+                edits[deposit_id] = pending_edit
+        elif (
+            status in (STATUS_AWAITING_CHOICE, STATUS_RESTORING, STATUS_OLD_SLOT_LOST)
+            and mode is not None
+        ):
+            # The Pix was voided (nothing is pending payment) but the visit is still suspended:
+            # the patient chooses, its old consultation is being brought back (`restoring`) or
+            # its old slot was lost (`old_slot_lost`, the clinic rebooks) - 3rd round.
+            modes[deposit_id] = mode
+            edits[deposit_id] = pending_edit
     return {
         deposit_id: AdjustmentTotals(
             held_delta_cents=delta.get(deposit_id, 0),
             pending_difference_cents=pending.get(deposit_id),
+            pending_difference_mode=modes.get(deposit_id),
+            pending_edit=edits.get(deposit_id) if deposit_id in modes else None,
         )
-        for deposit_id in set(delta) | set(pending)
+        for deposit_id in set(delta) | set(pending) | set(modes)
     }
 
 
@@ -213,10 +285,20 @@ async def settle_open_adjustments(
     void failed (the payments sweep retries the void until it succeeds) - a payment that still
     lands then hits a non-awaiting adjustment, which is an ORPHAN item too.
     `close_questions` - each `asked` decrease moves to `cancelled`, and each `collect_due`
-    increase (the provider was down: the clinic was to collect the difference) moves to
-    `cancelled` with its still-open item closed (`COLLECT_CLOSED_NOTE`) - the consultation is
-    over, so the clinic is never told to collect for it. A release that may still be kept
-    (`close_questions=False`) leaves both open.
+    increase (the provider was down - or, TASK-085 R, the Pix of an applied change expired: the
+    clinic was to collect the difference) moves to `cancelled` with its still-open item closed
+    (`COLLECT_CLOSED_NOTE`) - the consultation is over, so the clinic is never told to collect for
+    it. A release that may still be kept (`close_questions=False`) leaves both open.
+
+    TASK-085 R: with `void_payments`, an `awaiting_choice` (the patient choosing after the Pix of a
+    suspended change expired - that Pix is already voided, the provider is not called) moves to
+    `cancelled`; and EVERY `mode="suspend"` change closed here has its new window's hold released
+    (`booking_hold.release_difference_hold_in`). This is the hook of every cancellation and of the
+    clinic's "Liberar horário" (D-R9) - nobody else releases that hold.
+    3rd round: `restoring` and `old_slot_lost` close the same way (`cancelled`, no provider call;
+    the `service_diff_rebook_due` item of an `old_slot_lost` is closed), and every suspended change
+    closed without its Pix (`awaiting_choice` / `restoring` / `old_slot_lost`) has its `difkeep`
+    restore event discarded after the caller's commit (`discard_restore_after_commit`).
 
     Returns `{adjustment_id: outcome}`. Idempotent (a second call finds nothing open). Never
     commits, never refunds.
@@ -225,7 +307,14 @@ async def settle_open_adjustments(
 
     statuses: list[str] = []
     if void_payments:
-        statuses.append(STATUS_AWAITING_PAYMENT)
+        statuses.extend(
+            (
+                STATUS_AWAITING_PAYMENT,
+                STATUS_AWAITING_CHOICE,
+                STATUS_RESTORING,
+                STATUS_OLD_SLOT_LOST,
+            )
+        )
     if close_questions:
         statuses.extend((STATUS_ASKED, STATUS_COLLECT_DUE))
     if not statuses:
@@ -254,8 +343,9 @@ async def settle_open_adjustments(
                     update(PaymentAttentionItem)
                     .where(
                         PaymentAttentionItem.tenant_id == tenant.id,
-                        PaymentAttentionItem.dedupe_key
-                        == collect_item_key(deposit.provider, adjustment.id),
+                        PaymentAttentionItem.dedupe_key.in_(
+                            _collect_keys(deposit.provider, adjustment.id)
+                        ),
                         PaymentAttentionItem.status == ATTENTION_OPEN,
                     )
                     .values(
@@ -278,6 +368,26 @@ async def settle_open_adjustments(
                 settled[str(adjustment.id)] = SETTLED_QUESTION_CLOSED
                 logger.info("service_change_question_closed_by_cancel", **log)
             continue
+        if adjustment.status in (STATUS_AWAITING_CHOICE, STATUS_RESTORING, STATUS_OLD_SLOT_LOST):
+            # The Pix of these was voided before; nothing to call at the provider.
+            from_status = adjustment.status
+            if await move_adjustment(
+                session, adjustment, from_status=from_status,
+                to_status=STATUS_CANCELLED, now=now,
+            ):
+                await _release_hold(session, adjustment)
+                if from_status == STATUS_OLD_SLOT_LOST:
+                    await close_rebook_item(session, tenant, deposit, adjustment, now=now)
+                discard_restore_after_commit(session, adjustment)
+                settled[str(adjustment.id)] = (
+                    SETTLED_CHOICE_CLOSED
+                    if from_status == STATUS_AWAITING_CHOICE
+                    else SETTLED_SUSPENSION_CLOSED
+                )
+                logger.info(
+                    "service_change_choice_closed_by_cancel", from_status=from_status, **log
+                )
+            continue
 
         state = await _void_difference(session, tenant, deposit, adjustment, log)
         if state == SETTLED_PAYMENT_IN_FLIGHT:
@@ -295,12 +405,135 @@ async def settle_open_adjustments(
             session, adjustment, from_status=STATUS_AWAITING_PAYMENT,
             to_status=target, now=now,
         ):
+            await _release_hold(session, adjustment)
             settled[str(adjustment.id)] = state
             voided_cents += int(adjustment.diff_cents or 0)
             logger.info("service_change_cancelled_by_cancel", outcome=state, **log)
     if void_payments:
         session.info[(_VOIDED_KEY, deposit.id)] = voided_cents
     return settled
+
+
+# --------------------------------------------------------------------------
+# TASK-085 R 3rd round (UA1 delta 10): a `difkeep` restore event never outlives its change
+# --------------------------------------------------------------------------
+
+# `session.info` keys: the changes whose restore event is to be discarded after the commit, and
+# "the listeners are on".
+_DISCARD_KEY = "old_slot_restore_discards"
+_DISCARD_LISTENING = "old_slot_restore_discard_listening"
+# Strong references to the post-commit tasks (an unreferenced task may be collected mid-run).
+_DISCARD_TASKS: set[asyncio.Task] = set()
+
+
+def discard_restore_after_commit(
+    session: AsyncSession, adjustment: DepositAdjustment
+) -> None:
+    """A suspended change is being closed in `session` by a path other than "Manter a antiga"
+    (a cancellation, "Cancelar ambas", "Reenviar o Pix"): once THIS transaction commits,
+    `old_slot.discard_restore_event` deletes the change's `difkeep` restore event if a restore
+    left one behind (UA1 fix round 2, M3). Only a change whose old event already left the
+    agenda (`old_slot='released'`) can have one. A rollback drops the request. Never raises.
+
+    Why after the commit: before it, the change is still restorable - deleting its restore
+    event then would make every later restore of the same deterministic id fail.
+
+    Fix round 1 (review M1): a SAVEPOINT released / rolled back inside the transaction neither
+    fires nor drops it. This is the fast path only: a process that dies right after the commit
+    loses the task, and the payments sweep picks the change up
+    (`service_change._discard_left_restore_events`)."""
+    if adjustment.mode != MODE_SUSPEND or adjustment.old_slot != OLD_SLOT_RELEASED:
+        return
+    try:
+        sync = session.sync_session
+        pending = sync.info.setdefault(_DISCARD_KEY, set())
+        pending.add((adjustment.tenant_id, adjustment.id))
+        if not sync.info.get(_DISCARD_LISTENING):
+            event.listen(sync, "after_commit", _spawn_discards)
+            event.listen(sync, "after_rollback", _drop_discards)
+            sync.info[_DISCARD_LISTENING] = True
+    except Exception as exc:  # noqa: BLE001 - best effort: the difkeep is a rare leftover
+        logger.warning("old_slot_discard_schedule_failed", error_type=type(exc).__name__)
+
+
+def _spawn_discards(sync_session) -> None:
+    # Fix round 1 (review M1): SQLAlchemy also dispatches `after_commit` when a SAVEPOINT is
+    # released - only the ROOT transaction's commit counts.
+    if sync_session.in_nested_transaction():
+        return
+    pending = sync_session.info.pop(_DISCARD_KEY, None)
+    if not pending:
+        return
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:  # pragma: no cover - always inside the app's event loop
+        logger.warning("old_slot_discard_no_loop", count=len(pending))
+        return
+    for tenant_id, adjustment_id in pending:
+        task = loop.create_task(old_slot.discard_restore_event(tenant_id, adjustment_id))
+        _DISCARD_TASKS.add(task)
+        task.add_done_callback(_DISCARD_TASKS.discard)
+
+
+def _drop_discards(sync_session) -> None:
+    # A SAVEPOINT rolled back leaves the outer transaction (and its request) alive.
+    if sync_session.in_nested_transaction():
+        return
+    sync_session.info.pop(_DISCARD_KEY, None)
+
+
+async def drain_restore_discards() -> None:
+    """Wait for every post-commit restore-event discard still running (tests, shutdown)."""
+    while _DISCARD_TASKS:
+        await asyncio.gather(*list(_DISCARD_TASKS), return_exceptions=True)
+
+
+async def close_rebook_item(
+    session: AsyncSession,
+    tenant: Tenant,
+    deposit: PixDeposit,
+    adjustment: DepositAdjustment,
+    *,
+    now: datetime,
+) -> None:
+    """3rd round: an `old_slot_lost` change closed by a cancellation - its "remarque com o
+    paciente" item (`old_slot.rebook_item_key`) is closed too (nothing is left to rebook), and
+    the sinal leaves "needs attention" when nothing else of it is open (the `finish_rebook`
+    rule; a cancellation item opened later flags it again)."""
+    await session.execute(
+        update(PaymentAttentionItem)
+        .where(
+            PaymentAttentionItem.tenant_id == tenant.id,
+            PaymentAttentionItem.dedupe_key
+            == old_slot.rebook_item_key(deposit.provider, adjustment.id),
+            PaymentAttentionItem.status == ATTENTION_OPEN,
+        )
+        .values(
+            status=ATTENTION_RESOLVED,
+            resolved_at=now,
+            resolution_action="other",
+            resolution_note=REBOOK_CLOSED_BY_CANCEL_NOTE,
+            resolved_by_name=COLLECT_CLOSED_BY,
+        )
+        .execution_options(synchronize_session=False)
+    )
+    still_open = await session.scalar(
+        select(func.count())
+        .select_from(PaymentAttentionItem)
+        .where(
+            PaymentAttentionItem.tenant_id == tenant.id,
+            PaymentAttentionItem.deposit_id == deposit.id,
+            PaymentAttentionItem.status == ATTENTION_OPEN,
+        )
+    )
+    if not still_open and deposit.fulfillment_status == FULFILLMENT_NEEDS_ATTENTION:
+        deposit.fulfillment_status = FULFILLMENT_RESOLVED
+
+
+async def _release_hold(session: AsyncSession, adjustment: DepositAdjustment) -> None:
+    """TASK-085 R: a suspended change that closes frees the new window it was holding."""
+    if adjustment.mode == MODE_SUSPEND:
+        await booking_hold.release_difference_hold_in(session, adjustment.id)
 
 
 def voided_difference_hint(deposit: PixDeposit) -> int:
@@ -351,12 +584,23 @@ __all__ = [
     "SETTLED_COLLECT_CLOSED",
     "AdjustmentTotals",
     "SETTLED_CANCELLED_UNVOIDED",
+    "SETTLED_CHOICE_CLOSED",
+    "SETTLED_SUSPENSION_CLOSED",
+    "close_rebook_item",
+    "discard_restore_after_commit",
+    "drain_restore_discards",
     "SETTLED_PAYMENT_IN_FLIGHT",
     "SETTLED_QUESTION_CLOSED",
     "SETTLED_VOIDED",
     "held_cents_hint",
     "held_total_cents",
+    "SUSPENDED_VISIT_TEXT",
+    "is_suspended",
+    "open_suspension",
+    "suspended_clause",
+    "visible_to_patient_clause",
     "collect_item_key",
+    "unpaid_item_key",
     "load_adjustment_totals",
     "open_collect_adjustments",
     "settle_open_adjustments",

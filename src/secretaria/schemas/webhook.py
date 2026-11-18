@@ -731,6 +731,18 @@ _ACTION_BUTTON_PREFIXES: tuple[str, ...] = (
     # only for the patient of that sinal, in the tapping conversation's clinic.
     "svcdiffyes|",
     "svcdiffno|",
+    # TASK-085 R (D-R4/D-R7): the Pix of the difference of a change expired unpaid in a clinic
+    # that books only after the sinal - "Manter a antiga" / "Reenviar o Pix" / "Cancelar ambas".
+    # The trailing id is the DepositAdjustment's (services/payments/service_change.py
+    # `CHOICE_ACTIONS`); the handler honours it only for the patient of that sinal, in the
+    # tapping conversation's clinic (workers/shared/service_change_actions.py).
+    "svcdiffkeep|",
+    "svcdiffresend|",
+    "svcdiffboth|",
+    # TASK-085 R, 3rd round (D-R11): "Outro horário" - the old consultation's slot was taken while
+    # it was out of the agenda; the patient picks a new slot for it (same service, doctor, unit).
+    # Same DepositAdjustment id and the same patient/clinic scoping as the three above.
+    "svcdiffother|",
 )
 
 

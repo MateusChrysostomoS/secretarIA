@@ -66,7 +66,7 @@ from secretaria.models.appointment_reminder import (
 from secretaria.services import cancellation_notice, reminder_hooks
 from secretaria.services.channel_sender import CHANNEL_BRAIN_MESSAGE
 from secretaria.services.entitlements_client import EntitlementSummary, get_entitlements
-from secretaria.services.payments import deposit_lifecycle
+from secretaria.services.payments import adjustment_suspension, deposit_lifecycle
 from secretaria.services.reminder_delivery import (
     DeliveryOutcome,
     ReminderJob,
@@ -250,6 +250,13 @@ async def _prepare(reminder_id: UUID, attempt: int, now: datetime) -> ReminderJo
             closing = _guard(reminder, appointment, now)
             if closing is not None:
                 _close(reminder, *closing)
+                return None
+            # TASK-085 R (D-R4): a consultation waiting for the Pix of a change's difference is
+            # hidden from the patient - its reminder is skipped (the change's end re-plans them).
+            if await adjustment_suspension.is_suspended(
+                session, tenant_id=reminder.tenant_id, appointment_id=appointment.id
+            ):
+                _close(reminder, REMINDER_STATUS_SKIPPED, "appointment_suspended")
                 return None
             tenant = await session.get(Tenant, reminder.tenant_id)
             patient = (

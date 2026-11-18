@@ -47,7 +47,11 @@ from secretaria.models import Tenant
 from secretaria.models.professional import Professional
 from secretaria.schemas.config import TenantConfigRead
 from secretaria.schemas.professional import ProfessionalListItem
-from secretaria.services import reminder_schedule, tenant_config as cfg
+from secretaria.services import (
+    hub_unit_terms as unit_terms_service,
+    reminder_schedule,
+    tenant_config as cfg,
+)
 from secretaria.services.greeting_template import (
     clinic_description_budget,
     greeting_preview_template,
@@ -104,6 +108,13 @@ class ClinicDescriptionTooLong(ActivationBlocked):
 
 class PaymentSettingsInvalid(payment_settings.PaymentSettingsInvalid):
     """Re-exported so both PUT handlers catch it through this module, like every other rule."""
+
+
+# Re-exported so both PUT handlers reach the per-unit rules through this module, like every other
+# rule (TASK-085; the logic lives in services/hub_unit_terms.py).
+UnitTermsInvalid = unit_terms_service.UnitTermsInvalid
+check_unit_terms = unit_terms_service.check_unit_terms
+apply_unit_terms = unit_terms_service.apply_unit_terms
 
 
 class UnknownServiceIds(Exception):
@@ -423,7 +434,12 @@ def apply_professional_config(professional: Professional, data: dict) -> None:
     """
     for field_name in PROFESSIONAL_CONFIG_FIELDS:
         if field_name in data:
-            setattr(professional, field_name, data[field_name])
+            value = data[field_name]
+            if field_name == "appointment_types" and isinstance(value, list):
+                # `unit_terms` / `apply_to_all` are wire-only (TASK-085): they go to
+                # professional_service_unit_terms via `apply_unit_terms`, never into the JSON.
+                value = unit_terms_service.strip_unit_fields(value)
+            setattr(professional, field_name, value)
 
 
 # ---------------------------------------------------------------------------
@@ -537,7 +553,9 @@ async def professional_list_item(
         # wire can never claim one thing while the bot does another.
         business_hours=professional.business_hours or {},
         business_hours_inherited=cfg.professional_inherits_business_hours(professional),
-        appointment_types=professional.appointment_types or [],
+        appointment_types=await unit_terms_service.entries_with_terms(
+            session, professional, professional.appointment_types or []
+        ),
         appointment_types_inherited=cfg.professional_inherits_appointment_types(professional),
         has_calendar=completeness.has_calendar,
         calendar_source=await cfg.professional_calendar_source(session, professional, tenant),

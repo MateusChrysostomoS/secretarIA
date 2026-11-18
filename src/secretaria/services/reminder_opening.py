@@ -51,6 +51,7 @@ from secretaria.models.appointment_reminder import (
 )
 from secretaria.services.flow_router import reactivation_gap_minutes
 from secretaria.services.patient_context import as_utc
+from secretaria.services.payments import adjustment_suspension
 
 OPEN = "open"
 SKIP_NO_PATIENT = "no_patient"
@@ -95,6 +96,8 @@ async def nearest_live_appointment(
             Appointment.patient_id == patient_id,
             Appointment.status.in_(LIVE_APPOINTMENT_STATUSES),
             Appointment.start_at > now,
+            # TASK-085 R: a suspended consultation is not the patient's "next" one.
+            adjustment_suspension.visible_to_patient_clause(),
         )
         .order_by(Appointment.start_at)
         .limit(1)

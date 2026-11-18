@@ -5,7 +5,6 @@ GET     /tenants/me/insurance-catalog                        - global catalog.
 GET     /tenants/me/insurance-plans                          - the clinic's plans.
 PUT     /tenants/me/insurance-plans                          - replace the catalog-backed subset.
 POST    /tenants/me/insurance-plans/custom                   - the clinic's "Outro".
-PATCH   /tenants/me/insurance-plans/{plan_id}                - toggle charge_deposit.
 GET     /tenants/me/professionals/{id}/insurance-plans       - doctor's picker.
 PUT     /tenants/me/professionals/{id}/insurance-plans       - replace doctor's (shape by mode).
 POST    /tenants/me/professionals/{id}/insurance-plans/custom - doctor's own "Outro"
@@ -13,8 +12,12 @@ POST    /tenants/me/professionals/{id}/insurance-plans/custom - doctor's own "Ou
 
 Product decisions (models/insurance.py, TASK-006 + TASK-008): the catalog is
 GLOBAL; `Tenant.insurance_mode` (nullable, no default) picks one of three
-acceptance topologies and gates every per-doctor section below until chosen;
-`charge_deposit` is per line (clinic or doctor), never global.
+acceptance topologies and gates every per-doctor section below until chosen.
+TASK-085 R D-R12/U1b (owner, 2026-11-18): a convênio never exempts the sinal - the
+old per-line "não cobra sinal" option is DELETED: no read carries it, the toggle
+route is gone, and an older client that still SENDS the flag is not refused (the
+input schemas ignore it). The two legacy columns stay in the database, unmapped,
+until a later release drops them.
 
 Never entitlement-gated: like the service catalog and every config save
 (api/hub/services.py, api/hub/config.py), this is core wiring, not an addon.
@@ -45,7 +48,6 @@ from secretaria.schemas.insurance import (
     ProfessionalInsurancePlansRead,
     ProfessionalInsurancePlansUpdate,
     TenantInsurancePlanCustomCreate,
-    TenantInsurancePlanDepositUpdate,
     TenantInsurancePlanOrderUpdate,
     TenantInsurancePlanRead,
     TenantInsurancePlansUpdate,
@@ -66,7 +68,6 @@ from secretaria.services.insurance_catalog import (
     set_professional_independent_plans,
     set_tenant_plan_order,
     set_tenant_plans,
-    update_tenant_plan_charge_deposit,
 )
 
 logger = get_logger(__name__)
@@ -108,7 +109,6 @@ async def _tenant_plans(session: AsyncSession, tenant: Tenant) -> list[TenantIns
             name=entry.name if entry is not None else str(plan.custom_name or ""),
             is_custom=entry is None,
             custom_payment_note=plan.custom_payment_note if entry is None else None,
-            charge_deposit=plan.charge_deposit,
             sort_order=plan.sort_order,
         )
         for plan, entry in await list_tenant_plans(session, tenant.id)
@@ -232,11 +232,7 @@ async def put_tenant_insurance_plans(
     tenant_id = tenant.id
     before = await _visible_plan_count(session, tenant_id)
     try:
-        await set_tenant_plans(
-            session,
-            tenant,
-            [(cid, plan.charge_deposit) for cid, plan in zip(ids, body.plans, strict=True)],
-        )
+        await set_tenant_plans(session, tenant, ids)
     except UnknownCatalogIds as exc:
         await session.rollback()
         raise _bad_ids(
@@ -251,7 +247,6 @@ async def put_tenant_insurance_plans(
         "hub_insurance_plans_updated",
         tenant_id=str(tenant.id),
         plan_count=len(plans),
-        no_deposit_count=sum(1 for plan in plans if not plan.charge_deposit),
     )
     return plans
 
@@ -280,7 +275,6 @@ async def post_tenant_insurance_plan_custom(
         tenant,
         custom_name=body.custom_name,
         custom_payment_note=body.custom_payment_note,
-        charge_deposit=body.charge_deposit,
     )
     await _refuse_growth(session, tenant_id, before)
     await session.commit()
@@ -290,7 +284,6 @@ async def post_tenant_insurance_plan_custom(
         name=plan.custom_name or "",
         is_custom=True,
         custom_payment_note=plan.custom_payment_note,
-        charge_deposit=plan.charge_deposit,
     )
 
 
@@ -321,31 +314,6 @@ async def put_tenant_insurance_plan_order(
     return plans
 
 
-@router.patch("/insurance-plans/{plan_id}", response_model=TenantInsurancePlanRead)
-async def patch_tenant_insurance_plan(
-    plan_id: str,
-    body: TenantInsurancePlanDepositUpdate,
-    tenant: Tenant = Depends(get_current_tenant),
-    session: AsyncSession = Depends(get_session),
-) -> TenantInsurancePlanRead:
-    """Toggle `charge_deposit` for ONE plan (catalog-backed or custom)."""
-    try:
-        plan_uuid = UUID(plan_id)
-    except ValueError:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "Plan not found") from None
-    try:
-        await update_tenant_plan_charge_deposit(session, tenant, plan_uuid, body.charge_deposit)
-    except PlanNotFound:
-        await session.rollback()
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "Plan not found") from None
-    await session.commit()
-    plans = await _tenant_plans(session, tenant)
-    updated = next((p for p in plans if p.id == plan_id), None)
-    if updated is None:  # pragma: no cover - defensive, cannot happen post-commit
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "Plan not found")
-    return updated
-
-
 # ---------------------------------------------------------------------------
 # The doctor's plans
 # ---------------------------------------------------------------------------
@@ -360,7 +328,6 @@ async def _independent_selectable(
             catalog_id=str(entry.id),
             name=entry.name,
             is_custom=False,
-            charge_deposit=True,
         )
         for entry in await list_catalog(session)
     ]
@@ -371,7 +338,6 @@ async def _independent_selectable(
             name=str(plan.custom_name or ""),
             is_custom=True,
             custom_payment_note=plan.custom_payment_note,
-            charge_deposit=plan.charge_deposit,
         )
         for plan, entry in await list_professional_plans(session, professional.id)
         if entry is None
@@ -548,7 +514,6 @@ async def post_professional_insurance_plan_custom(
         professional,
         custom_name=body.custom_name,
         custom_payment_note=body.custom_payment_note,
-        charge_deposit=body.charge_deposit,
     )
     await _refuse_growth(session, tenant_id, before)
     await session.commit()
@@ -558,5 +523,4 @@ async def post_professional_insurance_plan_custom(
         name=plan.custom_name or "",
         is_custom=True,
         custom_payment_note=plan.custom_payment_note,
-        charge_deposit=plan.charge_deposit,
     )

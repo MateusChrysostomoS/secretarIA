@@ -32,13 +32,14 @@ with every active doctor's.
 """
 
 import asyncio
+import hashlib
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from uuid import UUID
 from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
-from sqlalchemy import Row, and_, select, update
+from sqlalchemy import Row, and_, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from secretaria.api.hub.deps import get_agenda_viewer, get_current_tenant
@@ -56,6 +57,13 @@ from secretaria.models import (
     Unit,
 )
 from secretaria.models.appointment import LIVE_APPOINTMENT_STATUSES
+from secretaria.models.appointment_reminder import REMINDER_KIND_PRICE_CHANGE
+from secretaria.models.deposit_adjustment import (
+    MODE_SUSPEND,
+    STATUS_OLD_SLOT_LOST,
+    SUSPENDED_STATUSES,
+    DepositAdjustment,
+)
 from secretaria.models.patient import Patient
 from secretaria.models.pix_deposit import PixDepositStatus
 from secretaria.schemas.calendar import (
@@ -114,13 +122,20 @@ from secretaria.services.calendar import (
     GOOGLE_RECONNECT_CODE,
     CalendarService,
     GoogleTokenRevokedError,
+    build_event_description,
     is_event_not_found,
     overlaps_other_agenda,
 )
 from secretaria.services.insurance_catalog import AppointmentPlan, load_appointment_plans
 from secretaria.services.local_calendar import LocalCalendarService, list_unpushed_events
 from secretaria.services.patient_context import as_utc
-from secretaria.services.payments import adjustment_queries, deposit_lifecycle, failure_reason
+from secretaria.services.payments import (
+    adjustment_queries,
+    deposit_lifecycle,
+    failure_reason,
+    old_slot,
+    service_change,
+)
 from secretaria.services.tenant_config import (
     TenantRuntimeConfig,
     list_active_professionals,
@@ -129,6 +144,8 @@ from secretaria.services.tenant_config import (
 )
 from secretaria.services.unit_booking import (
     UnitRefused,
+    booking_unit_fields,
+    calendar_at_unit,
     check_unit,
     scoped_calendar,
     service_offered_at_unit,
@@ -169,6 +186,80 @@ async def _refuse_if_slot_is_held(
             status.HTTP_409_CONFLICT,
             detail={"code": "slot_held_awaiting_payment", "message": SLOT_HELD_MESSAGE},
         )
+
+
+async def _refuse_if_suspended(
+    session: AsyncSession, tenant: Tenant, appt: Appointment, *, rebook: bool = False
+) -> DepositAdjustment | None:
+    """TASK-085 R D-R10 (mapa-u §1.6): a consultation waiting for the Pix of the difference of a
+    change (the patient's or the clinic's) is SUSPENDED - it left the agenda while the patient
+    pays, and the clinic has nothing to do with it: edit, reschedule, cancel, release and every
+    status change are 409 `appointment_suspended`, raised before Google, the money or the patient
+    are touched (D-R9's "Liberar horário" no longer exists for it).
+
+    The exception (D-R11): a change in `old_slot_lost` - the old slot was taken while the patient
+    did not pay, and the clinic must reschedule or cancel with the patient. With `rebook=True`
+    (POST /reschedule and /cancel only) that change is RETURNED instead of refused; any other
+    route still answers 409, with a message saying what the clinic can do. None = not
+    suspended (today's behaviour)."""
+    change = await adjustment_queries.open_suspension(
+        session, tenant_id=tenant.id, appointment_id=appt.id
+    )
+    if change is None:
+        return None
+    rebook_due = change.status == STATUS_OLD_SLOT_LOST
+    if rebook and rebook_due:
+        return change
+    refused = staff_appointment_edit.suspended_error(rebook_due=rebook_due)
+    raise HTTPException(
+        status.HTTP_409_CONFLICT, detail=_detail(refused.code, refused.message)
+    )
+
+
+async def _refuse_stale_rebook(
+    session: AsyncSession, tenant: Tenant, appt: Appointment, wanted: UUID | None
+) -> None:
+    """TASK-085 R UH2 (UF review I2): the clinic acted from a GET /awaiting-payment "rebook" row
+    (`rebook_adjustment_id` = that row's `id`). Unless that change is STILL this consultation's
+    `old_slot_lost` one (tenant- and consultation-scoped `open_suspension`), the intent is stale -
+    the patient rebooked, the visit was cancelled or the change moved on - and nothing may run:
+    409 `appointment_changed`, before the agenda, the money or the patient are touched. The
+    locked step each route already has re-checks the same change (`finish_rebook` on it; the
+    cancel's `_recheck_rebook_due_cancel`). None = no rebook intent: today's behaviour."""
+    if wanted is None:
+        return
+    change = await adjustment_queries.open_suspension(
+        session, tenant_id=tenant.id, appointment_id=appt.id
+    )
+    if (
+        appt.status in LIVE_APPOINTMENT_STATUSES
+        and change is not None
+        and change.id == wanted
+        and change.status == STATUS_OLD_SLOT_LOST
+    ):
+        return
+    logger.info(
+        "hub_rebook_intent_stale", appointment_id=str(appt.id), adjustment_id=str(wanted)
+    )
+    raise HTTPException(status.HTTP_409_CONFLICT, _detail(*_REBOOK_CHANGED))
+
+
+def _refuse_rebook_moved_on(
+    appt: Appointment, wanted: UUID | None, rebook_due: DepositAdjustment | None
+) -> None:
+    """TASK-085 R U7 (UF re-review N1): `_refuse_stale_rebook` and `_refuse_if_suspended` are two
+    reads. If the patient's "Outro horário" commits between them, the second finds no suspension
+    and a request that carried `rebook_adjustment_id` would fall into the ORDINARY move/cancel
+    path - moving or cancelling the patient's new slot. With a rebook intent, the second read
+    must find that SAME `old_slot_lost` change, else 409 `appointment_changed` (nothing ran)."""
+    if wanted is None:
+        return
+    if rebook_due is not None and rebook_due.id == wanted:
+        return
+    logger.info(
+        "hub_rebook_intent_moved_on", appointment_id=str(appt.id), adjustment_id=str(wanted)
+    )
+    raise HTTPException(status.HTTP_409_CONFLICT, _detail(*_REBOOK_CHANGED))
 
 
 def _appointment_read(
@@ -548,9 +639,7 @@ def _insurance_label(value: str | None) -> str | None:
 def _insurance_plan_read(plan: AppointmentPlan | None) -> CalendarInsurancePlanRead | None:
     if plan is None:
         return None
-    return CalendarInsurancePlanRead(
-        id=str(plan.id), name=plan.name, charge_deposit=plan.charge_deposit
-    )
+    return CalendarInsurancePlanRead(id=str(plan.id), name=plan.name)
 
 
 def _deposit_read(
@@ -565,7 +654,14 @@ def _deposit_read(
         needs_attention=view.needs_attention,
         held_cents=view.held_cents,
         pending_difference_cents=view.pending_difference_cents,
+        pending_difference_mode=_difference_mode(view),
     )
+
+
+def _difference_mode(view: deposit_lifecycle.AppointmentDepositView | None) -> str | None:
+    """TASK-085 R: the open change's `mode` as the wire knows it ("suspend" / "applied")."""
+    mode = getattr(view, "pending_difference_mode", None) if view is not None else None
+    return mode if mode in ("suspend", "applied") else None
 
 
 def _reminder_read(reminder: AppointmentReminder) -> CalendarReminderRead:
@@ -921,6 +1017,9 @@ async def list_events(
             select(AppointmentReminder).where(
                 AppointmentReminder.tenant_id == tenant.id,
                 AppointmentReminder.invalidated_at.is_(None),
+                # TASK-085 R D-R14: the price-change notice is a reminders row that is never a
+                # reminder (mapa-u §2.1/§6 risk 9) - the agenda never shows it.
+                AppointmentReminder.kind != REMINDER_KIND_PRICE_CHANGE,
                 AppointmentReminder.appointment_id.in_([row.id for row in booked.values()]),
             )
         )
@@ -940,6 +1039,18 @@ async def list_events(
             )
         )
         units = {uid: (name, address) for uid, name, address in unit_rows.all()}
+
+    # TASK-085 R (S7a): what each open change on a sinal would change - names of THIS clinic
+    # only, at most two more tenant-scoped queries for the whole page.
+    summaries = await service_change.pending_change_summaries(
+        session,
+        tenant,
+        {
+            appointment_id: view.pending_edit
+            for appointment_id, view in deposits.items()
+            if _difference_mode(view) is not None and view.pending_edit
+        },
+    )
 
     reads: list[CalendarEventRead] = []
     for e in events:
@@ -991,6 +1102,10 @@ async def list_events(
                 unit_id=str(unit_id) if unit is not None else None,
                 unit_name=unit[0] if unit is not None else None,
                 unit_address=(unit[1] or None) if unit is not None else None,
+                suspended=(_difference_mode(deposits.get(row.id)) == "suspend")
+                if row is not None
+                else None,
+                pending_change_summary=summaries.get(row.id) if row is not None else None,
             )
         )
     return reads
@@ -1006,6 +1121,7 @@ async def list_awaiting_payment(
     start: datetime,
     end: datetime,
     tenant: Tenant = Depends(get_current_tenant),
+    viewer: AgendaViewer = Depends(get_agenda_viewer),
     session: AsyncSession = Depends(get_session),
 ) -> list[AwaitingPaymentRead]:
     """The `before`-timing reservations in [start, end): a slot a patient is paying for, with
@@ -1013,7 +1129,19 @@ async def list_awaiting_payment(
     array the agenda already consumes), so the doctor does not book on top of it.
 
     Only live payment-phase holds whose charge is still awaiting payment; the answer carries the
-    window, the service and the deadline - never the patient, the amount or the provider.
+    window, the service and the deadline - never the amount or the provider, and the patient
+    only on a "rebook" row (below).
+
+    TASK-085 R, 3rd round (mapa-u §1.6) - this is now THE place of a suspended change, whose
+    consultation left the agenda (D-R10):
+    * `kind="difference"` (the NEW window held for the change's Pix) carries `change_summary`,
+      what the change would do (`service_change.pending_change_summaries`);
+    * `kind="rebook"` (D-R11): a change in `old_slot_lost` - the old slot was taken while the
+      patient did not pay, so the clinic must reschedule or cancel with the patient. Not a hold:
+      the window is the OLD one, `appointment_id` the consultation, `expires_at` its start, `id`
+      the change's. Rows of a doctor the viewer may not see are left out. Held windows
+      ("booking"/"difference") never name the patient; a "rebook" row does (`patient_name`,
+      `attendee_name`, `patient_channel` - UH2), and only to a viewer who sees its doctor.
     """
     holds = await booking_hold.live_payment_holds(session, tenant.id, start, end)
     charge_ids = [hold.charge_id for hold in holds if hold.charge_id is not None]
@@ -1028,18 +1156,122 @@ async def list_awaiting_payment(
                 )
             )
         )
-    return [
-        AwaitingPaymentRead(
-            id=str(hold.id),
-            start=hold.start_at,
-            end=hold.end_at,
-            service=hold.appointment_type,
-            expires_at=hold.expires_at,
-            professional_id=str(hold.professional_id) if hold.professional_id else None,
+    # TASK-085 R (contrato §3.9): the NEW window of a change waiting for the Pix of its
+    # difference (D-R4) - held while its change is open (awaiting the Pix, or the patient
+    # choosing after it expired). ONE tenant-scoped query for the page.
+    adjustment_ids = [hold.adjustment_id for hold in holds if hold.adjustment_id is not None]
+    differences: dict[UUID, tuple[UUID | None, dict | None]] = {}
+    if adjustment_ids:
+        rows = await session.execute(
+            select(
+                DepositAdjustment.id,
+                DepositAdjustment.appointment_id,
+                DepositAdjustment.pending_edit,
+                Appointment.professional_id,
+            )
+            .outerjoin(
+                Appointment,
+                and_(
+                    Appointment.id == DepositAdjustment.appointment_id,
+                    Appointment.tenant_id == tenant.id,
+                ),
+            )
+            .where(
+                DepositAdjustment.tenant_id == tenant.id,
+                DepositAdjustment.id.in_(adjustment_ids),
+                DepositAdjustment.mode == MODE_SUSPEND,
+                DepositAdjustment.status.in_(SUSPENDED_STATUSES),
+            )
         )
-        for hold in holds
-        if hold.charge_id in live
-    ]
+        # Review M2: what the change would do is said only to a viewer who sees the
+        # consultation's doctor (the same rule as the "rebook" rows and GET /events); the held
+        # window itself stays listed for everyone, as before.
+        differences = {
+            adjustment_id: (appointment_id, pending_edit if viewer.sees(owner_id) else None)
+            for adjustment_id, appointment_id, pending_edit, owner_id in rows
+        }
+    # D-R11: ONE more tenant-scoped query - the consultations whose old slot was taken, in the
+    # window, still live, of a doctor the viewer sees.
+    lost_rows = (
+        await session.execute(
+            select(
+                DepositAdjustment.id,
+                DepositAdjustment.pending_edit,
+                Appointment,
+                # UH2 (UF review I3): the same patient facts as GET /events, tenant-scoped join.
+                Patient.channel.label("patient_channel"),
+                Patient.name.label("patient_name"),
+            )
+            .join(
+                Appointment,
+                and_(
+                    Appointment.id == DepositAdjustment.appointment_id,
+                    Appointment.tenant_id == tenant.id,
+                ),
+            )
+            .outerjoin(
+                Patient,
+                and_(Patient.id == Appointment.patient_id, Patient.tenant_id == tenant.id),
+            )
+            .where(
+                DepositAdjustment.tenant_id == tenant.id,
+                DepositAdjustment.mode == MODE_SUSPEND,
+                DepositAdjustment.status == STATUS_OLD_SLOT_LOST,
+                Appointment.status.in_(LIVE_APPOINTMENT_STATUSES),
+                Appointment.start_at < end,
+                func.coalesce(Appointment.end_at, Appointment.start_at) > start,
+            )
+            .order_by(Appointment.start_at)
+        )
+    ).all()
+    lost_rows = [row for row in lost_rows if viewer.sees(row.Appointment.professional_id)]
+    # What each change would do - names of THIS clinic only, at most two more queries.
+    edits = {key: edit for key, (_, edit) in differences.items() if edit}
+    edits.update({row.id: row.pending_edit for row in lost_rows if row.pending_edit})
+    summaries = await service_change.pending_change_summaries(session, tenant, edits)
+
+    reads: list[AwaitingPaymentRead] = []
+    for hold in holds:
+        summary = None
+        if hold.charge_id is not None and hold.charge_id in live:
+            kind, appointment_id = "booking", None
+        elif hold.adjustment_id is not None and hold.adjustment_id in differences:
+            kind, appointment_id = "difference", differences[hold.adjustment_id][0]
+            summary = summaries.get(hold.adjustment_id)
+        else:
+            continue
+        reads.append(
+            AwaitingPaymentRead(
+                id=str(hold.id),
+                start=hold.start_at,
+                end=hold.end_at,
+                service=hold.appointment_type,
+                expires_at=hold.expires_at,
+                professional_id=str(hold.professional_id) if hold.professional_id else None,
+                kind=kind,
+                appointment_id=str(appointment_id) if appointment_id is not None else None,
+                change_summary=summary,
+            )
+        )
+    for row in lost_rows:
+        visit = row.Appointment
+        reads.append(
+            AwaitingPaymentRead(
+                id=str(row.id),
+                start=visit.start_at,
+                end=visit.end_at or visit.start_at,
+                service=visit.appointment_type,
+                expires_at=visit.start_at,
+                professional_id=str(visit.professional_id) if visit.professional_id else None,
+                kind="rebook",
+                appointment_id=str(visit.id),
+                change_summary=summaries.get(row.id),
+                patient_name=row.patient_name,
+                attendee_name=visit.attendee_name,
+                patient_channel=row.patient_channel,
+            )
+        )
+    return reads
 
 
 # ---------------------------------------------------------------------------
@@ -1230,6 +1462,48 @@ async def cancel_preview(
     )
 
 
+async def _recheck_rebook_due_cancel(
+    session: AsyncSession,
+    tenant: Tenant,
+    appointment_id: UUID,
+    adjustment_id: UUID,
+    deleted_event_id: str | None,
+) -> None:
+    """Lock the row (consultation first, like every writer of a change) and confirm the cancel
+    of an `old_slot_lost` visit still applies: the row is live, still points at the event the
+    route deleted, and that change is still the one suspending it. 409 `appointment_changed`
+    otherwise (the session is rolled back; nothing was written)."""
+    locked = await session.scalar(
+        select(Appointment)
+        .where(Appointment.id == appointment_id, Appointment.tenant_id == tenant.id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    change = (
+        await adjustment_queries.open_suspension(
+            session, tenant_id=tenant.id, appointment_id=appointment_id
+        )
+        if locked is not None
+        else None
+    )
+    if (
+        locked is not None
+        and locked.status in LIVE_APPOINTMENT_STATUSES
+        and (locked.google_event_id or "") == (deleted_event_id or "")
+        and change is not None
+        and change.id == adjustment_id
+        and change.status == STATUS_OLD_SLOT_LOST
+    ):
+        return
+    await session.rollback()
+    logger.info(
+        "hub_cancel_rebook_due_changed",
+        appointment_id=str(appointment_id),
+        adjustment_id=str(adjustment_id),
+    )
+    raise HTTPException(status.HTTP_409_CONFLICT, _detail(*_REBOOK_CHANGED))
+
+
 @router.post("/appointments/{appointment_id}/cancel", response_model=AppointmentCancelRead)
 async def cancel_appointment(
     appointment_id: str,
@@ -1243,8 +1517,15 @@ async def cancel_appointment(
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "confirm must be true")
 
     appt = await _get_appointment(session, tenant, appointment_id, viewer)
+    await _refuse_stale_rebook(session, tenant, appt, body.rebook_adjustment_id)  # UH2
     if appt.status == AppointmentStatus.CANCELLED:
         raise HTTPException(status.HTTP_409_CONFLICT, "Appointment already cancelled")
+    # TASK-085 R D-R11: a consultation whose old slot was taken while the patient did not pay
+    # (`old_slot_lost`) may be cancelled by the clinic - the paid sinal's cancellation rules of
+    # today (`on_appointment_cancelled` settles the change and its item). Any other suspension: 409.
+    rebook_due = await _refuse_if_suspended(session, tenant, appt, rebook=True)
+    _refuse_rebook_moved_on(appt, body.rebook_adjustment_id, rebook_due)  # U7, N1
+    rebook_due_id = rebook_due.id if rebook_due is not None else None
 
     # The agenda that OWNS the event (it was always the clinic's, so a doctor's
     # consultation "cancelled" while its event kept the slot booked), legacy fallback
@@ -1267,6 +1548,14 @@ async def cancel_appointment(
                 "A consulta não foi cancelada; tente de novo em instantes."
             ) from exc
 
+    if rebook_due_id is not None:
+        # Review M1: the patient's "Outro horário" may have moved this row to a NEW event while
+        # the old one was being deleted. Under the row lock, the row must still point at the
+        # event just deleted and still wait for this `old_slot_lost` change - else 409, nothing
+        # cancelled (what was deleted is the old event, already off the agenda).
+        await _recheck_rebook_due_cancel(
+            session, tenant, appt.id, rebook_due_id, appt.google_event_id
+        )
     previous_status = appt.status
     appt.status = AppointmentStatus.CANCELLED
     appt.updated_at = datetime.now(UTC)
@@ -1308,6 +1597,12 @@ async def cancel_appointment(
 
     await session.commit()
     await session.refresh(appt)
+    # UA1 M3 (a restore event kept by a failed "Manter a antiga" never outlives the change): no
+    # call here. `on_appointment_cancelled` -> `settle_open_adjustments` closed the
+    # `old_slot_lost` change and scheduled `old_slot.discard_restore_event` for after THIS commit
+    # (`adjustment_queries.discard_restore_after_commit`), the one mechanism every cancel path
+    # shares; the payments sweep (`service_change._discard_left_restore_events`) is its backstop.
+    # U7 removed the route's own second call (it ran the same idempotent discard twice).
     if reminder_hooks.enabled_for(tenant):
         await reminder_hooks.after_appointment_closed(appt.id, reason="cancelled")
 
@@ -1363,7 +1658,9 @@ async def release_appointment(
 
     Order matters and every step is deliberate:
 
-    1. Guards (404 foreign/malformed, 422 block, 409 not live, 409 confirmed).
+    1. Guards (404 foreign/malformed, 422 block, 409 not live, 409 suspended - TASK-085 R
+       D-R10: out of the agenda while the patient pays a change's difference, nothing to free -
+       409 confirmed).
     2. Delete the Google event on the OWNING calendar (a legacy row whose doctor's
        agenda does not hold it is looked for on the clinic's, `_delete_owned_event`).
        FAIL CLOSED: if Google refuses, answer 502 and change nothing - marking the
@@ -1395,6 +1692,9 @@ async def release_appointment(
                 status=appt.status.value,
             ),
         )
+    # TASK-085 R D-R10: a suspended consultation is out of the agenda - nothing to release (the
+    # pending change is no longer closed from here).
+    await _refuse_if_suspended(session, tenant, appt)
     if appt.confirmation_count >= 1 and not body.release_confirmed:
         raise HTTPException(
             status.HTTP_409_CONFLICT,
@@ -1667,10 +1967,18 @@ async def edit_appointment(
     same rule as /reschedule), the doctor e-mail is enqueued (the outbox cron recovers
     a lost enqueue) and the patient gets "A clínica alterou ..." with the three buttons.
 
-    A new service on a PAID sinal (plan 2026-10-26 Task 7) also answers `service_change`
-    and sends the patient either the Pix of the difference (the service changes only when
-    it is paid; nothing about it in "A clínica alterou") or the refund question with its
-    two fixed buttons; a refused change is 409/422/502 `service_change_blocked`.
+    A change of a money field (service, unit, doctor, convênio) on a PAID sinal (plan
+    2026-10-26 Task 7; TASK-085 R) also answers `service_change` and sends the patient ONE
+    money message: the Pix of the difference of a change that waits for it (`suspended`,
+    nothing in "A clínica alterou"), of a change that already stands
+    (`applied_awaiting_payment`), or the refund question with its two fixed buttons; a
+    refused change is 409/422/502 `service_change_blocked`. An UNPAID sinal whose amount the
+    edit changed was voided before the commit and the new one goes after the patient notice
+    (`recharge_after_edit`; also the sinal an edit made due, OQ-10); a Pix being paid or that
+    cannot be voided refuses the edit (409/502 `sinal_requote_blocked`). A SUSPENDED visit is
+    409 `appointment_suspended`. TASK-085 R D-R10: right after a `suspended` change commits, the
+    old event leaves the agenda (`old_slot.vacate_old_slot`) - the old slot is free for others
+    while the patient pays.
     """
     appt = await _get_appointment(session, tenant, appointment_id, viewer)
     if (
@@ -1707,58 +2015,86 @@ async def edit_appointment(
     except staff_appointment_edit.StaffEditError as exc:
         raise HTTPException(exc.status_code, _detail(exc.code, exc.message, **exc.extra)) from None
 
-    await session.refresh(appt)
-    if outcome.time_changed and (
-        reminder_hooks.enabled_for(tenant) or (appt.confirmation_count or 0) > 0
+    suspension = outcome.service_change
+    if (
+        suspension is not None
+        and suspension.status == "suspended"
+        and suspension.adjustment_id is not None
     ):
-        await reminder_hooks.after_appointment_rescheduled(appt.id)
-        await session.refresh(appt)
-    if outcome.notice_id is not None:
-        await enqueue_professional_edit_notification(
-            getattr(request.app.state, "arq_pool", None),
-            tenant.id,
-            AppliedEdit(
-                appointment_id=appt.id,
-                moved=outcome.time_changed,
-                old_event_id=None,
-                old_professional_id=None,
-                notice_id=outcome.notice_id,
-                notice_version=outcome.notice_version,
-                changed_fields=outcome.changed_fields,
-            ),
-        )
-    patient = await _patient_of(session, tenant, appt)
-    allow_paid = staff_patient_message.paid_notice_authorised(tenant, body.notify_outside_window)
+        # TASK-085 R D-R10 (mapa-u §1.4): the change committed - the OLD event leaves the agenda
+        # now, its slot free for other patients while the patient pays. Own session; never
+        # raises; a failure stays `releasing` and the payments sweep retries it.
+        await old_slot.vacate_old_slot(appt.tenant_id, suspension.adjustment_id)
+
     notice = None
-    if outcome.changes:  # empty only when the one change waits for the difference Pix
-        notice = await clinic_action_notice.notify_staff_edit(
-            session,
-            tenant,
-            appt,
-            patient,
-            changes=outcome.changes,
-            allow_paid=allow_paid,
-            now=datetime.now(UTC),
-        )
     service_change_read = None
-    if outcome.service_change is not None:
-        # Plan 2026-10-26 Task 7: the Pix of the difference, or "quer a diferença de volta?".
-        money_notice = await clinic_action_notice.notify_service_change(
-            session, tenant, appt, patient, outcome.service_change,
-            allow_paid=allow_paid, now=datetime.now(UTC),
+    # Plain ids: the `finally` below must not touch an ORM row a failed step left expired.
+    edited_tenant_id, edited_appointment_id = tenant.id, appt.id
+    try:
+        await session.refresh(appt)
+        if outcome.time_changed and (
+            reminder_hooks.enabled_for(tenant) or (appt.confirmation_count or 0) > 0
+        ):
+            await reminder_hooks.after_appointment_rescheduled(appt.id)
+            await session.refresh(appt)
+        if outcome.notice_id is not None:
+            await enqueue_professional_edit_notification(
+                getattr(request.app.state, "arq_pool", None),
+                tenant.id,
+                AppliedEdit(
+                    appointment_id=appt.id,
+                    moved=outcome.time_changed,
+                    old_event_id=None,
+                    old_professional_id=None,
+                    notice_id=outcome.notice_id,
+                    notice_version=outcome.notice_version,
+                    changed_fields=outcome.changed_fields,
+                ),
+            )
+        patient = await _patient_of(session, tenant, appt)
+        allow_paid = staff_patient_message.paid_notice_authorised(
+            tenant, body.notify_outside_window
         )
-        change = outcome.service_change
-        service_change_read = AppointmentServiceChangeRead(
-            status=change.status,
-            diff_cents=change.diff_cents,
-            old_service=change.old_service,
-            new_service=change.new_service,
-            adjustment_id=str(change.adjustment_id) if change.adjustment_id else None,
-            expires_at=change.expires_at,
-            patient_notice=money_notice.code if money_notice is not None else None,
-        )
-        if notice is None:
-            notice = money_notice
+        if outcome.changes:  # empty only when the one change waits for the difference Pix
+            notice = await clinic_action_notice.notify_staff_edit(
+                session,
+                tenant,
+                appt,
+                patient,
+                changes=outcome.changes,
+                allow_paid=allow_paid,
+                now=datetime.now(UTC),
+            )
+        if outcome.service_change is not None:
+            # Plan 2026-10-26 Task 7: the Pix of the difference, or "quer a diferença de volta?".
+            money_notice = await clinic_action_notice.notify_service_change(
+                session, tenant, appt, patient, outcome.service_change,
+                allow_paid=allow_paid, now=datetime.now(UTC),
+            )
+            change = outcome.service_change
+            service_change_read = AppointmentServiceChangeRead(
+                status=change.status,
+                diff_cents=change.diff_cents,
+                old_service=change.old_service,
+                new_service=change.new_service,
+                adjustment_id=str(change.adjustment_id) if change.adjustment_id else None,
+                expires_at=change.expires_at,
+                patient_notice=money_notice.code if money_notice is not None else None,
+            )
+            if notice is None:
+                notice = money_notice
+    finally:
+        if outcome.sinal_recharge is not None:
+            # TASK-085 R (contrato §3.7): after the commit and after "A clínica alterou", the
+            # new sinal (D-R6: the open Pix was voided; OQ-10: the edit made one due). In a
+            # `finally`: a notice or hook that fails above must never leave the patient with the
+            # old Pix voided and no new one. Own session, never raises; amount 0 = only the "Pix
+            # anterior cancelado" notice.
+            await deposit_lifecycle.recharge_after_edit(
+                tenant_id=edited_tenant_id,
+                appointment_id=edited_appointment_id,
+                old_amount_cents=outcome.sinal_recharge.old_amount_cents,
+            )
     await session.refresh(appt)
     logger.info(
         "calendar_appointment_edited",
@@ -1777,6 +2113,287 @@ async def edit_appointment(
     )
 
 
+# ---------------------------------------------------------------------------
+# TASK-085 R D-R11: the clinic books, on a new slot, a consultation whose old slot was taken
+# ---------------------------------------------------------------------------
+
+_REBOOK_CHANGED = (
+    "appointment_changed",
+    "A consulta foi alterada por outra pessoa. Recarregue e tente de novo.",
+)
+_REBOOK_OLD_EVENT_STUCK = (
+    "calendar_unavailable",
+    "Não foi possível tirar da agenda o horário antigo desta consulta agora. Nada foi alterado; "
+    "tente de novo em instantes.",
+)
+_REBOOK_FAILED = (
+    "rebook_failed",
+    "Não foi possível remarcar a consulta agora. Nada foi alterado; tente de novo em instantes.",
+)
+
+
+def _clinic_window(tenant: Tenant, start: datetime, end: datetime) -> tuple[datetime, datetime]:
+    """[start, end) as aware UTC. A value without an offset is read on the clinic's clock - as the
+    agendas themselves read it (`CalendarService._ensure_tz`, the own agenda) - so the event, the
+    row and the rebook id all see the same instant (review M3)."""
+    tz = ZoneInfo(tenant.timezone or "America/Sao_Paulo")
+
+    def _one(value: datetime) -> datetime:
+        aware = value if value.tzinfo is not None else value.replace(tzinfo=tz)
+        return aware.astimezone(UTC)
+
+    return _one(start), _one(end)
+
+
+def _hub_rebook_event_id(
+    adjustment_id: UUID, *, calendar, start: datetime, end: datetime
+) -> str:
+    """The id of the event the clinic's rebook of `adjustment_id` creates at [start, end) (UTC).
+
+    UA1's `old_slot.rebook_event_id(source="hub")` (`difhub<hex>`, `loc_` on the own agenda) plus
+    16 hex digits of the window (review I1): a double click on the SAME window is the same id
+    (idempotent: the agenda hands the event back), while another window - or a retry after an
+    attempt whose event was created and then deleted (an agenda never re-uses an id) - is a fresh
+    one. Only 0-9a-f are added, so the id stays in Google's base32hex (a-v, 0-9); at most
+    `loc_` + 6 + 32 + 16 = 58 characters (Google: 5-1024; `calendar_events.id`: 64)."""
+    window = f"{start.astimezone(UTC).isoformat()}|{end.astimezone(UTC).isoformat()}"
+    digest = hashlib.sha256(f"{adjustment_id}|{window}".encode()).hexdigest()[:16]
+    return old_slot.rebook_event_id(adjustment_id, calendar=calendar, source="hub") + digest
+
+
+async def _event_id_spent(calendar, event_id: str) -> bool:
+    """Whether `event_id` is an event somebody already DELETED on this agenda (the agenda answers
+    it `cancelled`, and Google refuses to create it again: "event id is taken"). False when the
+    agenda cannot say."""
+    try:
+        existing = await calendar.get_event(event_id)
+    except Exception as exc:  # noqa: BLE001 - cannot tell: the caller reports its own failure
+        logger.warning("hub_rebook_event_unreadable", error_type=type(exc).__name__)
+        return False
+    return bool(existing) and str(existing.get("status") or "") == "cancelled"
+
+
+async def _discard_unless_kept(
+    session: AsyncSession, calendar, tenant_id: UUID, appointment_id: UUID, event_id: str
+) -> None:
+    """Compensation of a rebook that did not stand: delete the `difhub` event created for it -
+    unless the consultation points at it now (a twin request - same window, so the same id -
+    won). Never raises (`old_slot.discard_event`)."""
+    try:
+        current = await session.scalar(
+            select(Appointment.google_event_id).where(
+                Appointment.id == appointment_id, Appointment.tenant_id == tenant_id
+            )
+        )
+        await session.rollback()  # end the read before the agenda call
+    except Exception as exc:  # noqa: BLE001 - cannot tell: deleting may hurt a twin; keep it
+        logger.error(
+            "hub_rebook_compensation_unreadable",
+            appointment_id=str(appointment_id),
+            error_type=type(exc).__name__,
+        )
+        return
+    if (current or "").strip() == event_id:
+        return
+    await old_slot.discard_event(calendar, event_id)
+
+
+async def _rebook_lost_slot(
+    session: AsyncSession,
+    request: Request,
+    tenant: Tenant,
+    appt: Appointment,
+    change: DepositAdjustment,
+    body: AppointmentReschedule,
+) -> AppointmentWriteRead:
+    """POST /reschedule of a consultation in `old_slot_lost` (mapa-u §1.6; UA1 contract deltas).
+
+    Its event left the agenda while the patient paid nothing and the old slot was taken; the same
+    row (and its paid sinal, `pix_deposits.appointment_id`) moves to the new slot. In order:
+
+    1. `old_slot.ensure_old_event_gone` with a clean session, before anything is written: the old
+       event must be off the agenda (`old_slot='released'`). False -> 503 "tente de novo" (the
+       agenda failed) or 409 (the change was decided elsewhere meanwhile); nothing created.
+    2. The new window with the hub's own rules (a slot somebody is paying for is 409, the
+       doctor's other clinic only warns - an encaixe stays allowed), then the `difhub` event
+       (`_hub_rebook_event_id`: one id per window, idempotent for a double click) on the agenda
+       that owns the consultation, OUTSIDE any transaction, with a PLAIN `create_event` like
+       every hub write (an exclusive write would refuse an encaixe). A refusal there is 502 with
+       nothing changed. A window without an offset is read on the clinic's clock.
+    3. ONE transaction: the row locked, start/end/RESCHEDULED written, then
+       `old_slot.finish_rebook(source="hub")` (event id/link on the row, `rebooked`, hold
+       released, the clinic's item closed). True -> commit; False (decided meanwhile) -> rollback
+       and the created event is deleted (`discard_event`), unless a twin request won with it.
+
+    Like every hub move it never consumes the patient's reschedule allowance
+    (`register_reschedule` is not called) and the reminders follow the new time."""
+    tenant_id, appointment_id, adjustment_id = tenant.id, appt.id, change.id
+    log = {"appointment_id": str(appointment_id), "adjustment_id": str(adjustment_id)}
+    new_start, new_end = _clinic_window(tenant, body.new_start, body.new_end)
+
+    # 1. The old event off the agenda (commits the session it gets: nothing is pending here).
+    if not await old_slot.ensure_old_event_gone(
+        session, tenant_id=tenant_id, adjustment_id=adjustment_id
+    ):
+        still = await old_slot.rebookable(
+            session, tenant_id=tenant_id, appointment_id=appointment_id
+        )
+        decided = (
+            still is None or still.id != adjustment_id or still.status != STATUS_OLD_SLOT_LOST
+        )
+        await session.rollback()
+        logger.warning("hub_rebook_old_event_not_gone", decided=decided, **log)
+        if decided:
+            raise HTTPException(status.HTTP_409_CONFLICT, _detail(*_REBOOK_CHANGED))
+        raise HTTPException(
+            status.HTTP_503_SERVICE_UNAVAILABLE, _detail(*_REBOOK_OLD_EVENT_STUCK)
+        )
+    # It committed - and may have rolled back, which expires every loaded row: read the clinic and
+    # the consultation again before using them.
+    await session.refresh(tenant)
+    appt = await session.scalar(
+        select(Appointment)
+        .where(Appointment.id == appointment_id, Appointment.tenant_id == tenant_id)
+        .execution_options(populate_existing=True)
+    )
+    if appt is None:
+        raise HTTPException(status.HTTP_409_CONFLICT, _detail(*_REBOOK_CHANGED))
+
+    # 2. The new window (the hub's rules), then the event - no transaction open meanwhile.
+    await _refuse_if_slot_is_held(
+        session,
+        tenant,
+        new_start,
+        new_end,
+        professional_id=appt.professional_id if appt.professional_id else "any",
+    )
+    calendar = None
+    try:
+        owner = await _owning_calendar(session, tenant, appt)
+        calendar = await calendar_at_unit(session, owner, tenant_id, appt.unit_id)
+        conflicts_other_agenda = await overlaps_other_agenda(calendar, new_start, new_end)
+        patient = await _patient_of(session, tenant, appt)
+        summary = service_change.agenda_summary(appt, patient.name if patient else None)
+        description = build_event_description(
+            service=appt.appointment_type,
+            insurance=appt.insurance,
+            attendee_name=appt.attendee_name,
+            **await booking_unit_fields(session, tenant_id, appt.unit_id, appt.professional_id),
+        )
+        await session.commit()  # end the reads: nothing open while the agenda answers
+        wanted = _hub_rebook_event_id(
+            adjustment_id, calendar=calendar, start=new_start, end=new_end
+        )
+        try:
+            event = await calendar.create_event(
+                start=new_start,
+                end=new_end,
+                summary=summary,
+                description=description,
+                event_id=wanted,
+            )
+        except GoogleTokenRevokedError:
+            raise
+        except Exception:
+            # Google refuses an id it already deleted ("event id is taken"); anything else is a
+            # real failure.
+            if not await _event_id_spent(calendar, wanted):
+                raise
+            event = {"id": wanted, "status": "cancelled"}
+        if str(event.get("status") or "") == "cancelled":
+            # An earlier attempt at THIS window created the event and deleted it (it did not
+            # stand): the id is spent for good, so a plain create, as every hub booking does.
+            logger.warning("hub_rebook_event_id_spent", **log)
+            event = await calendar.create_event(
+                start=new_start, end=new_end, summary=summary, description=description
+            )
+    except HTTPException:
+        raise
+    except GoogleTokenRevokedError as exc:
+        raise _reconnect_required("rebook") from exc
+    except Exception as exc:
+        logger.error("hub_rebook_create_failed", error_type=type(exc).__name__, **log)
+        raise _calendar_unavailable(
+            "Não foi possível criar o evento na agenda. "
+            "Nada foi alterado; tente de novo em instantes."
+        ) from exc
+    event_id = str(event.get("id") or "").strip()
+    if not event_id:
+        logger.error("hub_rebook_event_without_id", **log)
+        raise _calendar_unavailable(
+            "Não foi possível criar o evento na agenda. "
+            "Nada foi alterado; tente de novo em instantes."
+        )
+
+    # 3. The row and the change, in ONE transaction.
+    now = datetime.now(UTC)
+    try:
+        locked = await session.scalar(
+            select(Appointment)
+            .where(Appointment.id == appointment_id, Appointment.tenant_id == tenant_id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+        won = False
+        previous_status = None
+        if locked is not None and locked.status in LIVE_APPOINTMENT_STATUSES:
+            previous_status = locked.status
+            locked.start_at = new_start
+            locked.end_at = new_end
+            locked.status = AppointmentStatus.RESCHEDULED
+            locked.updated_at = now
+            won = await old_slot.finish_rebook(
+                session,
+                tenant_id=tenant_id,
+                adjustment_id=adjustment_id,
+                appointment=locked,
+                event_id=event_id,
+                event_link=event.get("htmlLink"),
+                now=now,
+                source="hub",
+            )
+        if not won:
+            await session.rollback()
+            await _discard_unless_kept(session, calendar, tenant_id, appointment_id, event_id)
+            logger.info("hub_rebook_already_decided", **log)
+            raise HTTPException(status.HTTP_409_CONFLICT, _detail(*_REBOOK_CHANGED))
+        log_status_transition(
+            appointment_id=appointment_id,
+            tenant_id=tenant_id,
+            old_status=previous_status,
+            new_status=AppointmentStatus.RESCHEDULED,
+            source=SOURCE_HUB,
+            idempotency_key=f"rebook:{adjustment_id}:{new_start.isoformat()}",
+        )
+        await session.commit()
+    except HTTPException:
+        raise
+    except Exception as exc:
+        await session.rollback()
+        await _discard_unless_kept(session, calendar, tenant_id, appointment_id, event_id)
+        logger.error("hub_rebook_write_failed", error_type=type(exc).__name__, **log)
+        raise HTTPException(
+            status.HTTP_503_SERVICE_UNAVAILABLE, _detail(*_REBOOK_FAILED)
+        ) from exc
+
+    appt = locked
+    await session.refresh(appt)
+    if reminder_hooks.enabled_for(tenant) or (appt.confirmation_count or 0) > 0:
+        await reminder_hooks.after_appointment_rescheduled(appt.id)
+    if appt.phone and body.custom_message:
+        arq_pool = getattr(request.app.state, "arq_pool", None)
+        if arq_pool:
+            await arq_pool.enqueue_job(
+                "send_patient_notification", str(tenant_id), appt.phone, body.custom_message
+            )
+    logger.info("calendar_appointment_rebooked", **log)
+    deposit_status = await _deposit_status_value(session, appt.id)
+    return AppointmentWriteRead(
+        **_appointment_read(appt, deposit_status=deposit_status).model_dump(),
+        conflicts_other_agenda=conflicts_other_agenda,
+    )
+
+
 @router.post("/appointments/{appointment_id}/reschedule", response_model=AppointmentWriteRead)
 async def reschedule_appointment(
     appointment_id: str,
@@ -1787,8 +2404,16 @@ async def reschedule_appointment(
     session: AsyncSession = Depends(get_session),
 ) -> AppointmentWriteRead:
     appt = await _get_appointment(session, tenant, appointment_id, viewer)
+    await _refuse_stale_rebook(session, tenant, appt, body.rebook_adjustment_id)  # UH2
     if appt.status == AppointmentStatus.CANCELLED:
         raise HTTPException(status.HTTP_409_CONFLICT, "Cannot reschedule a cancelled appointment")
+    # TASK-085 R D-R11: the old slot of a suspended consultation was taken (`old_slot_lost`) - the
+    # clinic books it on a NEW slot (its event left the agenda, nothing to move). Any other
+    # suspension: 409.
+    rebook_due = await _refuse_if_suspended(session, tenant, appt, rebook=True)
+    _refuse_rebook_moved_on(appt, body.rebook_adjustment_id, rebook_due)  # U7, N1
+    if rebook_due is not None:
+        return await _rebook_lost_slot(session, request, tenant, appt, rebook_due, body)
 
     await _refuse_if_slot_is_held(
         session,
@@ -1917,6 +2542,9 @@ async def update_appointment_status(
         )
     if appt is None or not viewer.sees(appt.professional_id):
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Appointment not found")
+    # D-R10: checked under the row lock (no falta / compareceu / cancelar / confirmar on it -
+    # not even in `old_slot_lost`: only /reschedule and /cancel act on that one).
+    await _refuse_if_suspended(session, tenant, appt)
     now = datetime.now(UTC)
     try:
         applies = staff_transition(appt.status, body.status, start_at=appt.start_at, now=now)

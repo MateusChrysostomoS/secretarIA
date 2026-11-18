@@ -33,6 +33,9 @@ from tests.payments_support import FakeProvider, make_sessionmaker
 from tests.test_appointment_edit_apply import _edit, _reply
 from tests.test_professional_notification import _FakeRedis, _Mailer, _summary
 
+# TASK-085 R: these tests pin the LEGACY deferred mode of the engine (mode NULL rows).
+from tests.test_service_change import legacy_deferred_mode  # noqa: E402, F401
+
 MAIL_A = "doctor-a@example.test"
 MAIL_B = "doctor-b@example.test"
 

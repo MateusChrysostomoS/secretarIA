@@ -43,6 +43,7 @@ from secretaria.models.professional import Professional
 from secretaria.models.professional_credentials import ProfessionalCredentials
 from secretaria.models.professional_edit_notice import ProfessionalEditNotice
 from secretaria.models.professional_service_unit import ProfessionalServiceUnit
+from secretaria.models.professional_service_unit_terms import ProfessionalServiceUnitTerms
 from secretaria.models.professional_unit import ProfessionalUnit
 from secretaria.models.rebooking_decline import RebookingDecline
 from secretaria.models.service import Service
@@ -92,6 +93,7 @@ __all__ = [
     "ProfessionalCredentials",
     "ProfessionalInsurancePlan",
     "ProfessionalServiceUnit",
+    "ProfessionalServiceUnitTerms",
     "ProfessionalUnit",
     "Service",
     "Tenant",

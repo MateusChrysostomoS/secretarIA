@@ -14,34 +14,51 @@ from secretaria.models.appointment import AppointmentStatus
 class CalendarInsurancePlanRead(BaseModel):
     """The convênio plan an appointment resolved to, as the agenda shows it.
 
-    Deliberately three fields. `id` is the ROW the booking pointed at: a
-    `tenant_insurance_plans.id` (shared / clinic_with_exceptions modes) or, in
-    `independent` mode, a `professional_insurance_plans.id`. `charge_deposit` is
-    that row's own flag - a clinic policy for the plan, NOT proof that a Pix
-    deposit was charged (that also needs the Pix add-on, a readable price and an
-    Asaas key). The clinic's payment note and the catalog metadata stay out.
+    `id` is the ROW the booking pointed at: a `tenant_insurance_plans.id` (shared /
+    clinic_with_exceptions modes) or, in `independent` mode, a
+    `professional_insurance_plans.id`. No sinal flag (TASK-085 R D-R12/U1b: a convênio never
+    exempts the sinal). The clinic's payment note and the catalog metadata stay out.
     """
 
     id: str
     name: str
-    charge_deposit: bool
 
 
 class AwaitingPaymentRead(BaseModel):
     """A slot held for a Pix that is still payable (`GET /calendar/awaiting-payment`).
 
-    No patient, no amount, no provider: the agenda only needs to show that the window is taken
-    and until when.
+    No amount, no provider: the agenda only needs to show that the window is taken and until
+    when. No patient on held windows ("booking"/"difference"); a "rebook" row names the patient
+    (`patient_name`/`attendee_name`/`patient_channel`, viewer-filtered like the agenda).
     """
 
     model_config = ConfigDict(extra="ignore")
 
-    id: str  # the hold's id: opaque, only good for a list key
+    id: str  # the hold's id (the change's for "rebook"): opaque, only good for a list key
     start: datetime
     end: datetime
     service: str | None = None
     expires_at: datetime
     professional_id: str | None = None
+    # TASK-085 R (contrato §3.9; mapa-u §1.6/§4.5), additive: "booking" - a new booking a patient
+    # is paying the sinal for (no appointment yet); "difference" - the NEW window of a change
+    # waiting for the Pix of its difference, held for `appointment_id`, the consultation it would
+    # replace (D-R10: that one left the agenda meanwhile - this row is where the clinic sees it);
+    # "rebook" (D-R11) - not a hold: the OLD window of `appointment_id`, whose slot was taken
+    # while the patient did not pay; the clinic reschedules or cancels it with the patient
+    # (`expires_at` = its start). A consumer that does not know a kind drops the row.
+    kind: Literal["booking", "difference", "rebook"] = "booking"
+    appointment_id: str | None = None
+    # What the change would do, in plain Portuguese ("Consulta → Avaliação; 10:00 → 11:30"), for
+    # "difference" and "rebook"; None when nothing can be said (and always for "booking").
+    change_summary: str | None = None
+    # TASK-085 R UH2 (UF review I3), "rebook" only - None on every other kind: who the
+    # consultation is for and on which channel, the SAME fields and source as GET /events
+    # (`Patient.name`, `Appointment.attendee_name`, `Patient.channel` - "whatsapp" |
+    # "brain_message"), so the clinic's cancel card says honestly how the patient is told.
+    patient_name: str | None = None
+    attendee_name: str | None = None
+    patient_channel: str | None = None
 
 
 class CalendarDepositRead(BaseModel):
@@ -70,6 +87,12 @@ class CalendarDepositRead(BaseModel):
     # none. Amounts only - never the Pix code or the charge id.
     held_cents: int | None = None
     pending_difference_cents: int | None = None
+    # TASK-085 R (contrato §3.9), additive: how the open change of this sinal waits - "suspend"
+    # (D-R4: the consultation is SUSPENDED until the Pix of the difference is paid or the patient
+    # chooses; the clinic may only free the slot), "applied" (D-R5: the change already stands and
+    # the Pix of the difference is open); null = none open (or a legacy one). A consumer must
+    # treat an unknown value as "suspend" (fail closed).
+    pending_difference_mode: Literal["suspend", "applied"] | None = None
 
 
 class CalendarReminderRead(BaseModel):
@@ -191,6 +214,22 @@ class CalendarEventRead(BaseModel):
     unit_id: str | None = None
     unit_name: str | None = None
     unit_address: str | None = None
+    # TASK-085 R D-R9 (contrato §3.9), additive: the consultation waits for the Pix of the
+    # difference of a change - the patient's or the clinic's (`deposit.pending_difference_mode`
+    # "suspend").
+    # Editar/Remarcar, Cancelar, falta, compareceu and every other change answer 409
+    # `appointment_suspended`; only "Liberar horário" works. None for an event with no local
+    # Appointment (like the other appointment keys).
+    suspended: bool | None = None
+    # TASK-085 R (S7a, contrato §3.9), additive: what the open change on this sinal would change,
+    # in plain Portuguese for the clinic - only the fields that change, in this order, separated
+    # by "; ": "Consulta → Retorno; Dra. Ana → Dr. Bruno; Unidade Centro → Unidade Leste;
+    # Particular → Unimed; 10:00 → 11:30" (the dates too, "26/11 10:00 → 27/11 11:30", when the
+    # day changes; clinic's timezone). Set while the visit is suspended (`suspended`, D-R4 - also
+    # while the patient chooses after its Pix expired) or the change already stands and waits for
+    # its Pix (`deposit.pending_difference_mode == "applied"`, D-R5); null otherwise. Display text
+    # only - never parse it.
+    pending_change_summary: str | None = None
 
 
 class AppointmentCreate(BaseModel):
@@ -257,6 +296,10 @@ class AppointmentCancel(BaseModel):
     # a client that does not know about the cost cannot incur it. Ignored
     # inside the window, where the notice is free.
     notify_outside_window: bool = False
+    # TASK-085 R UH2 (UF review I2): the `id` of the GET /awaiting-payment "rebook" row this
+    # cancel was asked from. Present -> 409 `appointment_changed` unless that change is still
+    # this consultation's `old_slot_lost`. Absent -> today's behaviour.
+    rebook_adjustment_id: UUID | None = None
 
 
 class CancelPreviewRead(BaseModel):
@@ -284,6 +327,8 @@ class AppointmentReschedule(BaseModel):
     new_start: datetime
     new_end: datetime
     custom_message: str | None = Field(default=None, max_length=4000)
+    # TASK-085 R UH2 (UF review I2): as on AppointmentCancel - the "rebook" row's change.
+    rebook_adjustment_id: UUID | None = None
 
 
 _EDITABLE = ("start_at", "service", "professional_id", "insurance", "attendee_name", "phone")
@@ -439,23 +484,35 @@ class AppointmentRelease(BaseModel):
 
 
 class AppointmentServiceChangeRead(BaseModel):
-    """A new service on an appointment whose Pix sinal is PAID (plan 2026-10-26 Task 7).
+    """A change of a money field (service, unit, doctor, convênio) on an appointment whose Pix
+    sinal is PAID (plan 2026-10-26 Task 7; TASK-085 R).
 
     `status`:
-    * `awaiting_payment` - the patient was sent a Pix of only the difference
-      (`diff_cents`, valid until `expires_at`); the appointment keeps `old_service` (and
-      its agenda slot) until that Pix is paid;
+    * `suspended` (TASK-085 R D-R4, a clinic that books only after the sinal) - the patient was
+      sent a Pix of only the difference (`diff_cents`, valid until `expires_at`); NOTHING of the
+      change was written: the appointment keeps its current terms and slot, is suspended (only
+      "Liberar horário" works) and the new window is held until the Pix is paid or the patient
+      chooses;
+    * `applied_awaiting_payment` (TASK-085 R D-R5) - the change was written NOW and the patient
+      was sent the Pix of only the difference; unpaid, the clinic gets an item to collect it;
+    * `awaiting_payment` - the legacy deferred mode: the patient was sent a Pix of only the
+      difference; the appointment keeps `old_service` (and its agenda slot) until that Pix is
+      paid, without suspension;
     * `asked` - the service changed now and the patient was asked whether they want the
       difference (`diff_cents`) back; a "yes" opens a payment-attention item for the clinic;
     * `applied_now` - the service changed now; nothing to pay or ask (or, 2026-10-27, the Pix
       of the difference could not be created: the patient is told the difference is settled
       with the clinic and a `service_diff_collect_due` attention item is opened).
-    `patient_notice` is the delivery code of THAT message (same vocabulary as the
-    appointment's `patient_notice`; null for `applied_now` unless the difference is to be
-    collected). Never carries the Pix code.
+    `new_service` is how the new consultation is named (the service, plus " com {médico}" /
+    " pelo {convênio}" / " na Unidade X" when those change). `patient_notice` is the delivery
+    code of THAT message (same vocabulary as the appointment's `patient_notice`; null for
+    `applied_now` unless the difference is to be collected). Never carries the Pix code. A
+    consumer must treat an unknown `status` as "nothing changed yet" (fail closed).
     """
 
-    status: Literal["awaiting_payment", "asked", "applied_now"]
+    status: Literal[
+        "awaiting_payment", "applied_awaiting_payment", "suspended", "asked", "applied_now"
+    ]
     diff_cents: int
     old_service: str
     new_service: str
@@ -479,8 +536,9 @@ class AppointmentActionRead(AppointmentRead):
 
 class AppointmentEditRead(AppointmentActionRead):
     """POST /appointments/{id}/edit: the action read plus `service_change`, set (non-null)
-    only when a new service met a PAID sinal (plan 2026-10-26 Task 7). Additive: the other
-    clinic actions keep `AppointmentActionRead`'s keys."""
+    only when a change of a money field met a PAID sinal and the sinal moved (plan 2026-10-26
+    Task 7; TASK-085 R). Additive: the other clinic actions keep `AppointmentActionRead`'s
+    keys."""
 
     service_change: AppointmentServiceChangeRead | None = None
     # TASK-083 spec §7.4: see AppointmentWriteRead.conflicts_other_agenda.

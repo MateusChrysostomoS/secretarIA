@@ -78,7 +78,7 @@ async def _new_tenant(db, mode: str | None = "shared") -> Tenant:
         )
         session.add(tenant)
         await session.flush()
-        await set_tenant_plans(session, tenant, [(UNIMED, True), (AMIL, True), (BRADESCO, True)])
+        await set_tenant_plans(session, tenant, [UNIMED, AMIL, BRADESCO])
         await session.commit()
         return tenant
 

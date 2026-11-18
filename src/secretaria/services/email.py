@@ -733,6 +733,21 @@ _TEMPLATES: dict[str, EmailTemplate] = {
             "— {clinic_name}"
         ),
     ),
+    # TASK-085 R (D-R14): the clinic changed a price and this consultation's sinal moves. NO
+    # amount in the e-mail: it is computed when the patient OPENS the link (the price in force
+    # then), and the first message of the conversation is the action (Pix, refund question, ...).
+    # `link_line` arrives pre-rendered (the Portal link, or a sentence when the URL is unset).
+    "price_change_patient": EmailTemplate(
+        subject="O valor da sua consulta mudou — {clinic_name}",
+        body=(
+            "Olá!\n\n"
+            "A {clinic_name} atualizou o valor de {service}, da sua consulta de {when}. "
+            "Isso muda o sinal.\n\n"
+            "Para ver o que muda e resolver, abra a sua conversa:\n"
+            "{link_line}\n\n"
+            "— {clinic_name}"
+        ),
+    ),
     "professional_invite": EmailTemplate(
         subject="Você foi convidado(a) para a equipe da {clinic_name} no SecretarIA",
         body=(

@@ -22,20 +22,25 @@ import hmac
 from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from types import SimpleNamespace
+from typing import Literal
 from uuid import UUID, uuid4
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from secretaria.core.database import async_session_factory
 from secretaria.core.logging import get_logger
 from secretaria.models import Appointment, Patient, Professional, Tenant
+from secretaria.models.appointment import LIVE_APPOINTMENT_STATUSES
 from secretaria.models.clinic_payment_account import PROVIDER_ASAAS
 from secretaria.models.insurance import ProfessionalInsurancePlan, TenantInsurancePlan
 from secretaria.models.payment_attention_item import (
     REASON_PAID_THEN_CANCELLED,
     REASON_REFUND_DUE_POLICY,
+    REASON_SINAL_REQUOTE_FAILED,
     PaymentAttentionItem,
 )
 from secretaria.models.pix_deposit import (
@@ -66,6 +71,7 @@ from secretaria.services.payments.money import (
 from secretaria.services.payments.pix_message import pix_code_tail
 from secretaria.services.payments.provider import ChargeRequest, PaymentStatus, ProviderError
 from secretaria.services.service_catalog import load_service_catalog, service_by_name
+from secretaria.services.service_terms import resolve_entry_at_unit, resolve_terms
 from secretaria.services.tenant_config import load_tenant_config
 from secretaria.services.whatsapp import WhatsAppClient
 
@@ -110,11 +116,9 @@ DEPOSIT_SKIP_NO_SERVICE = "no_service"
 DEPOSIT_SKIP_UNPARSEABLE_PRICE = "unparseable_price"
 DEPOSIT_SKIP_ZERO_AMOUNT = "zero_amount"
 DEPOSIT_SKIP_BELOW_MINIMUM = "below_minimum"
-# The booking's convênio is one of the clinic's plans that the clinic marked
-# "não cobra sinal" (tenant_insurance_plans.charge_deposit = false). Owner's
-# decision 2026-09-25: per clinic AND per plan, never inferred from the
-# operator - see models/insurance.py.
-DEPOSIT_SKIP_INSURANCE_NO_CHARGE = "insurance_no_charge"
+# TASK-085 R D-R12 (owner, 2026-11-18): a convênio never exempts the sinal any more (we cannot
+# check the patient really has it). The old `insurance_no_charge` skip and the per-plan
+# `charge_deposit` flag it read are gone; the flag stays in the database, ignored.
 # TASK-017: the clinic charges BEFORE confirming, so this hook has nothing to add; and an
 # appointment that already has a deposit row never gets a second charge.
 DEPOSIT_SKIP_TIMING_BEFORE = "timing_before"
@@ -171,6 +175,13 @@ class AppointmentDepositView:
     # waiting for payment (patient's or clinic's change; None = none).
     held_cents: int | None = None
     pending_difference_cents: int | None = None
+    # TASK-085 R: the `mode` of that pending difference ("suspend" D-R4 / "applied" D-R5; None =
+    # none, or a legacy row), as `adjustment_queries.AdjustmentTotals` reports it (S1). Read with
+    # `getattr` so the view never depends on the order the slices merge in.
+    pending_difference_mode: str | None = None
+    # TASK-085 R (S7a): that change's `pending_edit` - server-side only, never on the wire as
+    # such (the hub renders `service_change.pending_change_summaries` from it).
+    pending_edit: dict | None = None
 
 
 async def load_deposit_views(
@@ -220,6 +231,8 @@ async def load_deposit_views(
             if total is not None and total.held_delta_cents
             else None,
             pending_difference_cents=total.pending_difference_cents if total else None,
+            pending_difference_mode=getattr(total, "pending_difference_mode", None),
+            pending_edit=getattr(total, "pending_edit", None),
         )
     return views
 
@@ -247,6 +260,12 @@ async def _resolve_service_and_price(
     exactly as the booking surface canonicalised it. A `None` name means "no
     such active service"; a `None` price with a real name means the service
     exists but carries no readable price — two different skip reasons.
+
+    TASK-085: the price is the one of the booking's UNIT (`unit_id`, read with
+    `getattr` - the gate and the service change pass a `SimpleNamespace`): that
+    unit's own price for the owning professional when it has one, else the base
+    exactly as before (`_price_at_unit`). A professional of another clinic is never
+    the owner here: the clinic's own catalog answers instead.
     """
     if not appointment.appointment_type:
         return None, None
@@ -257,10 +276,12 @@ async def _resolve_service_and_price(
     # a tenant not backfilled yet -> the pre-catalog exact-name behaviour.
     services = await load_service_catalog(session, tenant.id)
     catalog = cfg.active_appointment_types(tenant, services)
+    owner_id: UUID | None = None
     if appointment.professional_id is not None:
         professional = await session.get(Professional, appointment.professional_id)
-        if professional is not None:
+        if professional is not None and professional.tenant_id == tenant.id:
             catalog = cfg.professional_appointment_types(professional, tenant, services)
+            owner_id = professional.id
     canonical = canonical_service_name(catalog, appointment.appointment_type)
     if canonical is None:
         # Historical rows keep whatever text was stored at booking time and are
@@ -273,9 +294,29 @@ async def _resolve_service_and_price(
         return None, None
     for entry in catalog:
         if entry.get("name") == canonical:
-            price = entry.get("price")
+            price = await _price_at_unit(
+                session, tenant.id, owner_id, entry, getattr(appointment, "unit_id", None)
+            )
             return canonical, (str(price) if price else None)
     return canonical, None
+
+
+async def _price_at_unit(
+    session: AsyncSession,
+    tenant_id: UUID,
+    professional_id: UUID | None,
+    entry: dict,
+    unit_id: UUID | None,
+):
+    """`entry`'s price at `unit_id` (TASK-085): the unit's OWN price when the professional set a
+    different one there (`service_terms`, tenant-scoped), otherwise the entry's raw `price`
+    untouched - so a clinic without exceptions reads byte for byte what it always did (a JSON
+    number, a zero, a blank). No unit, no owner or no `service_id`: the base, without a query."""
+    base = entry.get("price")
+    resolved = await resolve_entry_at_unit(session, tenant_id, professional_id, entry, unit_id)
+    if resolved.own and resolved.price != resolve_terms(entry, None, None).price:
+        return resolved.price
+    return base
 
 
 async def _price_text_for_appointment(
@@ -292,9 +333,13 @@ def _deposit_request_text(
     amount_cents: int,
     copy_paste: str | None,
     payment_note: str | None = None,
+    *,
+    opening: str | None = None,
 ) -> str:
     appt_type = appointment.appointment_type or "sua consulta"
-    lines = [
+    # TASK-085 R D-R6: an edit that re-charges the sinal opens the SAME single message with why.
+    lines = [opening, ""] if opening else []
+    lines += [
         f"Para confirmar {appt_type} na {tenant.clinic_name}, pedimos um sinal de "
         f"{format_brl(amount_cents)} via Pix."
     ]
@@ -344,9 +389,13 @@ async def _send_deposit_request(
     amount_cents: int,
     copy_paste: str | None,
     waba_token: str | None,
+    *,
+    opening: str | None = None,
 ) -> None:
     payment_note = await _insurance_payment_note(session, appointment)
-    text = _deposit_request_text(tenant, appointment, amount_cents, copy_paste, payment_note)
+    text = _deposit_request_text(
+        tenant, appointment, amount_cents, copy_paste, payment_note, opening=opening
+    )
     if patient.channel == CHANNEL_BRAIN_MESSAGE:
         # A Portal patient has no `wa_id`: the request travels as a Portal message, through the
         # ONE channel resolver of the payments code (`notify.resolve_sender`).
@@ -359,42 +408,6 @@ async def _send_deposit_request(
     await client.send_text_message(to=patient.wa_id, body=text)
 
 
-async def _insurance_charges_deposit(
-    session: AsyncSession, tenant: Tenant, appointment: Appointment
-) -> bool:
-    """False only when the booking's plan is one flagged "no deposit".
-
-    Reads the plan BY ID - never re-matching the free-text `insurance`. TASK-008:
-    checks `insurance_professional_plan_id` FIRST (set only under
-    `insurance_mode == "independent"`, where there is no clinic-level
-    `tenant_insurance_plans` row to read `charge_deposit` from at all), then
-    falls back to the pre-existing `insurance_plan_id` (the clinic's own row,
-    catalog-backed or custom - both read the SAME column, since TASK-008
-    re-pointed this FK at `tenant_insurance_plans.id`). No plan id at all
-    ("Particular", a typed "Outro convênio", no answer, every row older than
-    the catalog) -> True: the tenant's own pix_deposit_* policy decides,
-    exactly as before the catalog existed.
-    """
-    professional_plan_id = getattr(appointment, "insurance_professional_plan_id", None)
-    if professional_plan_id is not None:
-        charge = await session.scalar(
-            select(ProfessionalInsurancePlan.charge_deposit).where(
-                ProfessionalInsurancePlan.id == professional_plan_id
-            )
-        )
-        return charge is not False
-    plan_id = getattr(appointment, "insurance_plan_id", None)
-    if plan_id is None:
-        return True
-    charge = await session.scalar(
-        select(TenantInsurancePlan.charge_deposit).where(
-            TenantInsurancePlan.id == plan_id,
-            TenantInsurancePlan.tenant_id == tenant.id,
-        )
-    )
-    return charge is not False
-
-
 async def maybe_create_deposit(
     session: AsyncSession,
     *,
@@ -405,6 +418,8 @@ async def maybe_create_deposit(
     collect_payer_data: bool = False,
     redis=None,
     conversation_id: UUID | None = None,
+    existing_consultation: bool = False,
+    opening: str | None = None,
 ) -> PixDeposit | None:
     """Best-effort: create a Pix deposit charge for a freshly booked appointment.
 
@@ -424,20 +439,26 @@ async def maybe_create_deposit(
     caller can ASK the patient. Every other caller keeps the silent skip. `redis` and
     `conversation_id` locate the transient answer (encrypted, 15 minutes): it goes to the provider
     and to nobody else and is forgotten right after that call.
+
+    `existing_consultation` (TASK-085 R, only `recharge_after_edit` and the payer-data resume of
+    the `after` question): the consultation already exists and is being charged because an EDIT
+    changed its sinal, so the `before` guard below - which only stops the post-booking hook from
+    charging a booking twice - does not apply. The charge is an `after` sinal in both timings
+    (the consultation exists). `opening` is the sentence that opens the single Pix message.
     """
     if not tenant.pix_deposit_enabled:
         _log_deposit_skip(tenant, appointment, DEPOSIT_SKIP_DISABLED)
         return None
-    if (tenant.deposit_timing or DEPOSIT_TIMING_AFTER) == DEPOSIT_TIMING_BEFORE:
+    if (
+        not existing_consultation
+        and (tenant.deposit_timing or DEPOSIT_TIMING_AFTER) == DEPOSIT_TIMING_BEFORE
+    ):
         # `before` timing charges BEFORE the appointment exists (`booking_charge.py`); the
         # post-booking hook of the same booking must never ask for a second deposit.
         _log_deposit_skip(tenant, appointment, DEPOSIT_SKIP_TIMING_BEFORE)
         return None
     if await get_deposit_for_appointment(session, appointment.id) is not None:
         _log_deposit_skip(tenant, appointment, DEPOSIT_SKIP_ALREADY_CHARGED)
-        return None
-    if not await _insurance_charges_deposit(session, tenant, appointment):
-        _log_deposit_skip(tenant, appointment, DEPOSIT_SKIP_INSURANCE_NO_CHARGE)
         return None
     if patient is None:
         _log_deposit_skip(tenant, appointment, DEPOSIT_SKIP_NO_PATIENT)
@@ -563,7 +584,8 @@ async def maybe_create_deposit(
 
     try:
         await _send_deposit_request(
-            session, tenant, appointment, patient, amount_cents, copy_paste, waba_token
+            session, tenant, appointment, patient, amount_cents, copy_paste, waba_token,
+            opening=opening,
         )
     except Exception as exc:
         logger.warning(
@@ -580,6 +602,527 @@ async def maybe_create_deposit(
         deposit_id=str(deposit.id),
     )
     return deposit
+
+
+# --------------------------------------------------------------------------
+# TASK-085 R D-R6 - an UNPAID sinal re-quoted by an edit. Frozen signatures, implemented by S2
+# (tasks/TASK-085/sinal-trocas/contrato.md).
+# --------------------------------------------------------------------------
+
+RequoteOutcome = Literal["unchanged", "voided", "payment_in_flight", "void_failed"]
+
+# The first sentence of the new Pix (or, when nothing new is charged, the whole notice).
+REQUOTE_OPENING_TEXT = (
+    "O valor do sinal mudou com a alteração; o Pix anterior foi cancelado "
+    "(não pague aquele código)."
+)
+REQUOTE_NO_SINAL_TEXT = "Com a alteração, esta consulta não pede sinal."
+# OQ-10: there was no sinal and the edit made one due (e.g. a service without a price -> a priced
+# one; since D-R12 a convênio never makes the difference).
+NEWLY_REQUIRED_OPENING_TEXT = "Com a alteração da sua consulta, ela passou a pedir um sinal."
+# The old Pix was voided and the new one could not be created: never a message without a next step.
+REQUOTE_CLINIC_WILL_CALL_TEXT = (
+    "Não consegui gerar o novo Pix agora; a clínica vai falar com você sobre o sinal."
+)
+
+# TASK-085 R 3rd round (D-R14, mapa-u §4.6): the same re-quote when the CLINIC changed the price
+# (`recharge_after_edit(reason="price_change")`, from the price-change link's opening) - nothing
+# of the consultation was edited, so the wording speaks of its value, not of "a alteração".
+RechargeReason = Literal["edit", "price_change"]
+PRICE_REQUOTE_OPENING_TEXT = (
+    "O valor da sua consulta mudou e o sinal também. O Pix anterior foi cancelado "
+    "(não pague aquele código)."
+)
+PRICE_REQUOTE_NO_SINAL_TEXT = "Com o novo valor, esta consulta não pede sinal."
+
+
+async def requote_amount_cents(session: AsyncSession, *, tenant: Tenant, appointment) -> int:
+    """The sinal a consultation shaped like `appointment` would carry NOW, in cents - the same
+    arithmetic and the same "no charge" guards as `maybe_create_deposit`: sinal switched off, no
+    readable price, a zero amount or an amount under the provider's minimum all mean 0 (the
+    convênio never does: D-R12). Price at the consultation's unit x the clinic's CURRENT
+    percentage (OQ-8). `appointment` may be the edited row or any object with the same
+    attributes (`appointment_type`, `professional_id`, `unit_id`, `insurance_plan_id`,
+    `insurance_professional_plan_id`; a missing one reads as None), so the confirmation cards
+    (S3a/S4) can preview the amount of an edit before writing it. Read-only; no provider call."""
+    if not tenant.pix_deposit_enabled:
+        return 0
+    probe = SimpleNamespace(
+        id=getattr(appointment, "id", None),
+        appointment_type=getattr(appointment, "appointment_type", None),
+        professional_id=getattr(appointment, "professional_id", None),
+        unit_id=getattr(appointment, "unit_id", None),
+        insurance_plan_id=getattr(appointment, "insurance_plan_id", None),
+        insurance_professional_plan_id=getattr(
+            appointment, "insurance_professional_plan_id", None
+        ),
+    )
+    _name, price_text = await _resolve_service_and_price(session, tenant, probe)
+    price_cents = parse_brl_to_cents(price_text)
+    if price_cents is None:
+        return 0
+    amount_cents = round(price_cents * tenant.pix_deposit_percent / 100)
+    if amount_cents <= 0:
+        return 0
+    provider_name = tenant.payment_provider or PROVIDER_ASAAS
+    if provider_name == PROVIDER_ASAAS and amount_cents < ASAAS_MIN_PIX_CENTS:
+        return 0
+    return amount_cents
+
+
+async def requote_awaiting(
+    session: AsyncSession,
+    *,
+    tenant: Tenant,
+    appointment: Appointment,
+    deposit: PixDeposit,
+    now: datetime,
+) -> RequoteOutcome:
+    """Inside the edit's transaction, AFTER the edit was written (flushed) on `appointment`:
+    does the AWAITING sinal still match the consultation? Never commits.
+
+    The new amount is computed exactly like `maybe_create_deposit` (`requote_amount_cents`:
+    price at the unit x the clinic's CURRENT percentage; 0 when the amount is under the provider's
+    minimum). Same amount, or `deposit` not AWAITING (or not
+    this clinic's / this consultation's) -> "unchanged" (nothing touched, no provider call).
+    Otherwise `get_charge` first: PAID -> "payment_in_flight"; the void fails (or the state cannot
+    be read, or there is no account to ask) -> "void_failed" - in both cases the CALLER rolls the
+    edit back and tells the patient / the clinic (never an edit over a sinal that may be paid).
+    Voided -> the old row is detached (status EXPIRED, `resolved_at`, `appointment_id` None: a
+    late payment of the old code is an ORPHAN item) -> "voided": after the commit the caller runs
+    `recharge_after_edit`. Lock order: the caller holds the consultation; this locks the deposit.
+    A row the caller saw AWAITING that is PAID under the lock (the webhook won meanwhile) ->
+    "payment_in_flight": the edit never commits over a sinal paid at the old amount.
+
+    Caller obligations (contract section 3.7):
+    - call it as the LAST fallible step before the commit: once it answers "voided" the
+      provider's charge is already cancelled and cannot be restored, so a rollback after it would
+      leave the consultation pointing at a dead charge (whose EXPIRED webhook would then cancel
+      the visit). Anything that can still fail (agenda, other writes) goes BEFORE this call;
+    - treat an EXCEPTION raised here (payment account or price lookups, the database) exactly
+      like "void_failed": roll the edit back and tell the patient / the clinic.
+    """
+    if (
+        deposit.tenant_id != tenant.id
+        or deposit.appointment_id != appointment.id
+        or appointment.tenant_id != tenant.id
+    ):
+        logger.warning(
+            "pix_requote_foreign_deposit",
+            tenant_id=str(tenant.id),
+            appointment_id=str(appointment.id),
+        )
+        return "unchanged"
+    # Re-read under the row lock (Postgres; a no-op on SQLite): a webhook may have moved it.
+    seen = deposit.status
+    await session.refresh(deposit, with_for_update=True)
+    if seen is PixDepositStatus.AWAITING and deposit.status is PixDepositStatus.PAID:
+        logger.info(
+            "pix_requote_payment_in_flight", tenant_id=str(tenant.id), deposit_id=str(deposit.id)
+        )
+        return "payment_in_flight"
+    if deposit.status is not PixDepositStatus.AWAITING:
+        return "unchanged"
+    if deposit.deposit_timing == DEPOSIT_TIMING_BEFORE:
+        # Unreachable (a `before` sinal is PAID by the time it has a consultation), and a
+        # detached `before` row paid late would be PROMOTED into a new booking: never detach one.
+        logger.warning(
+            "pix_requote_before_row_skipped",
+            tenant_id=str(tenant.id),
+            deposit_id=str(deposit.id),
+        )
+        return "unchanged"
+    new_cents = await requote_amount_cents(session, tenant=tenant, appointment=appointment)
+    if new_cents == deposit.amount_cents:
+        return "unchanged"
+
+    charge_id = deposit.provider_charge_id or deposit.asaas_payment_id
+    provider = registry.find_provider(deposit.provider)
+    account = await cfg.get_payment_account(session, tenant.id, deposit.provider)
+    if not charge_id or provider is None or account is None:
+        logger.warning(
+            "pix_requote_void_failed",
+            reason="no_provider_or_account",
+            tenant_id=str(tenant.id),
+            deposit_id=str(deposit.id),
+        )
+        return "void_failed"
+    try:
+        state = await provider.get_charge(account, charge_id)
+    except Exception as exc:  # noqa: BLE001 - unknown state = never void
+        logger.warning(
+            "pix_requote_void_failed",
+            reason="state_unknown",
+            error_type=type(exc).__name__,
+            tenant_id=str(tenant.id),
+            deposit_id=str(deposit.id),
+        )
+        return "void_failed"
+    if state is not None and state.status is PaymentStatus.PAID:
+        logger.info(
+            "pix_requote_payment_in_flight", tenant_id=str(tenant.id), deposit_id=str(deposit.id)
+        )
+        return "payment_in_flight"
+    try:
+        await provider.cancel_charge(account, charge_id)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "pix_requote_void_failed",
+            reason="cancel_failed",
+            error_type=type(exc).__name__,
+            tenant_id=str(tenant.id),
+            deposit_id=str(deposit.id),
+        )
+        return "void_failed"
+
+    # The reference the provider holds must still be recognised once the row has no
+    # consultation: a legacy row (pre-core) sent the APPOINTMENT id and stores none.
+    reference = deposit.external_reference or str(appointment.id)
+    detached = await session.execute(
+        update(PixDeposit)
+        .where(
+            PixDeposit.id == deposit.id,
+            PixDeposit.tenant_id == tenant.id,
+            PixDeposit.status == PixDepositStatus.AWAITING,
+        )
+        .values(
+            status=PixDepositStatus.EXPIRED,
+            resolved_at=now,
+            appointment_id=None,
+            external_reference=reference,
+        )
+        .returning(PixDeposit.id)
+        .execution_options(synchronize_session=False)
+    )
+    claimed = detached.scalar_one_or_none() is not None
+    await session.refresh(deposit)
+    if not claimed:
+        # The webhook won the row between the read and the void (the provider refuses to void a
+        # paid charge, so this is a payment): the money is real, the edit must not pass.
+        return "payment_in_flight"
+    logger.info(
+        "pix_requote_voided",
+        tenant_id=str(tenant.id),
+        appointment_id=str(appointment.id),
+        deposit_id=str(deposit.id),
+    )
+    return "voided"
+
+
+def requote_card_line_text(old_cents: int, new_cents: int) -> str:
+    """The confirmation card's line for an edit that re-quotes an UNPAID sinal."""
+    if new_cents <= 0:
+        return (
+            "Com a alteração, esta consulta não pede sinal; ao confirmar, cancelamos o Pix "
+            f"anterior ({format_brl(old_cents)})."
+        )
+    return (
+        f"O sinal passa de {format_brl(old_cents)} para {format_brl(new_cents)}; ao confirmar, "
+        "cancelamos o Pix anterior e enviamos um novo."
+    )
+
+
+def requote_blocked_text(outcome: str) -> str:
+    """What the patient is told when `requote_awaiting` refused the edit (the edit was undone)."""
+    if outcome == "payment_in_flight":
+        return (
+            "O Pix do sinal desta consulta acabou de ser pago, então a alteração não foi feita. "
+            "Assim que o pagamento for confirmado, você pode pedir a alteração de novo."
+        )
+    if outcome == "void_failed":
+        return (
+            "Não consegui cancelar o Pix do sinal desta consulta agora, então a alteração não "
+            "foi feita. Tente de novo em alguns minutos."
+        )
+    return (
+        "Não consegui fazer a alteração agora, então ela não foi feita. "
+        "Tente de novo em alguns minutos."
+    )
+
+
+async def _tell_patient(
+    session: AsyncSession, tenant: Tenant, patient: Patient, text: str, waba_token: str | None
+) -> None:
+    """One best-effort notice on the patient's channel (a lost notice never undoes the edit)."""
+    try:
+        await notify.deliver(
+            session,
+            tenant,
+            patient,
+            [notify.Text(text)],
+            waba_token=waba_token,
+            whatsapp_cls=WhatsAppClient,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "pix_requote_notice_not_delivered",
+            error_type=type(exc).__name__,
+            tenant_id=str(tenant.id),
+        )
+
+
+async def recharge_after_edit(
+    *,
+    tenant_id: UUID,
+    appointment_id: UUID,
+    old_amount_cents: int | None,
+    waba_token: str | None = None,
+    redis=None,
+    reason: RechargeReason = "edit",
+) -> UUID | None:
+    """After the commit of an edit whose `requote_awaiting` answered "voided" (own session, the
+    `plugins/pix_deposit._post_booking` way): creates the new sinal for the edited consultation
+    and sends it opening with "O valor do sinal mudou com a alteração; o Pix anterior foi
+    cancelado (não pague aquele código)". A new amount of 0 creates nothing and only tells the
+    patient the previous Pix was cancelled. Returns the new deposit's id, or None. Best-effort:
+    never raises (the edit already stands).
+
+    `old_amount_cents=None` = the consultation had NO sinal and the edit made one due (OQ-10):
+    the sinal is charged in BOTH timings (the consultation exists, so it is an `after` sinal even
+    in a `before` clinic), opening with `NEWLY_REQUIRED_OPENING_TEXT`; nothing due = nothing said.
+    Idempotent: a consultation that already has a deposit row is never charged again (the
+    consultation row lock serialises two concurrent calls). A provider that needs a payer field
+    asks for it (the `after` question, `payer_data_after`) after the "Pix anterior cancelado"
+    notice. A provider failure only sends that notice (the edit stands without a sinal; logged).
+
+    `reason="price_change"` (TASK-085 R UB2, D-R14): the clinic changed the PRICE and the patient
+    opened the e-mail's link (`price_change.open_price_notice` voided the old Pix). Same steps;
+    only the wording changes (`PRICE_REQUOTE_OPENING_TEXT` / `PRICE_REQUOTE_NO_SINAL_TEXT`), and
+    a failed new Pix opens its clinic item under its own reference (no edit stamp to key it on).
+    """
+    try:
+        async with async_session_factory() as session:
+            return await _recharge(
+                session,
+                tenant_id=tenant_id,
+                appointment_id=appointment_id,
+                old_amount_cents=old_amount_cents,
+                waba_token=waba_token,
+                redis=redis,
+                reason=reason,
+            )
+    except Exception as exc:  # noqa: BLE001 - post-commit, best-effort
+        logger.warning(
+            "pix_requote_recharge_failed",
+            error_type=type(exc).__name__,
+            tenant_id=str(tenant_id),
+            appointment_id=str(appointment_id),
+        )
+        if reason == "price_change" and old_amount_cents is not None:
+            await _recharge_crashed(
+                tenant_id=tenant_id,
+                appointment_id=appointment_id,
+                old_amount_cents=old_amount_cents,
+                waba_token=waba_token,
+            )
+        return None
+
+
+async def _recharge_crashed(
+    *,
+    tenant_id: UUID,
+    appointment_id: UUID,
+    old_amount_cents: int,
+    waba_token: str | None,
+) -> None:
+    """TASK-085 R UB2 fix round 1 (review M3): the price-change re-quote already voided the old
+    Pix and the recharge itself RAISED - the patient must never be left in silence with a dead
+    code. Fresh session: unless a new sinal exists after all, ONE `sinal_requote_failed` item
+    (the S2 path's own) and the short "Pix anterior cancelado ... a clínica vai falar com você"
+    line. Never raises."""
+    try:
+        async with async_session_factory() as session:
+            tenant = await session.get(Tenant, tenant_id)
+            appointment = await session.scalar(
+                select(Appointment).where(
+                    Appointment.id == appointment_id, Appointment.tenant_id == tenant_id
+                )
+            )
+            if tenant is None or appointment is None or appointment.patient_id is None:
+                return
+            patient = await session.get(Patient, appointment.patient_id)
+            if patient is None or patient.tenant_id != tenant.id:
+                return
+            if await get_deposit_for_appointment(session, appointment.id) is not None:
+                return  # the new sinal exists: its own message went out
+            try:
+                new_cents = await requote_amount_cents(
+                    session, tenant=tenant, appointment=appointment
+                )
+            except Exception:  # noqa: BLE001 - the item still goes out, without an amount
+                new_cents = 0
+            await _recharge_failed(
+                session,
+                tenant,
+                patient,
+                appointment,
+                new_cents,
+                reason="price_change",
+                old_amount_cents=old_amount_cents,
+            )
+            await _tell_patient(
+                session,
+                tenant,
+                patient,
+                f"{PRICE_REQUOTE_OPENING_TEXT} {REQUOTE_CLINIC_WILL_CALL_TEXT}",
+                waba_token,
+            )
+            await session.commit()
+    except Exception as exc:  # noqa: BLE001 - logged; nothing else left to try
+        logger.warning(
+            "pix_requote_recharge_fallback_failed",
+            error_type=type(exc).__name__,
+            tenant_id=str(tenant_id),
+            appointment_id=str(appointment_id),
+        )
+
+
+async def _recharge_failed(
+    session: AsyncSession,
+    tenant: Tenant,
+    patient: Patient,
+    appointment: Appointment,
+    new_cents: int,
+    *,
+    reason: RechargeReason = "edit",
+    old_amount_cents: int | None = None,
+) -> None:
+    """The old Pix was voided and the new one was NOT created (the provider refused it, or the
+    payer-data question could not be asked): ONE attention item tells the clinic to collect the
+    new sinal itself - its own reason `sinal_requote_failed` (TASK-085 R S7a; S2 had reused
+    `service_diff_collect_due`, whose sentence speaks of a dearer service), amount = the new
+    sinal. One item per edit: the key carries the consultation and its `updated_at` (a retry of
+    the same edit dedupes, a later edit that fails again opens its own). Never raises."""
+    provider = tenant.payment_provider or PROVIDER_ASAAS
+    stamp = appointment.updated_at
+    reference = f"requote:{appointment.id}:{int(stamp.timestamp()) if stamp else 0}"
+    if reason == "price_change":
+        # UB2: a price change writes nothing on the consultation (no `updated_at` to key on); one
+        # item per price move of this consultation (old -> new sinal), so a retry dedupes.
+        reference = f"price_requote:{appointment.id}:{old_amount_cents or 0}:{new_cents}"
+    try:
+        # A savepoint: a failed insert must not poison the session the patient's notice uses.
+        async with session.begin_nested():
+            await attention.open_attention_item(
+                session,
+                tenant_id=tenant.id,
+                reason=REASON_SINAL_REQUOTE_FAILED,
+                dedupe_key=attention.attention_dedupe_key(
+                    provider, reference, REASON_SINAL_REQUOTE_FAILED
+                ),
+                provider=provider,
+                patient_id=patient.id,
+                amount_cents=new_cents,
+                slot_start=appointment.start_at,
+                slot_end=appointment.end_at,
+                service_label=appointment.appointment_type,
+            )
+    except Exception as exc:  # noqa: BLE001 - the patient is still told; logged for the clinic
+        logger.warning(
+            "pix_requote_attention_failed",
+            error_type=type(exc).__name__,
+            tenant_id=str(tenant.id),
+            appointment_id=str(appointment.id),
+        )
+
+
+async def _recharge(
+    session: AsyncSession,
+    *,
+    tenant_id: UUID,
+    appointment_id: UUID,
+    old_amount_cents: int | None,
+    waba_token: str | None,
+    redis,
+    reason: RechargeReason = "edit",
+) -> UUID | None:
+    tenant = await session.get(Tenant, tenant_id)
+    appointment = await session.scalar(
+        select(Appointment)
+        .where(Appointment.id == appointment_id, Appointment.tenant_id == tenant_id)
+        .with_for_update()
+    )
+    if tenant is None or appointment is None:
+        return None
+    if appointment.status not in LIVE_APPOINTMENT_STATUSES:
+        return None
+    patient = await session.get(Patient, appointment.patient_id) if appointment.patient_id else None
+    if patient is None or patient.tenant_id != tenant.id:
+        return None
+    if await get_deposit_for_appointment(session, appointment.id) is not None:
+        _log_deposit_skip(tenant, appointment, DEPOSIT_SKIP_ALREADY_CHARGED)
+        return None
+
+    voided = old_amount_cents is not None
+    price_change = reason == "price_change"
+    voided_text = PRICE_REQUOTE_OPENING_TEXT if price_change else REQUOTE_OPENING_TEXT
+    no_sinal_text = PRICE_REQUOTE_NO_SINAL_TEXT if price_change else REQUOTE_NO_SINAL_TEXT
+    failed = {"reason": reason, "old_amount_cents": old_amount_cents}
+    new_cents = await requote_amount_cents(session, tenant=tenant, appointment=appointment)
+    if new_cents <= 0:
+        if voided:
+            await _tell_patient(
+                session, tenant, patient, f"{voided_text} {no_sinal_text}", waba_token
+            )
+        return None
+
+    conversation_id = await notify.conversation_id_for(session, tenant.id, patient.id)
+    try:
+        deposit = await maybe_create_deposit(
+            session,
+            tenant=tenant,
+            patient=patient,
+            appointment=appointment,
+            waba_token=waba_token,
+            collect_payer_data=True,
+            redis=redis,
+            conversation_id=conversation_id,
+            existing_consultation=True,
+            opening=voided_text if voided else NEWLY_REQUIRED_OPENING_TEXT,
+        )
+    except payer_data.PayerDataNeeded as need:
+        # Nothing was charged nor stored. Say the old code is dead, then ask what the provider
+        # needs; the answer resumes through `payer_data_after.resume_after_booking`.
+        from secretaria.services.payments import payer_data_after
+
+        if voided:
+            await _tell_patient(session, tenant, patient, voided_text, waba_token)
+        asked = await payer_data_after.ask_after_booking(
+            session,
+            tenant=tenant,
+            patient=patient,
+            appointment=appointment,
+            kind=need.kind,
+            provider=need.provider,
+            waba_token=waba_token,
+            redis=redis,
+            conversation_id=conversation_id,
+            whatsapp_cls=WhatsAppClient,
+        )
+        if not asked and voided:
+            # The question could not go out: the Pix is skipped, as on any `after` booking - but
+            # the old one is already dead, so the clinic takes it from here.
+            await _recharge_failed(session, tenant, patient, appointment, new_cents, **failed)
+            await _tell_patient(session, tenant, patient, REQUOTE_CLINIC_WILL_CALL_TEXT, waba_token)
+        await session.commit()
+        return None
+    if deposit is None:
+        logger.warning(
+            "pix_requote_recharge_not_created",
+            tenant_id=str(tenant.id),
+            appointment_id=str(appointment.id),
+            had_sinal=voided,
+        )
+        if voided:
+            await _recharge_failed(session, tenant, patient, appointment, new_cents, **failed)
+            await _tell_patient(
+                session, tenant, patient,
+                f"{voided_text} {REQUOTE_CLINIC_WILL_CALL_TEXT}", waba_token,
+            )
+        await session.commit()
+        return None
+    await session.commit()
+    return deposit.id
 
 
 # --------------------------------------------------------------------------

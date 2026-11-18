@@ -1,9 +1,12 @@
 """Request/response schemas for the doctor-hub convênio catalog (api/hub/insurance.py)
 and the admin catalog endpoint (api/admin/insurance.py).
 
-Strict on input (`extra="forbid"`): a typo'd key such as `chargeDeposit`
-silently ignored would leave a clinic charging deposits it meant to switch
-off. Full contract: docs/CHECKPOINT_convenio_catalogo.md.
+Strict on input (`extra="forbid"`): a typo'd key silently ignored would save
+something the clinic did not mean. The one exception is the three schemas an
+older Portal still sends the retired `charge_deposit` to (TASK-085 R U1b): they
+ignore unknown keys - every field they declare is required, so a typo there is
+still a 422 (missing field) - and the wrappers around them stay strict.
+Full contract: docs/CHECKPOINT_convenio_catalogo.md.
 """
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -36,18 +39,18 @@ class TenantInsurancePlanRead(BaseModel):
     name: str
     is_custom: bool
     custom_payment_note: str | None = None
-    charge_deposit: bool
     # Position the clinic chose in the patient's list (0 = first); None = not placed,
     # follows the placed ones alphabetically. The list itself comes back in this order.
     sort_order: int | None = None
 
 
 class TenantInsurancePlanIn(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    # `ignore`, not `forbid`: an older Portal still sends the retired per-convênio sinal flag
+    # (TASK-085 R U1b: a convênio never exempts the sinal); `catalog_id` is required, so a
+    # typo'd key is still refused.
+    model_config = ConfigDict(extra="ignore")
 
     catalog_id: str
-    # Default = today's behaviour: the tenant's pix_deposit_* policy applies.
-    charge_deposit: bool = True
 
 
 class TenantInsurancePlansUpdate(BaseModel):
@@ -63,13 +66,15 @@ class TenantInsurancePlansUpdate(BaseModel):
 
 
 class TenantInsurancePlanCustomCreate(BaseModel):
-    """POST /tenants/me/insurance-plans/custom - the clinic's "Outro" convênio."""
+    """POST /tenants/me/insurance-plans/custom - the clinic's "Outro" convênio.
 
-    model_config = ConfigDict(extra="forbid")
+    Unknown keys are ignored (an older Portal's retired sinal flag - see TenantInsurancePlanIn).
+    """
+
+    model_config = ConfigDict(extra="ignore")
 
     custom_name: str = Field(min_length=1, max_length=120)
     custom_payment_note: str = Field(min_length=1, max_length=2000)
-    charge_deposit: bool = True
 
 
 class TenantInsurancePlanOrderUpdate(BaseModel):
@@ -82,14 +87,6 @@ class TenantInsurancePlanOrderUpdate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     plan_ids: list[str] = Field(default_factory=list, max_length=100)
-
-
-class TenantInsurancePlanDepositUpdate(BaseModel):
-    """PATCH /tenants/me/insurance-plans/{plan_id} - toggle the Pix-deposit flag."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    charge_deposit: bool
 
 
 class InsuranceModeRead(BaseModel):
@@ -140,13 +137,15 @@ class ProfessionalInsurancePlansUpdate(BaseModel):
 
 
 class ProfessionalInsuranceCustomCreate(BaseModel):
-    """POST .../professionals/{id}/insurance-plans/custom - independent mode only."""
+    """POST .../professionals/{id}/insurance-plans/custom - independent mode only.
 
-    model_config = ConfigDict(extra="forbid")
+    Unknown keys are ignored (an older Portal's retired sinal flag - see TenantInsurancePlanIn).
+    """
+
+    model_config = ConfigDict(extra="ignore")
 
     custom_name: str = Field(min_length=1, max_length=120)
     custom_payment_note: str = Field(min_length=1, max_length=2000)
-    charge_deposit: bool = True
 
 
 # ---------------------------------------------------------------------------

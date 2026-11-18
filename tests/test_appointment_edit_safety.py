@@ -146,7 +146,7 @@ async def test_a_concurrently_changed_appointment_is_not_overwritten():
 
 
 @pytest.mark.parametrize("change", ["insurance", "professional_id", "service", "start_at"])
-async def test_new_pix_restrictions_block_confirmation_of_a_parked_draft(change):
+async def test_a_parked_draft_under_new_pix_guards_defers_money_and_blocks_time(change):
     appt = appointment()
     values = {
         "insurance": "Amil",
@@ -167,9 +167,10 @@ async def test_new_pix_restrictions_block_confirmation_of_a_parked_draft(change)
             reschedule_blocked=True,
         ),
     )
-    if change == "service":
+    if change in ("service", "insurance", "professional_id"):
         # 2026-10-26: a paid sinal no longer blocks the service; the worker settles the
         # difference (services/payments/service_change.py) and only then touches the agenda.
+        # TASK-085 R D-R3: the convênio and the doctor likewise.
         assert result.appointment_edit["calendar_deferred"] is True
     else:
         assert result.appointment_edit is None

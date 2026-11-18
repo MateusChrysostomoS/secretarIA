@@ -565,7 +565,16 @@ async def _send_bot_reply_inner(reply: _ReplyContext, redis=None) -> None:
                     )
                     if wants_upcoming_appointments and conversation.patient_id is not None:
                         upcoming_appointments = await load_upcoming_appointments(
-                            session, tenant.id, conversation.patient_id
+                            session,
+                            tenant.id,
+                            conversation.patient_id,
+                            # TASK-085 R (D-R11): "Outro horário" moves a consultation hidden
+                            # from every list; the manage flow keeps seeing THAT one.
+                            rebooking_id=(
+                                conversation.flow_managing_appointment_id
+                                if conversation.flow_state == FlowState.MANAGE_BOOKING
+                                else None
+                            ),
                         )
                     # Owning-professional calendar for THIS manage turn: cancel/
                     # reschedule must act on the agenda that actually owns the
@@ -1308,10 +1317,16 @@ async def _send_bot_reply_inner(reply: _ReplyContext, redis=None) -> None:
     # "consultas marcadas" block for THIS turn's prompt, only when the gate
     # qualifies - see _should_inject_appointment_context / _appointment_context_text.
     appointment_context_text = None
-    if _should_inject_appointment_context(upcoming_appointments, flow_state, delegated_to_llm):
+    # TASK-085 R (D-R11, UA3 review I2): the consultation being moved by "Outro horário" is listed
+    # for the ROUTER only - its old slot left the agenda (often taken by someone else); the AI
+    # must never present it as booked.
+    ai_appointments = [
+        appt for appt in upcoming_appointments or [] if not appt.get("rebook_adjustment_id")
+    ]
+    if _should_inject_appointment_context(ai_appointments, flow_state, delegated_to_llm):
         professional_names = {str(p.id): p.name for p in (flow_professionals or [])}
         appointment_context_text = _appointment_context_text(
-            upcoming_appointments or [],
+            ai_appointments,
             tenant_config.timezone if tenant_config is not None else None,
             professional_names,
             tenant_config.appointment_types if tenant_config is not None else [],
@@ -1325,6 +1340,8 @@ async def _send_bot_reply_inner(reply: _ReplyContext, redis=None) -> None:
                 for unit in flow_units.offered_units(p)
             }
             or None,
+            # TASK-085 A13: the owner's per-unit price, from the same snapshot (no query).
+            professionals=flow_professionals,
         )
 
     # Every LLM turn is either a deliberate escape hatch ("Outro") or a gap in

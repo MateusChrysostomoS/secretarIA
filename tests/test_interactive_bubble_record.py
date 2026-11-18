@@ -508,15 +508,13 @@ async def test_a_malformed_card_costs_its_controls_never_the_thread(
     assert after["body"] == "oi"
 
 
-async def test_portal_list_persists_the_row_description_the_clinic_insurance_list_carries(
-    db, seeded
-) -> None:
-    """TASK-017 / 15A: the convênio list's payment description reaches the Portal patient too."""
-    from secretaria.services.insurance_payment_copy import insurance_payment_description
-
+async def test_portal_list_persists_a_row_description(db, seeded) -> None:
+    """A list row's description reaches the Portal patient too. (The convênio list's payment
+    text that used to be the example here was removed by TASK-085 R D-R12; any row description
+    still travels the same way.)"""
     _, conversation = seeded
     sender = BrainMessageSender(conversation_id=conversation.id, session_factory=db)
-    description = insurance_payment_description("reembolso")
+    description = "Descrição de exemplo da linha."
     rows = [("ins|Exemplo", "Exemplo", description), ("ins|particular", "Particular", None)]
 
     await sender.send_list(

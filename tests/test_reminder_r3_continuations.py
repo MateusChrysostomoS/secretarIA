@@ -74,16 +74,16 @@ async def test_legacy_book_another_edits_the_existing_booking_instead(db, calend
     ).status == AppointmentStatus.SCHEDULED
 
 
-async def test_legacy_book_another_with_paid_deposit_hides_price_changes(db, calendar):  # noqa: F811
+async def test_legacy_book_another_with_paid_deposit_offers_every_field(db, calendar):  # noqa: F811
     world = await seed_world(db, start_at=_future(hours=5))
     await seed_paid_deposit(db, world)
     rid = await add_reminder(db, world, kind="hour")
     await _tap(world, "remnew", rid)
     assert EDIT_PIX_NOTICE in sent()[0][2]
-    # 2026-10-26: the service stays (the difference of the sinal is settled at Confirmar);
-    # the doctor is still hidden with a paid sinal. Four options -> a WhatsApp list.
+    # 2026-10-26: the service stays (the difference of the sinal is settled at Confirmar).
+    # TASK-085 R D-R3: the doctor is offered with a paid sinal too. Five options -> a list.
     kind, *_rest = sent()[0]
     assert kind == "list"
     labels = [row[1] for row in sent()[0][4]]
-    assert LABEL_EDIT_SERVICE in labels and LABEL_EDIT_DOCTOR not in labels
+    assert LABEL_EDIT_SERVICE in labels and LABEL_EDIT_DOCTOR in labels
     assert calendar.created == [] and calendar.cancelled == []

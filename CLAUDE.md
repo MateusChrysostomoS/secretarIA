@@ -1,4 +1,5 @@
 # SecretarIA
+TASK-085 / R (2026-11-18, LOCAL, branch `task/TASK-085-preco-por-unidade`, sem push/deploy): o sinal nas trocas de serviço/unidade/médico/convênio e no preço alterado pela clínica (antiga sai da agenda na espera do Pix, "Outro horário", `old_slot_lost`, e-mail de preço com link; convênio nunca isenta o sinal); deploy: secretarIA-frontend + Brain-Message-Frontend ANTES, migração `d5a8c3e1f7b9`, API+worker juntos: [checkpoint §9.7](docs/CHECKPOINT_pix_provider_core.md).
 
 TASK-084 (2026-11-14, branch local, sem push/deploy): ambiente da secretarIA por clínica (`tenants.operating_channel`: Portal Brain × WhatsApp; WhatsApp travado em `services/operating_channel.py::RELEASED_OPERATING_CHANNELS`), `PATCH /tenants/me/operating-channel` só gestor (409 até liberar); migração `b8d4f2a6c9e1` antes de API+worker; checklist da liberação do WhatsApp (inclui o toque `svc|`/`ins|` por título): [checkpoint](docs/CHECKPOINT_ambiente_secretaria.md).
 

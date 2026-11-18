@@ -50,6 +50,7 @@ from secretaria.services.service_catalog import (
     normalize as normalize_service_name,
     resolve_entries,
 )
+from secretaria.services.service_terms import resolve_entry_at_unit
 from secretaria.services.tenant_config import (
     active_appointment_types,
     professional_appointment_types,
@@ -560,6 +561,17 @@ def _adapt_greeting_to_state(
         return f"{greeting}\n\n{line}"
     return greeting
 
+
+def _unit_uuid(value) -> UUID | None:
+    """An appointment dict's `unit_id` (a string, services/patient_context.py) as a UUID."""
+    if value is None:
+        return None
+    try:
+        return value if isinstance(value, UUID) else UUID(str(value))
+    except ValueError:
+        return None
+
+
 async def _load_upcoming_greeting_data(
     session: AsyncSession, tenant: Tenant, future_appointments: list[dict]
 ) -> _UpcomingGreetingData:
@@ -603,6 +615,15 @@ async def _load_upcoming_greeting_data(
             (svc for svc in catalog if normalize_service_name(svc.get("name")) == target_name),
             None,
         )
+    if nearest_service is not None and owner is not None:
+        # TASK-085 (D6/R11): the price is not stored on a booking - it is re-read, and at the
+        # booking's OWN unit: the owner's value there when they have one, else the base (also
+        # without a unit, D7). Tenant-scoped: another clinic's row never applies.
+        resolved = await resolve_entry_at_unit(
+            session, tenant.id, owner.id, nearest_service, _unit_uuid(nearest.get("unit_id"))
+        )
+        if resolved.own:
+            nearest_service = {**nearest_service, "price": resolved.price}
 
     return _UpcomingGreetingData(
         professional_names={pid: row.name for pid, row in professionals_by_id.items()},

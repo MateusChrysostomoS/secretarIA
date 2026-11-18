@@ -49,6 +49,26 @@ REASON_SERVICE_DIFF_AGENDA_PENDING = "service_diff_agenda_pending"
 # provider was down or erroring), so the dearer service stood at once without it: the clinic
 # collects the difference (`amount_cents`) itself. Money NOT received - never part of a refund.
 REASON_SERVICE_DIFF_COLLECT_DUE = "service_diff_collect_due"
+# TASK-085 R (D-R5): a clinic that does not require the sinal to book applied a change to a DEARER
+# service/unit/doctor/convênio at once and sent the Pix of the difference, which expired unpaid:
+# the clinic collects `amount_cents` itself. Money NOT received - never part of a refund.
+REASON_SERVICE_DIFF_UNPAID = "service_diff_unpaid"
+# TASK-085 R (S7a): an edit was undone after the engine created the Pix of its difference (never
+# sent to the patient) and that charge could not be voided at the provider: the clinic cancels it
+# in the provider's panel. `amount_cents` = the charge. Money NOT received.
+REASON_UNSEEN_CHARGE_TO_VOID = "unseen_charge_to_void"
+# TASK-085 R (S7a, D-R6): an edit changed the amount of an UNPAID sinal, the old Pix was voided and
+# the new one could not be created (the provider refused it, or the payer-data question could not
+# go out): the clinic collects the new sinal itself. `amount_cents` = the new sinal.
+REASON_SINAL_REQUOTE_FAILED = "sinal_requote_failed"
+# TASK-085 R, 3rd round (D-R11): the patient did not pay the difference of a change and the old
+# consultation's slot was taken while it was out of the agenda; nobody chose a new slot. The clinic
+# reschedules (or cancels) it; the paid sinal (`amount_cents`) stays with the consultation.
+REASON_SERVICE_DIFF_REBOOK_DUE = "service_diff_rebook_due"
+# TASK-085 R, 3rd round (D-R14): the clinic changed a price, this patient's sinal needs an
+# adjustment, and there is no e-mail to tell them (a WhatsApp patient, or none on file): the
+# clinic talks to the patient. Nothing is charged or returned automatically.
+REASON_PRICE_CHANGE_NO_EMAIL = "price_change_no_email"
 
 ATTENTION_REASONS = frozenset(
     {
@@ -66,6 +86,11 @@ ATTENTION_REASONS = frozenset(
         REASON_SERVICE_DIFF_REFUND_DUE,
         REASON_SERVICE_DIFF_AGENDA_PENDING,
         REASON_SERVICE_DIFF_COLLECT_DUE,
+        REASON_SERVICE_DIFF_UNPAID,
+        REASON_UNSEEN_CHARGE_TO_VOID,
+        REASON_SINAL_REQUOTE_FAILED,
+        REASON_SERVICE_DIFF_REBOOK_DUE,
+        REASON_PRICE_CHANGE_NO_EMAIL,
     }
 )
 

@@ -74,6 +74,16 @@ def test_every_reason_of_the_spec_is_known():
         "service_diff_refund_due",
         "service_diff_agenda_pending",
         "service_diff_collect_due",
+        # TASK-085 R (D-R5): the Pix of a change already applied expired unpaid.
+        "service_diff_unpaid",
+        # TASK-085 R (S7a): an undone edit's Pix the provider would not void; the new sinal Pix
+        # refused after the old one was voided (D-R6).
+        "unseen_charge_to_void",
+        "sinal_requote_failed",
+        # TASK-085 R 3rd round: the old slot was taken and nobody rebooked (D-R11); a price change
+        # the patient cannot be e-mailed about (D-R14).
+        "service_diff_rebook_due",
+        "price_change_no_email",
     }
     assert all(len(reason) <= 32 for reason in ATTENTION_REASONS)  # VARCHAR(32)
 

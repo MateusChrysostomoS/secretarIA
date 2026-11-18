@@ -42,6 +42,12 @@ REMINDER_KIND_CHAT = "chat"  # the opening message of the chat (born already sen
 # reminder's (workers/shared/reminder_actions.py).
 REMINDER_KIND_STAFF_CONFIRM = "staff_confirm"
 REMINDER_KIND_STAFF_EDIT = "staff_edit"
+# TASK-085 R, 3rd round (D-R14; tasks/TASK-085/sinal-trocas/mapa-u.md §2.1): the clinic changed a
+# price and the patient was e-mailed a link to the Portal. The row is the link's target
+# (`reminder_text.portal_conversation_link(tenant, row.id)`) and the "one pending notice per
+# consultation version" marker: born `sent` on the e-mail channel, no prompt, no clinic warning;
+# `answered_at` NULL = not opened yet. Never planned, never warned about, never a tap target.
+REMINDER_KIND_PRICE_CHANGE = "price_change"
 REMINDER_KINDS: tuple[str, ...] = (
     REMINDER_KIND_CUSTOM,
     REMINDER_KIND_DAY,
@@ -49,11 +55,16 @@ REMINDER_KINDS: tuple[str, ...] = (
     REMINDER_KIND_CHAT,
     REMINDER_KIND_STAFF_CONFIRM,
     REMINDER_KIND_STAFF_EDIT,
+    REMINDER_KIND_PRICE_CHANGE,
 )
 REMINDER_KINDS_STAFF: tuple[str, ...] = (REMINDER_KIND_STAFF_CONFIRM, REMINDER_KIND_STAFF_EDIT)
 # Kinds that are shown, never planned: the cron engine, the reconcile backfill and the
 # clinic warnings ignore them.
-REMINDER_KINDS_UNPLANNED: tuple[str, ...] = (REMINDER_KIND_CHAT, *REMINDER_KINDS_STAFF)
+REMINDER_KINDS_UNPLANNED: tuple[str, ...] = (
+    REMINDER_KIND_CHAT,
+    *REMINDER_KINDS_STAFF,
+    REMINDER_KIND_PRICE_CHANGE,
+)
 
 REMINDER_STATUS_PENDING = "pending"
 REMINDER_STATUS_SENDING = "sending"

@@ -50,6 +50,7 @@ from secretaria.ai.tools import (
 )
 from secretaria.ai.unit_scope import (
     outside_unit_hours,
+    owner_service_catalog,
     professional_unit_options,
     resolve_tool_unit,
     service_id_of,
@@ -145,11 +146,22 @@ async def list_units(service_name: str = "", professional_name: str = "") -> dic
         owner = await sole_professional_row(tenant_id, _sole_professional_id())
     if (service_name or "").strip():
         # ... and, for a named service, only the units where the doctor does that service.
-        catalog = _effective_service_catalog() if catalog is None else catalog
-        canonical, error = _canonical_appointment_type(service_name, "list_units", catalog)
+        canonical, error = _canonical_appointment_type(
+            service_name,
+            "list_units",
+            _effective_service_catalog() if catalog is None else catalog,
+        )
         if error is not None:
             return error
-        service_id = service_id_of(catalog, canonical)
+        # TASK-085 final review: the service id comes from the DOCTOR's stored catalog - the
+        # turn's effective one (one-doctor clinic) holds `RuntimeAppointmentType` objects.
+        if owner is not None:
+            owned = (
+                catalog if catalog is not None else await owner_service_catalog(tenant_id, owner)
+            )
+            service_id = service_id_of(owned, canonical)
+        else:
+            service_id = None
         if owner is not None and service_id is not None:
             if await professional_unit_options(tenant_id, owner):
                 units = await valid_unit_options(tenant_id, owner, service_id)
@@ -228,9 +240,7 @@ async def create_event_at_unit(
     if service_error is not None:
         return service_error
     # The service must be one the doctor does at this unit (spec §6.1, §9.13).
-    refused = await _service_unit_refusal(
-        "create_event_at_unit", unit, owner, _effective_service_catalog(), canonical_type
-    )
+    refused = await _service_unit_refusal("create_event_at_unit", unit, owner, None, canonical_type)
     if refused is not None:
         return refused
 

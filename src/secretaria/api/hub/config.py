@@ -33,8 +33,9 @@ until no deployed frontend depends on them.
 """
 
 import time
+from datetime import UTC, datetime
 
-from fastapi import APIRouter, Depends, Header, HTTPException, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from secretaria.api.hub.deps import (
@@ -58,6 +59,7 @@ from secretaria.services.operating_channel import (
     available_operating_channels,
     set_operating_channel,
 )
+from secretaria.services.payments import price_change
 
 logger = get_logger(__name__)
 router = APIRouter(prefix="/tenants/me", tags=["hub-config"])
@@ -95,6 +97,21 @@ async def _claim_if_authenticated(
     if authorization is None:
         return None
     return await get_hub_claim(authorization)
+
+
+async def _sweep_prices_after_commit(request: Request, tenant: Tenant, *patches: dict) -> None:
+    """TASK-085 R (D-R14): AFTER the commit of a save that can change a price - a service list
+    (`appointment_types`, the clinic's or a professional's; the per-unit exceptions ride in it) -
+    of a clinic with sinal, schedule the price sweep (`price_change.enqueue_sweep`: one job per
+    clinic per 5-minute window; it e-mails the patients whose sinal the new price changes). Never
+    raises: the save already committed."""
+    if not tenant.pix_deposit_enabled:
+        return
+    if not any("appointment_types" in patch for patch in patches if patch):
+        return
+    await price_change.enqueue_sweep(
+        getattr(request.app.state, "arq_pool", None), tenant.id, changed_at=datetime.now(UTC)
+    )
 
 
 def _require_manager_for_payment_fields(claim: SubscriptionClaim | None, patch: dict) -> None:
@@ -174,6 +191,7 @@ async def update_operating_channel(
 @router.put("/config", response_model=TenantConfigRead)
 async def update_config(
     body: TenantConfigUpdate,
+    request: Request,
     tenant: Tenant = Depends(get_current_tenant),
     claim: SubscriptionClaim | None = Depends(_claim_if_authenticated),
     session: AsyncSession = Depends(get_session),
@@ -228,12 +246,14 @@ async def update_config(
     await session.commit()
     await session.refresh(tenant)
     logger.info("hub_config_updated", tenant_id=str(tenant.id), fields=sorted(data.keys()))
+    await _sweep_prices_after_commit(request, tenant, data)
     return await hubcfg.tenant_read_model(session, tenant)
 
 
 @router.put("/configuration", response_model=HubConfigurationRead)
 async def update_configuration(
     body: HubConfigurationUpdate,
+    request: Request,
     tenant: Tenant = Depends(get_current_tenant),
     claim: SubscriptionClaim | None = Depends(_claim_if_authenticated),
     session: AsyncSession = Depends(get_session),
@@ -316,6 +336,19 @@ async def update_configuration(
             },
         ) from None
 
+    # --- 1b'. Per-unit price/duration (TASK-085): a read, before any mutation ------
+    if professional is not None and professional_data:
+        try:
+            await hubcfg.check_unit_terms(session, tenant, professional, professional_data)
+        except hubcfg.UnitTermsInvalid as exc:
+            logger.info(
+                "hub_configuration_rejected",
+                tenant_id=tenant_id,
+                reason=exc.code,
+                stage="validate",
+            )
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, detail=exc.detail()) from None
+
     # --- 1c. Payment settings (TASK-017): a read too (it may ask brain-api whether the
     # add-on is active), so it runs before the transaction mutates anything.
     try:
@@ -350,6 +383,7 @@ async def update_configuration(
             await hubcfg.apply_tenant_config(session, tenant, tenant_data)
         if professional is not None and professional_data:
             hubcfg.apply_professional_config(professional, professional_data)
+            await hubcfg.apply_unit_terms(session, tenant, professional, professional_data)
         await session.commit()
     except hubcfg.ActivationBlocked as exc:
         # The scalar fields of this patch are already assigned on the ORM
@@ -378,6 +412,7 @@ async def update_configuration(
     await session.refresh(tenant)
     if professional is not None:
         await session.refresh(professional)
+    await _sweep_prices_after_commit(request, tenant, tenant_data, professional_data)
 
     logger.info(
         "hub_configuration_updated",

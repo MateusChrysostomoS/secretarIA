@@ -46,6 +46,10 @@ NEW_KEYS = {"status", "confirmation_count", "display_state", "attention", "remin
     "unit_id",
     "unit_name",
     "unit_address",
+    # TASK-085 R D-R9: the consultation waits for the Pix of a change's difference.
+    "suspended",
+    # TASK-085 R S7a: what that pending change would change (display text).
+    "pending_change_summary",
 }
 
 

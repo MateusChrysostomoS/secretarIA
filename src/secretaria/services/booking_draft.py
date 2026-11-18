@@ -736,6 +736,8 @@ def _booking_details(
     details. The address is the booking's UNIT when it has one (TASK-083 spec §8), else
     `tenant.clinic_address`, the line workers/shared/draft_resolution.py put on the snapshot
     (None when the clinic has none, or has units - then no unit means no address at all).
+    The price is `owner`'s at that unit (TASK-085); without a unit it follows the service
+    card's rule (D3: left out when it differs between the units, never a range).
     """
     if not fr.ai_draft_v2_enabled(tenant) or checked.service is None:
         return None
@@ -746,7 +748,7 @@ def _booking_details(
     ):
         return None
     return booking_details_text(
-        service=checked.service,
+        service=fr._priced_entry(checked.service, owner, unit.id if unit is not None else None),
         professional=owner,
         insurance=state.flow_selected_insurance,
         attendee_name=state.flow_attendee_name,
@@ -845,7 +847,8 @@ async def _land_day(
         dropped_day(DROP_OUT_OF_WINDOW)
         return await day_picker(DRAFT_DAY_OUT_OF_WINDOW_PREFIX)
 
-    duration = fr._booking_duration(state, tenant, services)
+    # TASK-085: the unit settled above - the same length the day picker and "Confirmar" use.
+    duration = fr._booking_duration(state, tenant, services, professionals, unit=unit)
     holds = await fr._hold_windows(fr._hold_owner(state, professionals))
     # The doctor's minimum notice: a day (or time) the patient named that falls inside it
     # is never offered, and the patient is told why instead of "no free time".

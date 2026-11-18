@@ -115,6 +115,9 @@ class _Target:
     professional: Any | None  # the roster row; None on a clinic without professionals
     owner_id: UUID | None  # whose holds hide slots: the agenda a booking would land on
     slot_minutes: int
+    # The professional's catalog entry of the named service (None without one): its per-unit
+    # duration, when it has one, sizes that unit's windows (TASK-085 D7).
+    entry: Any | None = None
 
 
 def _clinic_today(tz) -> date:
@@ -223,6 +226,7 @@ async def _resolve_target(tenant_id: UUID, professional: str, service: str) -> _
         catalog = _effective_service_catalog()
 
     minutes: int | None = None
+    entry: Any | None = None
     if service:
         canonical = canonical_service_name(catalog, service)
         if canonical is None:
@@ -253,7 +257,36 @@ async def _resolve_target(tenant_id: UUID, professional: str, service: str) -> _
             roster, chosen.id if topology == BOOKING_TOPOLOGY_MULTI else None
         ),
         slot_minutes=minutes or calendar.default_slot_minutes,
+        entry=entry,
     )
+
+
+async def _unit_minutes(tenant_id: UUID, target: _Target, units: list) -> dict[UUID, int]:
+    """{unit id: minutes} for the units where the named service has its OWN duration (D7).
+
+    Read once, scoped to `tenant_id` (services/service_terms.py). A unit absent from the result
+    keeps `target.slot_minutes` - today's duration - and so does everything without units, a
+    named service or a professional. A failed read degrades to that same base, like the units
+    read above it (a read tool; the flow re-checks the slot when booking).
+    """
+    entry, professional = target.entry, target.professional
+    if not units or professional is None or not isinstance(entry, dict):
+        return {}
+    from secretaria.core.database import async_session_factory
+    from secretaria.services.service_terms import load_terms, resolve_terms, terms_for_entry
+
+    try:
+        async with async_session_factory() as session:
+            terms = terms_for_entry(await load_terms(session, tenant_id, professional.id), entry)
+    except Exception as exc:  # noqa: BLE001 - see the docstring
+        logger.warning("agent_availability_unit_terms_failed", error_type=type(exc).__name__)
+        return {}
+    out: dict[UUID, int] = {}
+    for unit in units:
+        resolved = resolve_terms(entry, terms, unit.id)
+        if resolved.own and resolved.duration_min is not None:
+            out[unit.id] = resolved.duration_min
+    return out
 
 
 def _fmt(day: date) -> str:
@@ -320,13 +353,18 @@ async def _read_availability(
         logger.warning("agent_availability_units_failed", error_type=type(exc).__name__)
         offered = []
     units = [unit for unit in offered if unit.bookable]
+    # TASK-085 D7: each unit's windows are sized with the service's duration AT that unit.
+    own_minutes = await _unit_minutes(tenant_id, target, units)
+    scanned: set[int] = set()
     labelled: list[tuple[Any, str | None]] = []
     truncated = False
     for unit in units or [None]:
+        minutes = own_minutes.get(unit.id, target.slot_minutes) if unit else target.slot_minutes
+        scanned.add(minutes)
         unit_scan = await scan_free_windows(
             scoped_calendar(calendar, unit),
             span=span,
-            duration_minutes=target.slot_minutes,
+            duration_minutes=minutes,
             holds=holds,
             not_before=floor,
         )
@@ -345,7 +383,9 @@ async def _read_availability(
             {**window.payload(), **({"unit": name} if name else {})} for window, name in labelled
         ],
         "timezone": getattr(tz, "key", None) or str(tz),
-        "slot_minutes": target.slot_minutes,
+        # One duration for every unit read (one unit, or the same everywhere): that one. Units
+        # that differ: the base (D7 - no unit chosen); each window is sized for its own unit.
+        "slot_minutes": scanned.pop() if len(scanned) == 1 else target.slot_minutes,
         "day_from": span.first.isoformat(),
         "day_to": last.isoformat(),
     }
@@ -389,7 +429,8 @@ async def get_availability(
     e `time`) - elas só preparam o cartão de confirmação, e o fluxo confere e conduz.
 
     Cada janela é um trecho contínuo em que cabe uma consulta; `slot_minutes` é a duração
-    usada. Mostra no máximo 14 dias e 30 janelas por chamada. Se a resposta trouxer
+    usada (se a duração muda entre as unidades do profissional, cada janela já usa a da sua
+    unidade). Mostra no máximo 14 dias e 30 janelas por chamada. Se a resposta trouxer
     `clamped`, a lista NÃO cobre tudo o que foi pedido: diga isso ao paciente e peça um dia
     ou período menor. `note` resume em uma frase o que a lista cobre: respeite-a. Sem
     janelas, diga que não há horário livre nesse período - NUNCA invente um horário nem
