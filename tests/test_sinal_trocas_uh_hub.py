@@ -42,7 +42,7 @@ from secretaria.services import reminder_hooks
 from secretaria.services.agenda_visibility import AgendaViewer
 from secretaria.services.calendar import CalendarUnavailableError, GoogleTokenRevokedError
 from secretaria.services.local_calendar import LocalCalendarService
-from secretaria.services.payments import old_slot, service_change
+from secretaria.services.payments import adjustment_queries, old_slot, service_change
 from tests._agenda_viewer import view_as
 from tests._r7_support import (  # noqa: F401
     CALENDAR,
@@ -859,6 +859,9 @@ async def test_the_clinic_cancels_a_visit_whose_old_slot_was_taken(
 ):
     world = await _lost_world(db, acting, client)
     adjustment = await _adjustment(db)
+    assert [item.reason for item in await _items(db) if item.status == "open"] == [
+        "service_diff_rebook_due"
+    ]
     discarded: list = []
     order: list = []
 
@@ -873,6 +876,9 @@ async def test_the_clinic_cancels_a_visit_whose_old_slot_was_taken(
     response = await client.post(
         f"{CALENDAR}/appointments/{world.appointment.id}/cancel", json={"confirm": True}
     )
+    # U7: the restore-event discard runs ONCE, from the post-commit hook every cancel path shares
+    # (`settle_open_adjustments` -> `discard_restore_after_commit`); the route no longer calls it.
+    await adjustment_queries.drain_restore_discards()
 
     assert response.status_code == 200, response.text
     row = await reload_appointment(db, world.appointment.id)
@@ -882,6 +888,50 @@ async def test_the_clinic_cancels_a_visit_whose_old_slot_was_taken(
     assert order == [AppointmentStatus.CANCELLED]
     # The paid sinal's cancellation rules of today ran (the clinic cancelled).
     assert response.json()["deposit_outcome"] is not None
+    # UH review M4: the change is closed and the clinic's "remarque" item with it.
+    assert (await _adjustment(db)).status == "cancelled"
+    rebook_items = [item for item in await _items(db) if item.reason == "service_diff_rebook_due"]
+    assert len(rebook_items) == 1 and rebook_items[0].status == "resolved"
+    assert rebook_items[0].resolved_at is not None
+
+
+async def test_a_rebook_intent_whose_change_moved_on_between_the_two_reads_is_refused(
+    client: AsyncClient, db, acting, provider, agenda, monkeypatch
+):
+    """U7 (UF re-review N1): the stale-intent guard sees the `old_slot_lost` change, then the
+    patient's "Outro horário" commits before the suspension read. With `rebook_adjustment_id`
+    the second read must find the SAME change - else 409, nothing moved or cancelled (never the
+    ordinary path on the patient's new slot)."""
+    world = await _lost_world(db, acting, client)
+    adjustment = await _adjustment(db)
+    real = hub_calendar.adjustment_queries.open_suspension
+    calls = {"n": 0}
+
+    async def first_then_gone(session, *, tenant_id, appointment_id):
+        calls["n"] += 1
+        if calls["n"] % 2 == 1:  # the stale-intent guard
+            return await real(session, tenant_id=tenant_id, appointment_id=appointment_id)
+        return None  # the patient's rebook committed in between
+
+    monkeypatch.setattr(hub_calendar.adjustment_queries, "open_suspension", first_then_gone)
+    agenda.clear()
+
+    moved = await _reschedule(
+        client, world, {**_reschedule_body(world), "rebook_adjustment_id": str(adjustment.id)}
+    )
+    cancelled = await client.post(
+        f"{CALENDAR}/appointments/{world.appointment.id}/cancel",
+        json={"confirm": True, "rebook_adjustment_id": str(adjustment.id)},
+    )
+
+    for response in (moved, cancelled):
+        assert response.status_code == 409, response.text
+        assert response.json()["detail"]["code"] == "appointment_changed"
+    assert agenda == []  # no agenda call at all
+    row = await reload_appointment(db, world.appointment.id)
+    assert row.status != AppointmentStatus.CANCELLED
+    assert row.start_at == world.appointment.start_at
+    assert (await _adjustment(db)).status == "old_slot_lost"
 
 
 async def test_a_patient_rebook_during_the_cancel_wins(

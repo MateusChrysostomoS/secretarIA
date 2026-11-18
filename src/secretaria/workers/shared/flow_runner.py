@@ -19,6 +19,7 @@ from secretaria.models import (
     RebookingDecline,
     Tenant,
 )
+from secretaria.models.appointment import is_live_status
 from secretaria.models.deposit_release_offer import CARRY_CHECK_REFUNDED, CARRY_CHECK_UNKNOWN
 from secretaria.plugins.appointment_change_notifications import (
     CHANGE_CANCELLED,
@@ -560,15 +561,23 @@ async def _apply_flow_result(
                             )
                         )
                         if savepoint is not None:
-                            won = resched_appt is not None and await old_slot.finish_rebook(
-                                session,
-                                tenant_id=conv.tenant_id,
-                                adjustment_id=rebook["adjustment_id"],
-                                appointment=resched_appt,
-                                event_id=rebook["event_id"],
-                                event_link=rebook.get("event_link"),
-                                now=datetime.now(UTC),
-                                source="patient",
+                            # U7 (UH review M4): the row read under FOR UPDATE above must still be
+                            # live - a consultation the clinic cancelled meanwhile is never moved
+                            # onto the patient's new event (the UPDATE above already overwrote its
+                            # status in this transaction, so `finish_rebook` cannot tell).
+                            won = (
+                                resched_appt is not None
+                                and is_live_status(previous_status)
+                                and await old_slot.finish_rebook(
+                                    session,
+                                    tenant_id=conv.tenant_id,
+                                    adjustment_id=rebook["adjustment_id"],
+                                    appointment=resched_appt,
+                                    event_id=rebook["event_id"],
+                                    event_link=rebook.get("event_link"),
+                                    now=datetime.now(UTC),
+                                    source="patient",
+                                )
                             )
                             if won:
                                 await savepoint.commit()

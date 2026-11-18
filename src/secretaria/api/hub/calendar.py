@@ -244,6 +244,24 @@ async def _refuse_stale_rebook(
     raise HTTPException(status.HTTP_409_CONFLICT, _detail(*_REBOOK_CHANGED))
 
 
+def _refuse_rebook_moved_on(
+    appt: Appointment, wanted: UUID | None, rebook_due: DepositAdjustment | None
+) -> None:
+    """TASK-085 R U7 (UF re-review N1): `_refuse_stale_rebook` and `_refuse_if_suspended` are two
+    reads. If the patient's "Outro horário" commits between them, the second finds no suspension
+    and a request that carried `rebook_adjustment_id` would fall into the ORDINARY move/cancel
+    path - moving or cancelling the patient's new slot. With a rebook intent, the second read
+    must find that SAME `old_slot_lost` change, else 409 `appointment_changed` (nothing ran)."""
+    if wanted is None:
+        return
+    if rebook_due is not None and rebook_due.id == wanted:
+        return
+    logger.info(
+        "hub_rebook_intent_moved_on", appointment_id=str(appt.id), adjustment_id=str(wanted)
+    )
+    raise HTTPException(status.HTTP_409_CONFLICT, _detail(*_REBOOK_CHANGED))
+
+
 def _appointment_read(
     appt: Appointment,
     *,
@@ -1111,7 +1129,8 @@ async def list_awaiting_payment(
     array the agenda already consumes), so the doctor does not book on top of it.
 
     Only live payment-phase holds whose charge is still awaiting payment; the answer carries the
-    window, the service and the deadline - never the patient, the amount or the provider.
+    window, the service and the deadline - never the amount or the provider, and the patient
+    only on a "rebook" row (below).
 
     TASK-085 R, 3rd round (mapa-u §1.6) - this is now THE place of a suspended change, whose
     consultation left the agenda (D-R10):
@@ -1120,7 +1139,9 @@ async def list_awaiting_payment(
     * `kind="rebook"` (D-R11): a change in `old_slot_lost` - the old slot was taken while the
       patient did not pay, so the clinic must reschedule or cancel with the patient. Not a hold:
       the window is the OLD one, `appointment_id` the consultation, `expires_at` its start, `id`
-      the change's. Rows of a doctor the viewer may not see are left out.
+      the change's. Rows of a doctor the viewer may not see are left out. Held windows
+      ("booking"/"difference") never name the patient; a "rebook" row does (`patient_name`,
+      `attendee_name`, `patient_channel` - UH2), and only to a viewer who sees its doctor.
     """
     holds = await booking_hold.live_payment_holds(session, tenant.id, start, end)
     charge_ids = [hold.charge_id for hold in holds if hold.charge_id is not None]
@@ -1503,6 +1524,7 @@ async def cancel_appointment(
     # (`old_slot_lost`) may be cancelled by the clinic - the paid sinal's cancellation rules of
     # today (`on_appointment_cancelled` settles the change and its item). Any other suspension: 409.
     rebook_due = await _refuse_if_suspended(session, tenant, appt, rebook=True)
+    _refuse_rebook_moved_on(appt, body.rebook_adjustment_id, rebook_due)  # U7, N1
     rebook_due_id = rebook_due.id if rebook_due is not None else None
 
     # The agenda that OWNS the event (it was always the clinic's, so a doctor's
@@ -1575,10 +1597,12 @@ async def cancel_appointment(
 
     await session.commit()
     await session.refresh(appt)
-    if rebook_due_id is not None:
-        # UA1 M3: a restore event kept by a failed "Manter a antiga" never outlives the change
-        # (own session; never raises; nothing to do when there is none).
-        await old_slot.discard_restore_event(tenant.id, rebook_due_id)
+    # UA1 M3 (a restore event kept by a failed "Manter a antiga" never outlives the change): no
+    # call here. `on_appointment_cancelled` -> `settle_open_adjustments` closed the
+    # `old_slot_lost` change and scheduled `old_slot.discard_restore_event` for after THIS commit
+    # (`adjustment_queries.discard_restore_after_commit`), the one mechanism every cancel path
+    # shares; the payments sweep (`service_change._discard_left_restore_events`) is its backstop.
+    # U7 removed the route's own second call (it ran the same idempotent discard twice).
     if reminder_hooks.enabled_for(tenant):
         await reminder_hooks.after_appointment_closed(appt.id, reason="cancelled")
 
@@ -2387,6 +2411,7 @@ async def reschedule_appointment(
     # clinic books it on a NEW slot (its event left the agenda, nothing to move). Any other
     # suspension: 409.
     rebook_due = await _refuse_if_suspended(session, tenant, appt, rebook=True)
+    _refuse_rebook_moved_on(appt, body.rebook_adjustment_id, rebook_due)  # U7, N1
     if rebook_due is not None:
         return await _rebook_lost_slot(session, request, tenant, appt, rebook_due, body)
 

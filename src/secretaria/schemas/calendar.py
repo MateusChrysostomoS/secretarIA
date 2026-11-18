@@ -27,8 +27,9 @@ class CalendarInsurancePlanRead(BaseModel):
 class AwaitingPaymentRead(BaseModel):
     """A slot held for a Pix that is still payable (`GET /calendar/awaiting-payment`).
 
-    No patient, no amount, no provider: the agenda only needs to show that the window is taken
-    and until when.
+    No amount, no provider: the agenda only needs to show that the window is taken and until
+    when. No patient on held windows ("booking"/"difference"); a "rebook" row names the patient
+    (`patient_name`/`attendee_name`/`patient_channel`, viewer-filtered like the agenda).
     """
 
     model_config = ConfigDict(extra="ignore")
