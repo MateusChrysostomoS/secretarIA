@@ -56,9 +56,10 @@ fresh — `redis=None` — since this path is not hot):
     tenant-level PUT /tenants/me/config — see api/hub/config.py).
 """
 
+from datetime import UTC, datetime
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -85,6 +86,7 @@ from secretaria.services.calendar import (
     GoogleTokenRevokedError,
 )
 from secretaria.services.entitlements_client import get_entitlements
+from secretaria.services.payments import price_change
 from secretaria.services.professional_calendar_setup import prepare_shared_professional_calendar
 from secretaria.services.professional_capacity import (
     ProfessionalCapacityError,
@@ -248,6 +250,7 @@ async def update_professional(
 async def update_professional_config(
     professional_id: str,
     body: ProfessionalConfigUpdate,
+    request: Request,
     tenant: Tenant = Depends(get_current_tenant),
     session: AsyncSession = Depends(get_session),
 ) -> ProfessionalListItem:
@@ -308,6 +311,12 @@ async def update_professional_config(
         # without logging a single hour or service name.
         **hubcfg.config_source_fields(professional),
     )
+    # TASK-085 R (D-R14): a new service list may change a price (the per-unit exceptions ride in
+    # it) - after the commit, schedule the price sweep of a clinic with sinal. Never raises.
+    if "appointment_types" in data and tenant.pix_deposit_enabled:
+        await price_change.enqueue_sweep(
+            getattr(request.app.state, "arq_pool", None), tenant.id, changed_at=datetime.now(UTC)
+        )
     return await _list_item(session, professional, tenant)
 
 

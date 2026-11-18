@@ -537,7 +537,13 @@ def test_the_price_opening_shape():
 
 PRICE_SIGNATURES = [
     (price_change, "enqueue_sweep", ["arq_pool", "tenant_id", "changed_at"], True),
-    (price_change, "sweep_price_changes", ["tenant_id", "changed_at", "now", "redis"], True),
+    # UB1 fix round 2: `after` (the resume cursor), keyword-only, default None.
+    (
+        price_change,
+        "sweep_price_changes",
+        ["tenant_id", "changed_at", "now", "redis", "after"],
+        True,
+    ),
     (
         price_change,
         "price_notice_needed",
@@ -553,7 +559,8 @@ PRICE_SIGNATURES = [
     (price_change, "price_opening_messages", ["opening", "tenant"], False),
     (price_change, "sweep_job_id", ["tenant_id", "changed_at"], False),
     (price_change, "mail_cap_key", ["tenant_id", "address", "local_day"], False),
-    (price_change_job, "sweep_price_changes", ["ctx", "tenant_id", "changed_at"], True),
+    # UB1 fix round 2: an optional 4th argument, the resume job's cursor.
+    (price_change_job, "sweep_price_changes", ["ctx", "tenant_id", "changed_at", "after"], True),
     (
         price_change_opening,
         "send_price_change_opening",
@@ -572,7 +579,7 @@ def test_price_change_signatures_are_frozen(module, name, params, is_async):
 
 def test_price_change_keyword_only_parameters():
     assert _kinds(price_change.enqueue_sweep)["changed_at"] is inspect.Parameter.KEYWORD_ONLY
-    for name in ("changed_at", "now", "redis"):
+    for name in ("changed_at", "now", "redis", "after"):
         assert _kinds(price_change.sweep_price_changes)[name] is inspect.Parameter.KEYWORD_ONLY
     opening = _kinds(price_change_opening.send_price_change_opening)
     assert opening["reminder_id"] is inspect.Parameter.KEYWORD_ONLY
@@ -584,12 +591,16 @@ def test_price_change_keyword_only_parameters():
     )
 
 
-async def test_the_price_change_stubs_raise_until_ub1_and_ub2_land():
+async def test_the_price_change_stubs_raise_until_ub2_lands():
+    # UB1 landed (the sweep and its job: tests/test_sinal_trocas_ub1_*); the opening is UB2's.
     now = datetime.now(UTC)
     with pytest.raises(NotImplementedError):
-        await price_change.sweep_price_changes(uuid4(), changed_at=now, now=now, redis=None)
+        await price_change.open_price_notice(
+            None, tenant=None, reminder_id=uuid4(), patient_id=uuid4(), now=now
+        )
     with pytest.raises(NotImplementedError):
-        await price_change_job.sweep_price_changes({}, str(uuid4()), now.isoformat())
+        opening = price_change.PriceOpening(kind="not_found")
+        price_change.price_opening_messages(opening, tenant=None)
     with pytest.raises(NotImplementedError):
         await price_change_opening.send_price_change_opening(None, None, reminder_id=uuid4())
 
