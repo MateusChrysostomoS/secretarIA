@@ -339,11 +339,12 @@ async def test_tenant_b_never_sees_tenant_a_plans():
 
 
 # --------------------------------------------------------------------------
-# TASK-017 / 15A: the payment mechanism rides the list row's public description
+# TASK-085 R D-R12 (owner: "TIRE ISSO"): the list row is the plan's name only - the payment
+# text that TASK-017 / 15A put under it is gone
 # --------------------------------------------------------------------------
 
 
-async def test_the_list_row_describes_how_payment_works_for_the_plan():
+async def test_the_list_row_is_the_plans_name_only():
     tenant = _tenant(collect_insurance=True)
     tenant.insurance_plans = [
         {"id": "p1", "name": "Exemplo", "mechanism": "reembolso", "note": "NAO-VAZAR"},
@@ -351,16 +352,9 @@ async def test_the_list_row_describes_how_payment_works_for_the_plan():
     ]
     res = await _confirm_service(tenant, _professionals(1))
     rows = res.bubbles[0].rows
-    assert rows[0] == (
-        "ins|Exemplo",
-        "Exemplo",
-        "Reembolso: você paga e solicita à operadora, conforme seu contrato.",
-    )
-    assert rows[1] == (
-        "ins|Outro Plano",
-        "Outro Plano",
-        "Pagamento: confirme as condições com a clínica.",
-    )
+    assert rows[0] == ("ins|Exemplo", "Exemplo")
+    assert rows[1] == ("ins|Outro Plano", "Outro Plano")
+    assert "Reembolso" not in repr(rows) and "Pagamento" not in repr(rows)
     assert "NAO-VAZAR" not in repr(rows)  # the clinic's note is never shown before the choice
     assert [row[0] for row in rows[-2:]] == ["ins|particular", "ins|outro"]
     assert all(len(row) == 2 for row in rows[-2:])  # Particular/Outro keep no description

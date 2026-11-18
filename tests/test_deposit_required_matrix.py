@@ -1,23 +1,22 @@
 """The nine silent `None` paths of `maybe_create_deposit`, one row each (spec section 7, D3).
 
 In `after` timing those paths stay tolerated (the consultation already exists). In `before` timing
-every one of them is an EXPLICIT decision taken before or while the slot is reserved: the four
-that are a clinic's own choice (feature off, convenio without deposit, no readable price, zero
-amount) book normally; of the five that are errors, "no patient" still BLOCKS the booking, while
+every one of them is an EXPLICIT decision taken before or while the slot is reserved: the three
+that are a clinic's own choice (feature off, no readable price, zero amount) book normally (the
+fourth, "convenio without deposit", was retired by TASK-085 R D-R12 - a convenio never exempts the
+sinal; tests/test_sinal_trocas_U1_convenio.py); of the five that are errors, "no patient" still
+BLOCKS the booking, while
 the TECHNICAL ones (no usable credential, the customer cannot be created, the charge cannot be
 created, the answer has no charge id) plus the two extras (no Pix code, the message cannot be sent)
 book WITHOUT the deposit and tell the clinic (TASK-071 Plan 3, which replaced "never a consultation
 without its deposit"). Whatever the row: no dangling hold and no orphan charge.
 """
 
-from uuid import uuid4
-
 import pytest
 import pytest_asyncio
 from sqlalchemy import select
 
 from secretaria.models import BookingHold, PixDeposit
-from secretaria.models.insurance import TenantInsurancePlan
 from secretaria.services import booking_hold as holds, email
 from secretaria.services.payments import (
     booking_charge,
@@ -87,12 +86,12 @@ async def _nothing_left_behind(db):
         assert list(await session.scalars(select(PixDeposit))) == []
 
 
-# The four rows that are a clinic's own choice: the booking goes ahead exactly as it always did.
+# The rows that are a clinic's own choice: the booking goes ahead exactly as it always did.
+# Row 2 (a convenio without deposit) is gone: TASK-085 R D-R12, a convenio never exempts the sinal.
 @pytest.mark.parametrize(
     ("row", "tenant_kw", "insurance"),
     [
         (1, {"pix_deposit_enabled": False}, None),
-        (2, {}, "Unimed"),
         (5, {"price": "a combinar"}, None),
         (6, {"price": "R$ 0,10", "percent": 1}, None),
     ],
@@ -102,14 +101,6 @@ async def test_the_rows_that_are_a_clinics_choice_book_normally(
 ):
     async with db() as session:
         world = await make_world(session, **tenant_kw)
-        if row == 2:
-            session.add(
-                TenantInsurancePlan(
-                    id=uuid4(), tenant_id=world.tenant_id, custom_name="Unimed",
-                    charge_deposit=False,
-                )
-            )
-            await session.commit()
     decision = await _decide(db, world, insurance=insurance)
     assert decision.outcome == "commit"
     await _nothing_left_behind(db)

@@ -1225,10 +1225,10 @@ async def discard_brain_message_visit_route(
     description=(
         "TASK-053 (owner decision 2026-10-12). brain-api calls this on behalf of a Portal "
         "patient; `tenant_id` comes from that patient's session. Returns the SAME convenio list "
-        "the booking flow offers, each with the fixed payment text of its list row, the "
-        "clinic's own note on an 'Outro' plan, and whether the Pix deposit applies "
-        "(charged | not_charged | varies). Never ids, doctors, catalog notes or patient data. "
-        "Read-only. Requires the X-Internal-Api-Key header."
+        "the booking flow offers, each with the clinic's own note on an 'Outro' plan, and the "
+        "clinic's one Pix deposit rule (TASK-085 R D-R12: a convenio never exempts it, so "
+        "there is no per-plan deposit nor per-plan payment text). Never ids, doctors, catalog "
+        "notes or patient data. Read-only. Requires the X-Internal-Api-Key header."
     ),
     responses={**_INTERNAL_RESPONSES, 404: {"description": "Unknown tenant."}},
 )

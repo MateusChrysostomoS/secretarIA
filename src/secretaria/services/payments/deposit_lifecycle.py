@@ -116,11 +116,9 @@ DEPOSIT_SKIP_NO_SERVICE = "no_service"
 DEPOSIT_SKIP_UNPARSEABLE_PRICE = "unparseable_price"
 DEPOSIT_SKIP_ZERO_AMOUNT = "zero_amount"
 DEPOSIT_SKIP_BELOW_MINIMUM = "below_minimum"
-# The booking's convênio is one of the clinic's plans that the clinic marked
-# "não cobra sinal" (tenant_insurance_plans.charge_deposit = false). Owner's
-# decision 2026-09-25: per clinic AND per plan, never inferred from the
-# operator - see models/insurance.py.
-DEPOSIT_SKIP_INSURANCE_NO_CHARGE = "insurance_no_charge"
+# TASK-085 R D-R12 (owner, 2026-11-18): a convênio never exempts the sinal any more (we cannot
+# check the patient really has it). The old `insurance_no_charge` skip and the per-plan
+# `charge_deposit` flag it read are gone; the flag stays in the database, ignored.
 # TASK-017: the clinic charges BEFORE confirming, so this hook has nothing to add; and an
 # appointment that already has a deposit row never gets a second charge.
 DEPOSIT_SKIP_TIMING_BEFORE = "timing_before"
@@ -410,42 +408,6 @@ async def _send_deposit_request(
     await client.send_text_message(to=patient.wa_id, body=text)
 
 
-async def _insurance_charges_deposit(
-    session: AsyncSession, tenant: Tenant, appointment: Appointment
-) -> bool:
-    """False only when the booking's plan is one flagged "no deposit".
-
-    Reads the plan BY ID - never re-matching the free-text `insurance`. TASK-008:
-    checks `insurance_professional_plan_id` FIRST (set only under
-    `insurance_mode == "independent"`, where there is no clinic-level
-    `tenant_insurance_plans` row to read `charge_deposit` from at all), then
-    falls back to the pre-existing `insurance_plan_id` (the clinic's own row,
-    catalog-backed or custom - both read the SAME column, since TASK-008
-    re-pointed this FK at `tenant_insurance_plans.id`). No plan id at all
-    ("Particular", a typed "Outro convênio", no answer, every row older than
-    the catalog) -> True: the tenant's own pix_deposit_* policy decides,
-    exactly as before the catalog existed.
-    """
-    professional_plan_id = getattr(appointment, "insurance_professional_plan_id", None)
-    if professional_plan_id is not None:
-        charge = await session.scalar(
-            select(ProfessionalInsurancePlan.charge_deposit).where(
-                ProfessionalInsurancePlan.id == professional_plan_id
-            )
-        )
-        return charge is not False
-    plan_id = getattr(appointment, "insurance_plan_id", None)
-    if plan_id is None:
-        return True
-    charge = await session.scalar(
-        select(TenantInsurancePlan.charge_deposit).where(
-            TenantInsurancePlan.id == plan_id,
-            TenantInsurancePlan.tenant_id == tenant.id,
-        )
-    )
-    return charge is not False
-
-
 async def maybe_create_deposit(
     session: AsyncSession,
     *,
@@ -497,9 +459,6 @@ async def maybe_create_deposit(
         return None
     if await get_deposit_for_appointment(session, appointment.id) is not None:
         _log_deposit_skip(tenant, appointment, DEPOSIT_SKIP_ALREADY_CHARGED)
-        return None
-    if not await _insurance_charges_deposit(session, tenant, appointment):
-        _log_deposit_skip(tenant, appointment, DEPOSIT_SKIP_INSURANCE_NO_CHARGE)
         return None
     if patient is None:
         _log_deposit_skip(tenant, appointment, DEPOSIT_SKIP_NO_PATIENT)
@@ -658,7 +617,8 @@ REQUOTE_OPENING_TEXT = (
     "(não pague aquele código)."
 )
 REQUOTE_NO_SINAL_TEXT = "Com a alteração, esta consulta não pede sinal."
-# OQ-10: there was no sinal and the edit made one due (e.g. a convênio without sinal -> particular).
+# OQ-10: there was no sinal and the edit made one due (e.g. a service without a price -> a priced
+# one; since D-R12 a convênio never makes the difference).
 NEWLY_REQUIRED_OPENING_TEXT = "Com a alteração da sua consulta, ela passou a pedir um sinal."
 # The old Pix was voided and the new one could not be created: never a message without a next step.
 REQUOTE_CLINIC_WILL_CALL_TEXT = (
@@ -668,9 +628,9 @@ REQUOTE_CLINIC_WILL_CALL_TEXT = (
 
 async def requote_amount_cents(session: AsyncSession, *, tenant: Tenant, appointment) -> int:
     """The sinal a consultation shaped like `appointment` would carry NOW, in cents - the same
-    arithmetic and the same "no charge" guards as `maybe_create_deposit`: sinal switched off, a
-    convênio that charges no sinal, no readable price, a zero amount or an amount under the
-    provider's minimum all mean 0. Price at the consultation's unit x the clinic's CURRENT
+    arithmetic and the same "no charge" guards as `maybe_create_deposit`: sinal switched off, no
+    readable price, a zero amount or an amount under the provider's minimum all mean 0 (the
+    convênio never does: D-R12). Price at the consultation's unit x the clinic's CURRENT
     percentage (OQ-8). `appointment` may be the edited row or any object with the same
     attributes (`appointment_type`, `professional_id`, `unit_id`, `insurance_plan_id`,
     `insurance_professional_plan_id`; a missing one reads as None), so the confirmation cards
@@ -687,8 +647,6 @@ async def requote_amount_cents(session: AsyncSession, *, tenant: Tenant, appoint
             appointment, "insurance_professional_plan_id", None
         ),
     )
-    if not await _insurance_charges_deposit(session, tenant, probe):
-        return 0
     _name, price_text = await _resolve_service_and_price(session, tenant, probe)
     price_cents = parse_brl_to_cents(price_text)
     if price_cents is None:
@@ -714,8 +672,8 @@ async def requote_awaiting(
     does the AWAITING sinal still match the consultation? Never commits.
 
     The new amount is computed exactly like `maybe_create_deposit` (`requote_amount_cents`:
-    price at the unit x the clinic's CURRENT percentage; 0 when the convênio charges no sinal or
-    the amount is under the provider's minimum). Same amount, or `deposit` not AWAITING (or not
+    price at the unit x the clinic's CURRENT percentage; 0 when the amount is under the provider's
+    minimum). Same amount, or `deposit` not AWAITING (or not
     this clinic's / this consultation's) -> "unchanged" (nothing touched, no provider call).
     Otherwise `get_charge` first: PAID -> "payment_in_flight"; the void fails (or the state cannot
     be read, or there is no account to ask) -> "void_failed" - in both cases the CALLER rolls the

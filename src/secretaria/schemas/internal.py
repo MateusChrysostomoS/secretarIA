@@ -311,14 +311,15 @@ class BrainMessageVisitDiscardOut(BaseModel):
 
 
 class PatientInsurancePlanOut(BaseModel):
-    """One convenio as a PATIENT may see it - no id, no doctor, no catalog note."""
+    """One convenio as a PATIENT may see it - no id, no doctor, no catalog note.
+
+    TASK-085 R D-R12: no per-plan payment text and no per-plan deposit any more - a convenio never
+    exempts the sinal, which is the clinic's one rule (`PatientDepositOut`)."""
 
     model_config = ConfigDict(extra="forbid")
 
     name: str
-    payment_text: str
     clinic_note: str | None = None
-    deposit: Literal["charged", "not_charged", "varies"]
 
 
 class PatientDepositOut(BaseModel):

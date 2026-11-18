@@ -161,8 +161,8 @@ class Appointment(Base):
     # NULL for "Particular", a typed "Outro convênio", every row before the
     # catalog existed, and every booking made under `insurance_mode ==
     # "independent"` (see `insurance_professional_plan_id` below instead). Read
-    # by the Pix-deposit guard (DEPOSIT_SKIP_INSURANCE_NO_CHARGE) BY ID, so a
-    # plan renamed later cannot silently change that decision.
+    # BY ID (the agenda's plan name), so a plan renamed later cannot silently
+    # change it. Since TASK-085 R D-R12 it never decides the Pix deposit.
     #
     # TASK-008: this used to point at `insurance_catalog.id` directly. It now
     # points at the CLINIC's row instead, because a clinic "Outro" convênio has
