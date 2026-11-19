@@ -42,7 +42,10 @@ from secretaria.services.service_terms import UnitTerms  # noqa: E402
 from secretaria.services.unit_booking import UnitOption, unit_place_label  # noqa: E402
 from secretaria.workers import tasks  # noqa: E402
 from secretaria.workers.shared import actions  # noqa: E402
-from tests import test_unit_terms_ai_db as base  # noqa: E402
+from tests import (  # noqa: E402
+    test_t086_flow_matrix as m086,
+    test_unit_terms_ai_db as base,
+)
 from tests._local_agenda import wire_local_agenda  # noqa: E402
 from tests._patching import workers_ns  # noqa: E402
 from tests._reminder_fixtures import db  # noqa: E402,F401
@@ -697,3 +700,65 @@ def test_terms_line_keeps_the_money_and_minutes_together():
     assert fr._unit_terms_text("Consulta", centro, None, 40) == (
         f"Consulta na Unidade Centro: 40{NBSP}min"
     )
+
+
+# ============== TASK-086 T9 review minor 6: the final convenio guard with the step turned off
+#
+# The clinic turned the convenio question off while the conversation still carried a convenio
+# that the matrix now refuses at the confirmation. The guard used to reopen the convenio list -
+# a question the clinic no longer asks. It now opens the "nao atende este convenio" step (other
+# doctor / other service; never "Trocar convenio" with the step off), nothing booked.
+
+
+@pytest.mark.asyncio
+async def test_t086_final_guard_with_the_convenio_step_off_never_reopens_the_list():
+    centro, sul, _norte = m086._units()
+    ana = m086._doctor(units=[centro, sul])
+    tenant = m086._tenant("shared", m086._matrix("shared", ana, (m086.ECO_ID, sul, m086.UNIMED)))
+    tenant.collect_insurance = False
+    agenda = m086._Agenda()
+    gate = m086._Gate(armed=False)
+    result = await fr.route(
+        m086._confirming(sul, ana),
+        tenant,
+        agenda,
+        fr.LABEL_CONFIRM,
+        patient_name="Maria",
+        professionals=[ana],
+        gate=gate,
+    )
+    assert result.appointment is None and result.booking_hold is None
+    assert agenda.log["created"] == [] and gate.decided == []
+    assert result.flow_step == fr.STEP_AWAITING_PLAN_REFUSED
+    assert (result.flow_selected_type, result.flow_selected_professional_id) == (
+        "Ecocardiograma",
+        ana.id,
+    )
+    assert result.flow_selected_unit_id is None
+    [menu] = result.bubbles
+    assert fr.LABEL_PLAN_CHANGE_INSURANCE not in menu.labels
+    assert fr.LABEL_PLAN_OTHER_SERVICE in menu.labels
+    assert menu.body.startswith(
+        "Desculpe, o convênio Unimed não é mais aceito para Ecocardiograma com Dra. Ana na "
+        "unidade Zona Sul. Nada foi agendado."
+    )
+    assert "Escolha outro convênio" not in menu.body
+
+
+@pytest.mark.asyncio
+async def test_t086_final_guard_with_the_convenio_step_on_is_unchanged():
+    """Characterization: the step on -> the convenio list reopens, as before."""
+    centro, sul, _norte = m086._units()
+    ana = m086._doctor(units=[centro, sul])
+    tenant = m086._tenant("shared", m086._matrix("shared", ana, (m086.ECO_ID, sul, m086.UNIMED)))
+    result = await fr.route(
+        m086._confirming(sul, ana),
+        tenant,
+        m086._Agenda(),
+        fr.LABEL_CONFIRM,
+        patient_name="Maria",
+        professionals=[ana],
+        gate=m086._Gate(armed=False),
+    )
+    assert result.flow_step == fr.STEP_AWAITING_INSURANCE
+    assert result.bubbles[0].body.endswith("Escolha outro convênio ou Particular:")

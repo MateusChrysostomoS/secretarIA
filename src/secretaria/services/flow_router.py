@@ -194,14 +194,17 @@ STEP_AWAITING_PLAN_REFUSED = "awaiting_plan_refused"
 LABEL_PLAN_OTHER_DOCTOR = "Outro médico"
 LABEL_PLAN_OTHER_SERVICE = "Outro serviço"
 LABEL_PLAN_CHANGE_INSURANCE = "Trocar convênio"
+PLAN_REFUSED_HOW_TO_GO_ON = "Como você prefere seguir?"
 PLAN_REFUSED_BODY = (
-    "{quem} não atende o convênio {convenio} em {servico}. Como você prefere seguir?"
+    "{quem} não atende o convênio {convenio} em {servico}. " + PLAN_REFUSED_HOW_TO_GO_ON
 )
 # The final guard (TASK-086 A7): the clinic changed the matrix while the patient was booking.
-PLAN_REFUSED_AT_CONFIRM = (
+# With the convênio step off (T9 review minor 6) the lead goes on the "não atende" menu instead.
+PLAN_REFUSED_AT_CONFIRM_LEAD = (
     "Desculpe, o convênio {convenio} não é mais aceito para {servico}{quem}{onde}. "
-    "Nada foi agendado. Escolha outro convênio ou Particular:"
+    "Nada foi agendado."
 )
+PLAN_REFUSED_AT_CONFIRM = PLAN_REFUSED_AT_CONFIRM_LEAD + " Escolha outro convênio ou Particular:"
 # Structured reasons for `insurance_step_skipped` (see _insurance_step_skip_reason).
 # Count-only observability: which CONFIGURATION silenced the step, never which
 # plan a patient picked.
@@ -5895,12 +5898,30 @@ def _booking_insurance_refusal(
     )
     name = str(getattr(owner, "name", "") or "").strip()
     unit_name = str(getattr(unit, "name", "") or "").strip() if unit is not None else ""
-    notice = PLAN_REFUSED_AT_CONFIRM.format(
-        convenio=str(insurance or "").strip(),
-        servico=str(conversation.flow_selected_type or "a consulta"),
-        quem=f" com {name}" if name else "",
-        onde=f" na unidade {unit_name}" if unit_name else "",
-    )
+    values = {
+        "convenio": str(insurance or "").strip(),
+        "servico": str(conversation.flow_selected_type or "a consulta"),
+        "quem": f" com {name}" if name else "",
+        "onde": f" na unidade {unit_name}" if unit_name else "",
+    }
+    if _insurance_step_skip_reason(tenant) is not None:
+        # TASK-086 T9 review (minor 6): the clinic no longer asks the convênio, so its list is
+        # never reopened - the "não atende este convênio" step instead (another doctor / another
+        # service; no "Trocar convênio" with the step off), with the same refusal sentence.
+        result = _enter_plan_refused(
+            conversation,
+            tenant,
+            professionals,
+            owner,
+            str(conversation.flow_selected_type or ""),
+            service_id,
+        )
+        menu = result.bubbles[0]
+        menu.body = (
+            f"{PLAN_REFUSED_AT_CONFIRM_LEAD.format(**values)} {PLAN_REFUSED_HOW_TO_GO_ON}"
+        )[:MAX_INTERACTIVE_BODY_CHARS]
+        return result
+    notice = PLAN_REFUSED_AT_CONFIRM.format(**values)
     result = _enter_insurance(tenant, conversation, professionals=professionals)
     result.bubbles.insert(0, TextBubble(body=notice))
     return result
