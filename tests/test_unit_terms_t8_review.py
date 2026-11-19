@@ -37,8 +37,9 @@ from secretaria.plugins import multi_professional as mp, multi_unit as mu  # noq
 from secretaria.services import booking_hold, flow_router as fr  # noqa: E402
 from secretaria.services.booking_scope import BOOKING_TOPOLOGY_MULTI  # noqa: E402
 from secretaria.services.local_calendar import LocalCalendarService  # noqa: E402
+from secretaria.services.payments import service_change  # noqa: E402
 from secretaria.services.service_terms import UnitTerms  # noqa: E402
-from secretaria.services.unit_booking import UnitOption  # noqa: E402
+from secretaria.services.unit_booking import UnitOption, unit_place_label  # noqa: E402
 from secretaria.workers import tasks  # noqa: E402
 from secretaria.workers.shared import actions  # noqa: E402
 from tests import test_unit_terms_ai_db as base  # noqa: E402
@@ -653,4 +654,46 @@ async def test_c_scoped_help_after_the_unit_says_that_units_price(db, monkeypatc
     )
     assert (await _help_block(db, monkeypatch, w, unit=w.sede)).startswith(
         "- Consulta — R$ 200,00"
+    )
+
+
+# ========================================== M3: one rule for "na Unidade X" (never doubled)
+
+
+@pytest.mark.parametrize(
+    ("name", "place"),
+    [
+        ("Centro", "Unidade Centro"),
+        ("  Sede ", "Unidade Sede"),
+        ("Unidade Centro", "Unidade Centro"),
+        ("unidade norte", "unidade norte"),
+        ("Unidades Reunidas", "Unidades Reunidas"),
+        ("Unidadeum", "Unidade Unidadeum"),
+    ],
+)
+def test_m3_unit_place_label(name, place):
+    assert unit_place_label(name) == place
+
+
+@pytest.mark.parametrize("name", ["Centro", "Unidade Centro", "Unidades Reunidas"])
+def test_m3_the_three_texts_name_the_unit_alike(name):
+    place = unit_place_label(name)
+    assert service_change.unit_change_label("Consulta", name) == f"Consulta na {place}"
+    line = fr._unit_terms_text("Consulta", SimpleNamespace(name=name), None, 30)
+    assert line.startswith(f"Consulta na {place}:")
+    assert service_change._unit_label("u1", {"u1": name}) == place
+
+
+# ========================== cosmetic: "R$" and "min" never broken from their number (NBSP)
+
+NBSP = "\u00a0"
+
+
+def test_terms_line_keeps_the_money_and_minutes_together():
+    centro = SimpleNamespace(name="Centro")
+    assert fr._unit_terms_text("Consulta", centro, "R$ 250,00", 40) == (
+        f"Consulta na Unidade Centro: R${NBSP}250,00 · 40{NBSP}min"
+    )
+    assert fr._unit_terms_text("Consulta", centro, None, 40) == (
+        f"Consulta na Unidade Centro: 40{NBSP}min"
     )

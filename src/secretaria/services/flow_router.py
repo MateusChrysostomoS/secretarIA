@@ -133,6 +133,7 @@ from secretaria.services.unit_booking import (
     confirmation_unit_lines,
     event_unit_fields,
     unit_fields,
+    unit_place_label,
 )
 
 if TYPE_CHECKING:
@@ -5061,21 +5062,21 @@ def _service_entry_name(conversation: Any, entry: dict | None) -> str:
 
 
 # TASK-085 D3 (owner's example: "Consulta na Unidade Centro: R$ 250,00 · 30 min"). Without a
-# price at that unit the "{preco} · " part is dropped.
-UNIT_TERMS_LINE = "{servico} na {unidade}: {preco} · {duracao} min"
-UNIT_TERMS_LINE_NO_PRICE = "{servico} na {unidade}: {duracao} min"
-_UNIT_WORD = re.compile(r"unidade\b", re.IGNORECASE)
+# price at that unit the "{preco} · " part is dropped. A no-break space (U+00A0) binds "min" to
+# its number and "R$" to the value, so a narrow chat never breaks "R$ / 250,00" (T8 cosmetic).
+_NBSP = "\u00a0"
+UNIT_TERMS_LINE = "{servico} na {unidade}: {preco} · {duracao}" + _NBSP + "min"
+UNIT_TERMS_LINE_NO_PRICE = "{servico} na {unidade}: {duracao}" + _NBSP + "min"
 
 
 def _unit_terms_text(service_name: str, unit: Any, price: str | None, minutes: int) -> str:
     """The D3 confirmation line. A unit already named "Unidade ..." is not prefixed again
-    ("Consulta na Unidade Centro", never "na Unidade Unidade Centro")."""
-    name = str(getattr(unit, "name", None) or "").strip()
-    place = name if _UNIT_WORD.match(name) else f"Unidade {name}"
+    ("Consulta na Unidade Centro", never "na Unidade Unidade Centro": `unit_place_label`)."""
+    place = unit_place_label(getattr(unit, "name", None))
     values = {"servico": service_name.strip(), "unidade": place, "duracao": minutes}
     shown = price_text(price)
     if shown:
-        return UNIT_TERMS_LINE.format(preco=shown, **values)
+        return UNIT_TERMS_LINE.format(preco=shown.replace("R$ ", "R$" + _NBSP), **values)
     return UNIT_TERMS_LINE_NO_PRICE.format(**values)
 
 

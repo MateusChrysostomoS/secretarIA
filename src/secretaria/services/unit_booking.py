@@ -17,6 +17,7 @@ exactly today's.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import datetime
@@ -79,6 +80,23 @@ def unit_location(name: Any, address: Any) -> str | None:
     if not name_text:
         return address_text or None
     return f"{name_text} — {address_text}" if address_text else name_text
+
+
+# A name that already says "Unidade"/"Unidades" (as a word) is not prefixed again.
+_UNIT_WORD = re.compile(r"unidades?\b", re.IGNORECASE)
+
+
+def unit_place_label(name: Any) -> str:
+    """ "Unidade <name>", the patient-facing name of a place (TASK-085 T8 review M3).
+
+    The ONE rule every text uses ("Consulta na Unidade Centro"): a name that already starts with
+    the word "Unidade"/"Unidades" is kept as it is ("Unidade Centro", never "Unidade Unidade
+    Centro"); any other name gets the prefix ("Sede" -> "Unidade Sede"). "" without a name.
+    """
+    text = _clean(name)
+    if not text:
+        return ""
+    return text if _UNIT_WORD.match(text) else f"Unidade {text}"
 
 
 def unit_line(name: Any, address: Any) -> str:

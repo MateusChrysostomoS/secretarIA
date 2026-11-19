@@ -380,23 +380,30 @@ async def test_the_scoped_service_help_never_sees_a_hidden_price(monkeypatch):
 # --------------------------------------------------------------------------
 
 
+def _nb(text: str) -> str:
+    """The line as sent: a no-break space binds "R$" to the value and the number to "min"
+    (TASK-085 T8 cosmetic - a narrow chat never breaks "R$ / 250,00")."""
+    nbsp = "\u00a0"
+    return text.replace("R$ ", "R$" + nbsp).replace(" min", nbsp + "min")
+
+
 async def test_picking_a_unit_sends_its_values_once_before_the_day_picker():
     doctor = _differs()
     picked = await _pick_unit(doctor, CENTRO)
     assert picked.flow_step == fr.STEP_AWAITING_DAY
     first, picker = picked.bubbles
     assert isinstance(first, TextBubble)
-    assert first.body == "Consulta na Unidade Centro: R$ 250,00 · 30 min"
+    assert first.body == _nb("Consulta na Unidade Centro: R$ 250,00 · 30 min")
     assert isinstance(picker, SlotsBubble)
     sede = await _pick_unit(doctor, SEDE)
-    assert _texts(sede) == ["Consulta na Unidade Sede: R$ 200,00 · 30 min"]
+    assert _texts(sede) == [_nb("Consulta na Unidade Sede: R$ 200,00 · 30 min")]
 
 
 async def test_the_line_never_doubles_the_word_unidade_and_drops_a_missing_price():
     named = UnitOption(id=uuid4(), name="Unidade Centro", address=None, business_hours=TUESDAY)
     doctor = _doctor([SEDE, named], {SID: {named.id: UnitTerms("R$ 250,00", 40)}})
     picked = await _pick_unit(doctor, named)
-    assert _texts(picked) == ["Consulta na Unidade Centro: R$ 250,00 · 40 min"]
+    assert _texts(picked) == [_nb("Consulta na Unidade Centro: R$ 250,00 · 40 min")]
 
     no_base_price = {**CONSULTA, "price": None}
     priced_elsewhere = _doctor(
@@ -405,14 +412,14 @@ async def test_the_line_never_doubles_the_word_unidade_and_drops_a_missing_price
         entries=[no_base_price],
     )
     at_sede = await _pick_unit(priced_elsewhere, SEDE)
-    assert _texts(at_sede) == ["Consulta na Unidade Sede: 30 min"]
+    assert _texts(at_sede) == [_nb("Consulta na Unidade Sede: 30 min")]
 
 
 async def test_no_line_under_a_convenio_or_when_the_price_is_the_same():
     under_plan = await _pick_unit(_differs(), CENTRO, flow_selected_insurance="Unimed")
     assert _texts(under_plan) == []
     particular = await _pick_unit(_differs(), CENTRO, flow_selected_insurance="Particular")
-    assert _texts(particular) == ["Consulta na Unidade Centro: R$ 250,00 · 30 min"]
+    assert _texts(particular) == [_nb("Consulta na Unidade Centro: R$ 250,00 · 30 min")]
     same_price = await _pick_unit(_longer_at_centro(), CENTRO)
     assert _texts(same_price) == []
 
@@ -551,7 +558,7 @@ async def test_two_doctors_at_the_same_unit_keep_their_own_values():
             _unit_tap(CENTRO),
             professionals=[ana, beto],
         )
-        assert _texts(picked) == [f"Consulta na Unidade Centro: {price} · {minutes} min"]
+        assert _texts(picked) == [_nb(f"Consulta na Unidade Centro: {price} · {minutes} min")]
         assert agenda.minutes == [("days", minutes)]
         confirm = await fr.route(
             _conversation(
