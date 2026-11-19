@@ -407,6 +407,20 @@ async def test_edit_repicking_the_same_service_on_a_now_blocked_day_keeps_the_vi
     assert calendars[str(DOCTOR_A)].checked == []
 
 
+async def test_edit_repicking_the_visits_own_doctor_on_a_now_blocked_day_keeps_the_visit():
+    """Re-review of A3: the list marks the visit's own doctor "Livre"; tapping him must then go
+    to the confirmation too - not to "escolha um novo dia" (R4: nothing changed)."""
+    doctors = _doctors(consulta_blocks=("tuesday",))
+    ctx, _ = _ctx()
+
+    result = await _step(
+        fr.STEP_EDIT_DOCTOR, fr._professional_row_title(DIOGO), doctors=doctors, ctx=ctx
+    )
+
+    assert result.flow_step == fr.STEP_EDIT_CONFIRM
+    assert _draft(result).changed() == []
+
+
 async def test_edit_doctor_list_keeps_the_visits_own_doctor_free_on_a_now_blocked_day():
     """The visit's own doctor at its own slot is still "Livre" (R4) although Tuesdays were
     blocked for Consulta since; another doctor blocking Tuesday still reads "Ocupado"."""

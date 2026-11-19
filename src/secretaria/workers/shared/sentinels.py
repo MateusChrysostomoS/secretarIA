@@ -53,10 +53,12 @@ from secretaria.services.patient_context import (
     load_upcoming_appointments,
 )
 from secretaria.services.payments import payer_data
+from secretaria.services.service_catalog import load_service_catalog
 from secretaria.services.tenant_config import (
     list_active_professionals,
     professional_appointment_types,
 )
+from secretaria.services.unit_booking import attach_unit_options
 from secretaria.workers.shared import handback_log as hb
 from secretaria.workers.shared.context import (
     _ReplyContext,
@@ -74,6 +76,7 @@ from secretaria.workers.shared.draft_resolution import (
 from secretaria.workers.shared.flow_runner import (
     _apply_flow_result,
 )
+from secretaria.workers.shared.greeting import _flow_professionals
 from secretaria.workers.shared.llm_context import (
     _appointment_calendar,
     _appointment_calendar_target,
@@ -534,7 +537,13 @@ async def _handle_manage_appointment(
         appointments = await load_upcoming_appointments(session, tenant.id, patient_id)
         professional_rows = await list_active_professionals(session, tenant.id) if v2 else []
         if v2:
-            professionals = professional_rows
+            # The router-shaped roster with each doctor's units, unit marks and per-unit terms
+            # (TASK-087 re-review of P1), never the ORM rows: the reschedule day list reads the
+            # unit's hours and blocked weekdays off it. The rows stay for the agenda target.
+            professionals = _flow_professionals(
+                professional_rows, await load_service_catalog(session, tenant.id)
+            )
+            await attach_unit_options(session, tenant, professional_rows, professionals)
         tz = ZoneInfo(tenant.timezone or "America/Sao_Paulo")
         target = manage_target(request, appointments, tz)
         owner = target if request.action == ACTION_RESCHEDULE else None

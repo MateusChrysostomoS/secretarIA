@@ -564,3 +564,24 @@ async def test_apply_to_all_with_unit_terms_replaces_an_existing_row(client, wor
     )
     assert response.status_code == 200, response.text
     assert await _rows_full(w) == {("consulta", "centro"): (None, None, ["monday"])}
+
+
+def test_keep_stored_days_name_fallback_only_without_service_id():
+    """Re-review of D1: an incoming entry WITH a service_id never borrows, by name, the days of a
+    DIFFERENT stored entry; the name fallback is only for entries without a service_id."""
+    from uuid import uuid4
+
+    from secretaria.services.hub_unit_terms import keep_stored_blocked_weekdays
+
+    s1, s2 = str(uuid4()), str(uuid4())
+    stored = [
+        {"name": "Consulta", "service_id": s1},  # no days of its own
+        {"name": "Consulta", "service_id": s2, "blocked_weekdays": ["monday"]},
+    ]
+    out = keep_stored_blocked_weekdays([{"name": "Consulta", "service_id": s1}], stored)
+    assert "blocked_weekdays" not in out[0]
+
+    legacy = keep_stored_blocked_weekdays(
+        [{"name": " consulta "}], [{"name": "Consulta", "blocked_weekdays": ["friday"]}]
+    )
+    assert legacy[0]["blocked_weekdays"] == ["friday"]

@@ -107,10 +107,12 @@ async def _clinic(
     appointment_unit: str | None = "Centro",
     status: AppointmentStatus = AppointmentStatus.SCHEDULED,
     colleague: bool = False,
+    ai_v2: bool = False,
 ):
     """Dra. Ana does Cirurgia (base `base`) at `units`; `own` = each unit's own list (a
     `professional_service_unit_terms` row). One patient (pra-quem answered), one Cirurgia on a
-    Tuesday at `appointment_unit`. `colleague` adds Dr. Bruno (no units) for a multi clinic."""
+    Tuesday at `appointment_unit`. `colleague` adds Dr. Bruno (no units) for a multi clinic;
+    `ai_v2` turns the clinic's AI draft v2 switch on."""
     async with db() as session:
         tenant = Tenant(
             id=uuid4(),
@@ -119,7 +121,7 @@ async def _clinic(
             is_active=True,
             timezone="America/Sao_Paulo",
             business_hours=WEEK_HOURS,
-            initial_flows={},
+            initial_flows={fr.AI_DRAFT_V2_FLAG: True} if ai_v2 else {},
             reminders_v2_enabled=False,
         )
         session.add(tenant)
@@ -282,6 +284,33 @@ async def test_start_guided_booking_uses_the_units_own_block(db, bubbles, native
     )
 
     assert MONDAY not in _weekdays(bubbles)
+
+
+async def test_ai_manage_reschedule_v2_uses_the_units_own_block(db, bubbles, native_agenda):  # noqa: F811
+    """Re-review of P1: the AI "remarcar" hand-back with the v2 switch ON used to rebuild the
+    roster from the ORM rows (no units): Centro's own Monday block was offered."""
+    clinic = await _clinic(db, base=[], own={"Centro": ["monday"]}, ai_v2=True)
+
+    await tasks._handle_manage_appointment(
+        _reply(clinic), "reschedule", clinic.tenant, [], "5511999999999"
+    )
+
+    assert MONDAY not in _weekdays(bubbles)
+
+
+async def test_ai_manage_reschedule_v2_honours_the_units_own_empty_list(  # noqa: F811
+    db,  # noqa: F811
+    bubbles,
+    native_agenda,
+):
+    """The base blocks Monday, Centro's own list frees it: Monday is offered there."""
+    clinic = await _clinic(db, base=["monday"], own={"Centro": []}, ai_v2=True)
+
+    await tasks._handle_manage_appointment(
+        _reply(clinic), "reschedule", clinic.tenant, [], "5511999999999"
+    )
+
+    assert MONDAY in _weekdays(bubbles)
 
 
 async def test_legacy_booking_draft_uses_the_units_own_block(db, bubbles, native_agenda):  # noqa: F811

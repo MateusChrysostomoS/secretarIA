@@ -172,23 +172,29 @@ def _rechecks_day(draft: ae.EditDraft) -> bool:
 
 
 def _calendar(
-    ctx: ae.EditContext, draft: ae.EditDraft, professionals, tenant
+    ctx: ae.EditContext,
+    draft: ae.EditDraft,
+    professionals,
+    tenant,
+    *,
+    service_days: bool = True,
 ) -> Any | None:
     """The draft's agenda as seen from its unit (TASK-083 final wave I1), like the manage
     flow's "Remarcar" (`flow_router._appointment_unit_calendar`): the booking's unit hours,
     else the doctor's only unit / the union of their units; the plain agenda for a doctor
     without units - and, TASK-087, without the weekdays the draft's service is not done on there
-    (every day list, time list and free check of this flow reads this one agenda). May raise
+    (every day list, time list and free check of this flow reads this one agenda).
+    `service_days=False` only for re-checking the visit AS BOOKED (R4). May raise
     `CalendarOriginUnresolved` exactly like `ctx.calendar_for`."""
     doctor = _doctor(professionals, draft)
-    return service_calendar(
-        flow_units.appointment_calendar(
-            ctx.calendar_for(draft.calendar_professional_id),
-            _uuid(draft.current.get("unit_id")),
-            doctor,
-        ),
-        _blocked_days(tenant, draft, doctor),
+    agenda = flow_units.appointment_calendar(
+        ctx.calendar_for(draft.calendar_professional_id),
+        _uuid(draft.current.get("unit_id")),
+        doctor,
     )
+    if not service_days:
+        return agenda
+    return service_calendar(agenda, _blocked_days(tenant, draft, doctor))
 
 
 def _draft_unit(draft: ae.EditDraft, doctor) -> Any | None:
@@ -690,9 +696,10 @@ async def _after_slot_affecting_change(
 
     Free -> straight to the confirmation. Not free (or unknown) -> day, then time, for the
     NEW doctor/service, behind a one-line explanation (spec P1) - never a confirmation
-    for a slot that does not exist.
+    for a slot that does not exist. TASK-087 R4: when nothing slot-affecting changed (the same
+    doctor or unit picked again) the visit is checked as booked, without the service's weekdays.
     """
-    calendar = _calendar(ctx, draft, professionals, tenant)
+    calendar = _calendar(ctx, draft, professionals, tenant, service_days=_rechecks_day(draft))
     free = await _slot_free(
         calendar,
         draft.start,
