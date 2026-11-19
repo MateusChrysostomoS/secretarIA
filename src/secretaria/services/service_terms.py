@@ -12,6 +12,9 @@ that turns "base + exceptions + unit" into the value a reader uses:
 * `price_differs_across_units`  D3 - True when the effective price is not the same in every unit
                              where the service is done, so the caller HIDES the price until the unit
                              is chosen. Deliberately no "price range": hide, never "from X to Y";
+* `blocked_weekdays_for` / `blocked_weekdays_everywhere`  TASK-087 - weekdays a service cannot be
+                             booked by patients: unit exception (NULL = inherit) > base list on the
+                             entry; with no unit chosen, only the days blocked in EVERY unit;
 * `load_terms` / `load_terms_for`  the rows, tenant-scoped:
                              `{professional: {service: {unit: UnitTerms}}}`.
 
@@ -31,13 +34,29 @@ from secretaria.models.professional_service_unit_terms import ProfessionalServic
 from secretaria.services.payments.money import parse_brl_to_cents
 from secretaria.services.service_catalog import entry_service_id
 
+# Keys of the weekdays in `business_hours` and in `blocked_weekdays` (TASK-087), Monday first.
+WEEKDAY_KEYS: tuple[str, ...] = (
+    "monday",
+    "tuesday",
+    "wednesday",
+    "thursday",
+    "friday",
+    "saturday",
+    "sunday",
+)
+
 
 @dataclass(frozen=True)
 class UnitTerms:
-    """One exception row: either half may be None (= inherit the base)."""
+    """One exception row: every part may be None (= inherit the base).
+
+    `blocked_weekdays` (TASK-087): None = inherit the base list, an empty set = own (nothing
+    blocked at this unit), a non-empty set = own.
+    """
 
     price: str | None
     duration_min: int | None
+    blocked_weekdays: frozenset[str] | None = None
 
 
 @dataclass(frozen=True)
@@ -80,11 +99,53 @@ def resolve_terms(
     if row is None:
         return ResolvedTerms(price, duration, own=False)
     own_price = _blank_to_none(row.price)
+    if own_price is None and row.duration_min is None:
+        # TASK-087: a row that carries only weekdays contributes no price/duration of its own.
+        return ResolvedTerms(price, duration, own=False)
     return ResolvedTerms(
         own_price if own_price is not None else price,
         row.duration_min if row.duration_min is not None else duration,
         own=True,
     )
+
+
+def _weekday_set(value) -> frozenset[str]:
+    """A stored `blocked_weekdays` list as a set of known keys (anything else is ignored)."""
+    if not isinstance(value, (list, tuple, set, frozenset)):
+        return frozenset()
+    return frozenset(day for day in value if isinstance(day, str) and day in WEEKDAY_KEYS)
+
+
+def blocked_weekdays_for(
+    entry: Mapping,
+    terms_by_unit: Mapping[UUID, UnitTerms] | None,
+    unit_id: UUID | None,
+) -> frozenset[str]:
+    """Weekdays on which patients cannot book `entry`'s service at `unit_id` (TASK-087).
+
+    The unit's own list (when the row carries one, even an empty one) beats the base list on the
+    professional's entry; no unit known (`unit_id` None) = the base. Absent/None base = nothing.
+    """
+    row = terms_by_unit.get(unit_id) if terms_by_unit and unit_id is not None else None
+    if row is not None and row.blocked_weekdays is not None:
+        return _weekday_set(row.blocked_weekdays)
+    return _weekday_set(entry.get("blocked_weekdays"))
+
+
+def blocked_weekdays_everywhere(
+    entry: Mapping,
+    terms_by_unit: Mapping[UUID, UnitTerms] | None,
+    unit_ids: Collection[UUID],
+) -> frozenset[str]:
+    """Weekdays blocked in EVERY one of `unit_ids` (R1: unit not chosen yet = union of openings).
+
+    A day stays bookable when at least one unit allows it, so only the intersection is blocked.
+    No units = the base list.
+    """
+    if not unit_ids:
+        return blocked_weekdays_for(entry, terms_by_unit, None)
+    per_unit = [blocked_weekdays_for(entry, terms_by_unit, unit_id) for unit_id in set(unit_ids)]
+    return frozenset.intersection(*per_unit)
 
 
 def _price_key(price: str | None) -> tuple[str, int | str | None]:
@@ -131,13 +192,16 @@ async def load_terms_for(
             ProfessionalServiceUnitTerms.unit_id,
             ProfessionalServiceUnitTerms.price,
             ProfessionalServiceUnitTerms.duration_min,
+            ProfessionalServiceUnitTerms.blocked_weekdays,
         ).where(
             ProfessionalServiceUnitTerms.tenant_id == tenant_id,
             ProfessionalServiceUnitTerms.professional_id.in_(ids),
         )
     )
-    for professional_id, service_id, unit_id, price, duration_min in rows:
-        result[professional_id].setdefault(service_id, {})[unit_id] = UnitTerms(price, duration_min)
+    for professional_id, service_id, unit_id, price, duration_min, blocked in rows:
+        result[professional_id].setdefault(service_id, {})[unit_id] = UnitTerms(
+            price, duration_min, None if blocked is None else _weekday_set(blocked)
+        )
     return result
 
 
