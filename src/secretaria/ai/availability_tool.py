@@ -74,7 +74,7 @@ from secretaria.services.booking_scope import (
 )
 from secretaria.services.calendar import CalendarService, CalendarUnavailableError
 from secretaria.services.flow_router import DAY_PICKER_WINDOW_DAYS
-from secretaria.services.unit_booking import scoped_calendar
+from secretaria.services.unit_booking import scoped_calendar, service_calendar
 
 logger = get_logger(__name__)
 
@@ -290,6 +290,36 @@ async def _unit_minutes(tenant_id: UUID, target: _Target, units: list) -> dict[U
     return out
 
 
+async def _unit_blocked_days(
+    tenant_id: UUID, target: _Target, units: list
+) -> dict[UUID | None, frozenset[str]]:
+    """{unit id (None = no unit): weekdays the named service is NOT done on} (TASK-087).
+
+    Only with a named service of a professional (R5: no service, no filter). One read of the
+    professional's exception rows, scoped to `tenant_id`; a unit without its own list gets the
+    base. A failed read degrades to the BASE list for every unit - the booking tools still
+    refuse a blocked day at confirmation (G3), so this read never lets one through.
+    """
+    entry, professional = target.entry, target.professional
+    if professional is None or not isinstance(entry, dict):
+        return {}
+    from secretaria.core.database import async_session_factory
+    from secretaria.services.service_terms import blocked_weekdays_at, blocked_weekdays_for
+
+    base = blocked_weekdays_for(entry, None, None)
+    try:
+        async with async_session_factory() as session:
+            return {
+                unit.id if unit else None: await blocked_weekdays_at(
+                    session, tenant_id, professional.id, entry, unit.id if unit else None
+                )
+                for unit in units or [None]
+            }
+    except Exception as exc:  # noqa: BLE001 - see the docstring
+        logger.warning("agent_availability_blocked_days_failed", error_type=type(exc).__name__)
+        return {unit.id if unit else None: base for unit in units or [None]}
+
+
 def _fmt(day: date) -> str:
     return short_day_phrase(day)
 
@@ -356,6 +386,8 @@ async def _read_availability(
     units = [unit for unit in offered if unit.bookable]
     # TASK-085 D7: each unit's windows are sized with the service's duration AT that unit.
     own_minutes = await _unit_minutes(tenant_id, target, units)
+    # TASK-087: the weekdays the named service is not done on, per unit (none without a service).
+    blocked_by_unit = await _unit_blocked_days(tenant_id, target, units)
     scanned: set[int] = set()
     labelled: list[tuple[Any, str | None]] = []
     truncated = False
@@ -363,7 +395,9 @@ async def _read_availability(
         minutes = own_minutes.get(unit.id, target.slot_minutes) if unit else target.slot_minutes
         scanned.add(minutes)
         unit_scan = await scan_free_windows(
-            scoped_calendar(calendar, unit),
+            service_calendar(
+                scoped_calendar(calendar, unit), blocked_by_unit.get(unit.id if unit else None)
+            ),
             span=span,
             duration_minutes=minutes,
             holds=holds,

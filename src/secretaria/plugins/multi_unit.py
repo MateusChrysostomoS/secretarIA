@@ -45,6 +45,7 @@ from secretaria.ai.tools import (
     _localize_window,
     _match_by_name,
     _persist_appointment,
+    _service_day_refusal,
     _service_unit_refusal,
     _sole_professional_id,
     _tenant_id_ctx,
@@ -257,6 +258,17 @@ async def create_event_at_unit(
 
     cal = scoped_calendar(_get_calendar(), unit)
     fallback_start, fallback_end = _localize_window(start, end, cal)
+    # TASK-087 G3: a day the service is blocked on (this unit's own list, else the base).
+    refused = await _service_day_refusal(
+        "create_event_at_unit",
+        unit,
+        owner,
+        None,
+        canonical_type,
+        fallback_start.astimezone(cal.tzinfo),
+    )
+    if refused is not None:
+        return refused
     outside = outside_unit_hours(unit, fallback_start, fallback_end, cal.tzinfo)
     if outside is not None:
         return outside
