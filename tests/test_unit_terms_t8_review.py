@@ -15,7 +15,10 @@ import os
 
 os.environ.setdefault("APP_ENV", "test")
 
-from datetime import timedelta  # noqa: E402
+from datetime import UTC, datetime, timedelta  # noqa: E402
+from types import SimpleNamespace  # noqa: E402
+from uuid import uuid4  # noqa: E402
+from zoneinfo import ZoneInfo  # noqa: E402
 
 import pytest  # noqa: E402
 from sqlalchemy import select  # noqa: E402
@@ -23,16 +26,28 @@ from sqlalchemy import select  # noqa: E402
 from secretaria.ai import tools as ai_tools  # noqa: E402
 from secretaria.ai.tool_output import allowlisted  # noqa: E402
 from secretaria.core import database as core_database  # noqa: E402
-from secretaria.models import Appointment  # noqa: E402
+from secretaria.models import (  # noqa: E402
+    Appointment,
+    AppointmentStatus,
+    Conversation,
+    FlowState,
+    Patient,
+)
 from secretaria.plugins import multi_professional as mp, multi_unit as mu  # noqa: E402
-from secretaria.services import booking_hold  # noqa: E402
+from secretaria.services import booking_hold, flow_router as fr  # noqa: E402
 from secretaria.services.booking_scope import BOOKING_TOPOLOGY_MULTI  # noqa: E402
 from secretaria.services.local_calendar import LocalCalendarService  # noqa: E402
+from secretaria.services.service_terms import UnitTerms  # noqa: E402
+from secretaria.services.unit_booking import UnitOption  # noqa: E402
+from secretaria.workers import tasks  # noqa: E402
+from secretaria.workers.shared import actions  # noqa: E402
 from tests import test_unit_terms_ai_db as base  # noqa: E402
 from tests._local_agenda import wire_local_agenda  # noqa: E402
+from tests._patching import workers_ns  # noqa: E402
 from tests._reminder_fixtures import db  # noqa: E402,F401
 
 CENTRO_40 = {"Centro": (None, 40)}
+SEDE_HOURS, CENTRO_HOURS = base.SEDE_HOURS, base.CENTRO_HOURS
 
 
 def _day() -> str:
@@ -310,3 +325,224 @@ def test_i1_the_per_window_duration_is_declared_for_the_model():
         "slot_minutes": 30,
     }
     assert allowlisted("get_availability", answer) == answer
+
+
+# ================================================== (b) rebooking after a clinic cancellation
+#
+# "Outro horario" / "Outro medico" after the clinic cancelled: the day list was scanned with the
+# clinic's base duration on an agenda without the unit, while the next step (the slot list) is
+# sized at the unit - a day could look free and open an empty slot list. Now the cancelled
+# consultation's unit (when the doctor still offers it) or the doctor's only unit sizes and
+# scopes the day list, and that unit is kept for the next step.
+
+_SERVICE_ID = uuid4()
+_CENTRO = UnitOption(id=uuid4(), name="Centro", address="Rua B, 2", business_hours=CENTRO_HOURS)
+_SEDE = UnitOption(id=uuid4(), name="Sede", address="Rua A, 1", business_hours=SEDE_HOURS)
+
+
+def _rb_tenant():
+    return SimpleNamespace(
+        initial_flows={"buttons": ["Agendar", "Outro"]},
+        appointment_types=[{"name": "Consulta", "duration_min": 30, "is_active": True}],
+        appointment_duration_min=30,
+        business_hours=base.ALL_DAY,
+        collect_insurance=False,
+        insurances=None,
+    )
+
+
+def _rb_doctor(name="Dra. Ana", *, units=(_SEDE, _CENTRO), centro_minutes=40):
+    terms = {_SERVICE_ID: {_CENTRO.id: UnitTerms(None, centro_minutes)}} if centro_minutes else {}
+    return SimpleNamespace(
+        id=uuid4(),
+        name=name,
+        specialty=None,
+        about=None,
+        context_doctor_message=None,
+        min_booking_notice_hours=None,
+        business_hours=None,
+        appointment_types=[
+            {
+                "name": "Consulta",
+                "service_id": str(_SERVICE_ID),
+                "duration_min": 30,
+                "is_active": True,
+            }
+        ],
+        units=list(units),
+        service_units={},
+        service_unit_terms=terms,
+    )
+
+
+def _rb_conversation():
+    return SimpleNamespace(
+        id=uuid4(),
+        flow_state=FlowState.IDLE,
+        flow_step=None,
+        flow_selected_type=None,
+        flow_selected_day=None,
+        flow_selected_slot=None,
+        flow_selected_professional_id=None,
+        flow_selected_insurance=None,
+        flow_selected_unit_id=None,
+        flow_managing_appointment_id=None,
+        patient_id=None,
+    )
+
+
+class _ScopedDays:
+    """Has days free; records the slot length and the unit each day scan was made at."""
+
+    def __init__(self, unit=None, log=None):
+        self.tzinfo = ZoneInfo(base.TZ)
+        self.unit = unit
+        self.log = log if log is not None else []
+
+    def with_unit(self, unit_id, location, *, business_hours=None):
+        return _ScopedDays(unit_id, self.log)
+
+    async def list_available_days(self, start_day, days, slot_minutes=None, **_kw):
+        self.log.append((self.unit, slot_minutes))
+        first = datetime(2027, 3, 1, tzinfo=self.tzinfo)
+        return [first + timedelta(days=n) for n in range(3)]
+
+
+async def _rebook(doctors, *, same, cancelled, unit_id, candidates=None):
+    calendar = _ScopedDays()
+    result = await fr.enter_rebooking(
+        _rb_conversation(),
+        _rb_tenant(),
+        calendar,
+        professionals=doctors,
+        cancelled_professional_id=cancelled.id,
+        service_name="Consulta",
+        same_professional=same,
+        candidates=candidates,
+        cancelled_unit_id=unit_id,
+    )
+    return result, calendar.log
+
+
+@pytest.mark.asyncio
+async def test_b_rebooking_same_doctor_at_centro_scans_its_own_duration():
+    ana = _rb_doctor()
+    result, scans = await _rebook([ana], same=True, cancelled=ana, unit_id=_CENTRO.id)
+    assert scans and all(scan == (_CENTRO.id, 40) for scan in scans)
+    assert result.flow_selected_unit_id == _CENTRO.id
+    assert result.flow_selected_professional_id == ana.id
+
+
+@pytest.mark.asyncio
+async def test_b_rebooking_same_doctor_at_sede_keeps_the_base():
+    ana = _rb_doctor()
+    result, scans = await _rebook([ana], same=True, cancelled=ana, unit_id=_SEDE.id)
+    assert scans and all(scan == (_SEDE.id, 30) for scan in scans)
+    assert result.flow_selected_unit_id == _SEDE.id
+
+
+@pytest.mark.asyncio
+async def test_b_rebooking_without_a_unit_and_two_units_is_todays():
+    """Characterization: no unit on the booking, two units -> base, no unit kept (D7)."""
+    ana = _rb_doctor()
+    result, scans = await _rebook([ana], same=True, cancelled=ana, unit_id=None)
+    assert scans and all(scan == (None, 30) for scan in scans)
+    assert result.flow_selected_unit_id is None
+
+
+@pytest.mark.asyncio
+async def test_b_rebooking_the_only_unit_uses_its_duration():
+    ana = _rb_doctor(units=(_CENTRO,))
+    result, scans = await _rebook([ana], same=True, cancelled=ana, unit_id=None)
+    assert scans and all(scan == (_CENTRO.id, 40) for scan in scans)
+    assert result.flow_selected_unit_id == _CENTRO.id
+
+
+@pytest.mark.asyncio
+async def test_b_rebooking_with_a_doctor_without_units_is_todays():
+    """Characterization: no unit link at all -> the clinic's base and the agenda as is."""
+    ana = _rb_doctor(units=(), centro_minutes=None)
+    result, scans = await _rebook([ana], same=True, cancelled=ana, unit_id=_CENTRO.id)
+    assert scans and all(scan == (None, 30) for scan in scans)
+    assert result.flow_selected_unit_id is None
+
+
+@pytest.mark.asyncio
+async def test_b_rebooking_another_doctor_at_the_cancelled_unit_uses_theirs():
+    ana, bia = _rb_doctor(), _rb_doctor("Dra. Bia", centro_minutes=50)
+    result, scans = await _rebook(
+        [ana, bia], same=False, cancelled=ana, unit_id=_CENTRO.id, candidates=[bia]
+    )
+    assert scans and all(scan == (_CENTRO.id, 50) for scan in scans)
+    assert (result.flow_selected_professional_id, result.flow_selected_unit_id) == (
+        bia.id,
+        _CENTRO.id,
+    )
+
+
+@pytest.mark.asyncio
+async def test_b_the_rebooking_tap_hands_the_router_the_units_and_the_cancelled_unit(
+    db, monkeypatch
+):
+    """The worker's snapshot carries the units and the per-unit terms (attach_unit_options),
+    and the router gets the cancelled consultation's unit."""
+    w = await base._world(db, exceptions=CENTRO_40)
+    async with db() as session:
+        patient = Patient(id=uuid4(), tenant_id=w.tenant.id, wa_id="5511999990000")
+        session.add(patient)
+        await session.flush()
+        conversation = Conversation(tenant_id=w.tenant.id, patient_id=patient.id)
+        session.add(conversation)
+        start = datetime.now(UTC) + timedelta(days=2)
+        appointment = Appointment(
+            tenant_id=w.tenant.id,
+            patient_id=patient.id,
+            professional_id=w.ana.id,
+            unit_id=w.centro.id,
+            google_event_id="",
+            appointment_type="Consulta",
+            start_at=start,
+            end_at=start + timedelta(minutes=40),
+            status=AppointmentStatus.CANCELLED,
+        )
+        session.add(appointment)
+        await session.commit()
+
+    captured: dict = {}
+
+    async def _enter(*_args, **kwargs):
+        captured.update(kwargs)
+        return SimpleNamespace(flow_state=FlowState.SERVICE_CATALOG)
+
+    async def _noop(*_args, **_kwargs):
+        return None
+
+    async def _token(_session, _tenant_id):
+        return "token"
+
+    class _Client:
+        persists_outbound = False
+
+        @classmethod
+        def for_tenant(cls, tenant, waba_token):
+            return cls()
+
+        async def send_text_message(self, to, body):
+            return {}
+
+    monkeypatch.setattr(core_database, "async_session_factory", db)
+    monkeypatch.setattr(workers_ns, "async_session_factory", db)
+    monkeypatch.setattr(workers_ns, "WhatsAppClient", _Client)
+    monkeypatch.setattr(workers_ns, "get_waba_token", _token)
+    monkeypatch.setattr(actions, "enter_rebooking", _enter)
+    monkeypatch.setattr(actions, "_apply_flow_result", _noop)
+    monkeypatch.setattr(actions, "_appointment_calendar", _noop)
+    reply = tasks._ReplyContext(
+        conversation_id=conversation.id, patient_ref="5511999990000", inbound_body=""
+    )
+    await actions._handle_action_button(reply, "rebooksame", str(appointment.id))
+
+    assert captured["cancelled_unit_id"] == w.centro.id
+    [ana] = captured["professionals"]
+    assert {unit.name for unit in ana.units} == {"Sede", "Centro"}
+    assert ana.service_unit_terms[w.service.id][w.centro.id].duration_min == 40

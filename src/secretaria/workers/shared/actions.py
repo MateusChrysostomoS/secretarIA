@@ -59,6 +59,7 @@ from secretaria.services.tenant_config import (
     load_tenant_config,
     resolve_professional_calendar,
 )
+from secretaria.services.unit_booking import attach_unit_options
 from secretaria.workers.shared.appointment_edit_support import (
     edit_guards,
     visit_suspended,
@@ -508,6 +509,9 @@ async def _handle_action_button(
                 )
                 for p in professional_rows
             ]
+            # TASK-085 T8 (b): the units, the per-service unit marks and the per-unit
+            # price/duration, like the turn snapshot - the day list is read at the unit.
+            await attach_unit_options(session, tenant, professional_rows, professionals)
             same = action == "rebooksame"
             service_name = appointment.appointment_type
             candidates: list = []
@@ -544,6 +548,7 @@ async def _handle_action_button(
                 candidates,
                 prefix,
                 appointment.attendee_name,
+                appointment.unit_id,
             )
 
         if action == "apptresched":
@@ -645,6 +650,7 @@ async def _handle_action_button(
             rb_candidates,
             rb_prefix,
             rb_attendee_name,
+            rb_unit_id,
         ) = rebooking_handoff
         result = await enter_rebooking(
             rb_conversation,
@@ -656,6 +662,7 @@ async def _handle_action_button(
             same_professional=rb_same,
             candidates=rb_candidates,
             prefix=rb_prefix,
+            cancelled_unit_id=rb_unit_id,
         )
         # Rebooking the SAME person the doctor cancelled on: a booking made for
         # a third party (already authorized for that appointment) stays theirs.

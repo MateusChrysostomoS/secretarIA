@@ -7562,6 +7562,36 @@ def _rebooking_duration(tenant: Tenant, service_name: str | None) -> int:
     return tenant.appointment_duration_min
 
 
+def _rebooking_unit_and_duration(
+    tenant: Tenant,
+    owner: Any | None,
+    service_name: str | None,
+    cancelled_unit_id: UUID | None,
+) -> tuple[Any | None, int]:
+    """The unit the rebooked day list is read at, and its slot length (TASK-085 T8 (b)).
+
+    The cancelled consultation's unit when `owner` still offers it for the service, else the
+    owner's only unit for it; then `_service_duration_at` there (its own duration, else the
+    base) - the very value the next step's slot list reads (`_booking_duration`). No owner, no
+    unit link, no matching entry or a unit not decided (two or more, none on the booking):
+    (None, `_rebooking_duration`), exactly as before.
+    """
+    base = _rebooking_duration(tenant, service_name)
+    if owner is None or not flow_units.bookable_units(owner) or not service_name:
+        return None, base
+    entry = _match_service(professional_appointment_types(owner, tenant), service_name)
+    if entry is None:
+        return None, base
+    service_id = entry_service_id(entry)
+    unit = flow_units.find_unit(owner, cancelled_unit_id, service_id)
+    if unit is None:
+        choice = flow_units.unit_choice(owner, service_id)
+        unit = choice.units[0] if choice.kind == "implied" else None
+    if unit is None:
+        return None, base
+    return unit, _service_duration_at(entry, tenant, owner, unit.id)
+
+
 def rebooking_candidates(
     tenant: Tenant,
     professionals: list,
@@ -7608,6 +7638,7 @@ async def enter_rebooking(
     same_professional: bool,
     candidates: list | None = None,
     prefix: str | None = None,
+    cancelled_unit_id: UUID | None = None,
 ) -> FlowRouterResult:
     """Deterministic destination for both rebooking buttons.
 
@@ -7622,26 +7653,40 @@ async def enter_rebooking(
 
     The service rides along in EVERY branch, so the patient never re-picks it.
     Nothing here reaches the LLM.
-    """
-    duration = _rebooking_duration(tenant, service_name)
 
-    if same_professional:
+    TASK-085 T8 (b): when the day list opens for a known doctor, it is read at the cancelled
+    consultation's unit (`cancelled_unit_id`, when that doctor offers it) or the doctor's only
+    unit - its hours and its own duration - and that unit is kept for the slot step, so a day
+    shown free has times of the length the slot list offers.
+    """
+
+    async def _days_for(owner_id: UUID | None) -> FlowRouterResult:
+        owner = _find_professional_by_id(professionals, owner_id)
+        unit, duration = _rebooking_unit_and_duration(
+            tenant, owner, service_name, cancelled_unit_id
+        )
         result = await enter_day_picker(
             conversation,
             tenant,
-            calendar,
+            _unit_calendar(calendar, unit),
             duration_minutes=duration,
             branch=BOOKING_DAY_BRANCH,
             professionals=professionals,
             # TASK-052: "Remarcar" on a released PAID slot says what happens to the deposit.
             prefix=prefix,
+            back_target=None if same_professional else BACK_TARGET_SERVICE,
         )
         # enter_day_picker knows nothing about who or what is being booked, and
         # these fields are written unconditionally by the caller — so a result
         # that should keep them must carry them explicitly (FlowRouterResult).
-        result.flow_selected_professional_id = cancelled_professional_id
+        result.flow_selected_professional_id = owner_id
         result.flow_selected_type = service_name
+        if unit is not None and result.flow_state is FlowState.SERVICE_CATALOG:
+            result.flow_selected_unit_id = unit.id
         return result
+
+    if same_professional:
+        return await _days_for(cancelled_professional_id)
 
     pool = candidates or []
     if not pool:
@@ -7653,19 +7698,7 @@ async def enter_rebooking(
 
     if len(pool) == 1:
         # One candidate: a one-row list is ceremony, not a choice.
-        result = await enter_day_picker(
-            conversation,
-            tenant,
-            calendar,
-            duration_minutes=duration,
-            branch=BOOKING_DAY_BRANCH,
-            professionals=professionals,
-            prefix=prefix,
-            back_target=BACK_TARGET_SERVICE,
-        )
-        result.flow_selected_professional_id = pool[0].id
-        result.flow_selected_type = service_name
-        return result
+        return await _days_for(pool[0].id)
 
     result = _enter_professional_list(tenant, pool, pool=True)
     if prefix:
