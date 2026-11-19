@@ -529,6 +529,8 @@ class LocalCalendarService(CalendarService):
         local._shared_busy_provider = calendar.shared_busy_provider
         local._unit_id = getattr(calendar, "_unit_id", None)
         local._location = getattr(calendar, "_location", None)
+        # TASK-087: a service's blocked weekdays travel with the agenda they filter.
+        local._blocked_weekdays = getattr(calendar, "_blocked_weekdays", frozenset())
         return local
 
     @property

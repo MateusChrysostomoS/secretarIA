@@ -91,15 +91,15 @@ async def test_multiple_appointments_local_labels_keep_original_iso_ids(intent):
             upcoming_appointments=appointments,
         )
     assert result.bubbles[0].rows == [
-        (f"slot|{first['start_at'].isoformat()}", "16/10 14:40 Consulta"),
-        (f"slot|{second['start_at'].isoformat()}", "16/10 22:10 Consulta"),
+        (f"slot|{first['start_at'].isoformat()}", "Sex, 16/10 14:40 Consul…"),
+        (f"slot|{second['start_at'].isoformat()}", "Sex, 16/10 22:10 Consul…"),
     ]
     if intent != "reschedule":
         picked = await fr.route(
             _conversation(flow_state=result.flow_state, flow_step=result.flow_step),
             tenant,
             None,
-            f"16/10 14:40 Consulta ({first['start_at'].isoformat()})",
+            f"Sex, 16/10 14:40 Consul… ({first['start_at'].isoformat()})",
             upcoming_appointments=appointments,
         )
         assert "16/10/2026 às 14:40" in picked.bubbles[0].body

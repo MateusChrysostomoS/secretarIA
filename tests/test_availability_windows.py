@@ -114,7 +114,12 @@ def _slot(day: int, hhmm: str, tz=TZ) -> datetime:
 def test_back_to_back_slots_become_one_window_ending_when_the_last_slot_ends():
     starts = [_slot(8, "08:00"), _slot(8, "08:40"), _slot(8, "09:20")]
     (window,) = aw.slots_to_windows(starts, duration_minutes=40)
-    assert window.payload() == {"day": "2026-10-08", "start": "08:00", "end": "10:00"}
+    assert window.payload() == {
+        "day": "2026-10-08",
+        "start": "08:00",
+        "end": "10:00",
+        "weekday": "qui",
+    }
 
 
 def test_a_gap_starts_a_new_window():
@@ -146,6 +151,11 @@ def test_the_wall_clock_is_read_as_is_whatever_the_utc_offset():
         assert (window.start.strftime("%H:%M"), window.end.strftime("%H:%M")) == ("08:00", "10:00")
 
 
-def test_a_window_exposes_exactly_day_start_end():
+def test_a_window_exposes_exactly_day_start_end_weekday():
     window = aw.FreeWindow(day=TODAY, start=time(8, 5), end=time(9, 5))
-    assert window.payload() == {"day": "2026-10-05", "start": "08:05", "end": "09:05"}
+    assert window.payload() == {
+        "day": "2026-10-05",
+        "start": "08:05",
+        "end": "09:05",
+        "weekday": "seg",
+    }
