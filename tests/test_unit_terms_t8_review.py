@@ -23,7 +23,7 @@ from zoneinfo import ZoneInfo  # noqa: E402
 import pytest  # noqa: E402
 from sqlalchemy import select  # noqa: E402
 
-from secretaria.ai import tools as ai_tools  # noqa: E402
+from secretaria.ai import scoped_help, tools as ai_tools  # noqa: E402
 from secretaria.ai.tool_output import allowlisted  # noqa: E402
 from secretaria.core import database as core_database  # noqa: E402
 from secretaria.models import (  # noqa: E402
@@ -546,3 +546,111 @@ async def test_b_the_rebooking_tap_hands_the_router_the_units_and_the_cancelled_
     [ana] = captured["professionals"]
     assert {unit.name for unit in ana.units} == {"Sede", "Centro"}
     assert ana.service_unit_terms[w.service.id][w.centro.id].duration_min == 40
+
+
+# ======================================== (c) the AI service help reads the unit already chosen
+#
+# D3 still holds BEFORE the unit (a price that differs between the units is never said); once
+# the patient picked the unit, the help may say that unit's price - as the service card does.
+
+SEDE_200_CENTRO_250 = {"Centro": ("R$ 250,00", None)}
+
+
+def _priced_doctor():
+    ana = _rb_doctor(centro_minutes=None)
+    ana.appointment_types[0]["price"] = "R$ 200,00"
+    ana.service_unit_terms = {_SERVICE_ID: {_CENTRO.id: UnitTerms("R$ 250,00", None)}}
+    return ana
+
+
+async def _router_help(monkeypatch, *, unit_id):
+    seen: dict = {}
+
+    async def _fake_help(**kwargs):
+        seen.update(kwargs)
+        from secretaria.ai.scoped_help import ScopedHelpOutcome
+
+        return ScopedHelpOutcome(kind="escalate")
+
+    monkeypatch.setattr(fr, "run_service_help", _fake_help)
+    ana = _priced_doctor()
+    conversation = _rb_conversation()
+    conversation.flow_step = fr.STEP_SERVICE_HELP
+    conversation.flow_selected_professional_id = ana.id
+    conversation.flow_selected_unit_id = unit_id
+    await fr._handle_service_help(
+        conversation, _rb_tenant(), "quanto custa?", ana.appointment_types, ana
+    )
+    [service] = seen["services"]
+    return service.get("price")
+
+
+@pytest.mark.asyncio
+async def test_c_router_help_hides_a_differing_price_before_the_unit(monkeypatch):
+    assert await _router_help(monkeypatch, unit_id=None) is None
+
+
+@pytest.mark.asyncio
+async def test_c_router_help_shows_the_chosen_units_price(monkeypatch):
+    assert await _router_help(monkeypatch, unit_id=_CENTRO.id) == "R$ 250,00"
+    assert await _router_help(monkeypatch, unit_id=_SEDE.id) == "R$ 200,00"
+
+
+async def _help_block(db, monkeypatch, w, *, unit=None) -> str:
+    """The scoped-help options block for Ana's list over a real conversation."""
+    async with db() as session:
+        patient = Patient(tenant_id=w.tenant.id, wa_id=f"55119{uuid4().int % 10**8:08d}")
+        session.add(patient)
+        await session.flush()
+        conversation = Conversation(
+            tenant_id=w.tenant.id,
+            patient_id=patient.id,
+            flow_selected_professional_id=w.ana.id,
+            flow_selected_unit_id=unit.id if unit is not None else None,
+        )
+        session.add(conversation)
+        await session.commit()
+    fake = base._FakeModel()
+    monkeypatch.setattr(scoped_help, "_get_decision_model", lambda: fake)
+    monkeypatch.setattr(scoped_help, "async_session_factory", db)
+
+    async def _load(_cid):
+        from pseudonymize_core import Pseudonymizer
+
+        return Pseudonymizer()
+
+    async def _persist(_cid, _p):
+        return None
+
+    monkeypatch.setattr(scoped_help, "load_pseudonymizer", _load)
+    monkeypatch.setattr(scoped_help, "persist_pseudonymizer", _persist)
+    entry = {**base._ana_entry(w.service.id)}
+    if unit is not None and unit.name == "Centro":
+        entry["price"] = "R$ 250,00"  # what the router's _priced_entry hands at Centro
+    await scoped_help.run_service_help(
+        conversation_id=conversation.id,
+        services=[entry],
+        patient_message="quanto custa?",
+        final_round=False,
+    )
+    prompt = fake.calls[0][0].content
+    return prompt.split("Serviços disponíveis (os ÚNICOS que existem):\n")[1].split("\n\n")[0]
+
+
+@pytest.mark.asyncio
+async def test_c_scoped_help_before_the_unit_keeps_d3(db, monkeypatch):
+    w = await base._world(db, exceptions=SEDE_200_CENTRO_250)
+    block = await _help_block(db, monkeypatch, w)
+    assert block.startswith("- Consulta — valor depende da unidade escolhida")
+    assert "R$" not in block
+
+
+@pytest.mark.asyncio
+async def test_c_scoped_help_after_the_unit_says_that_units_price(db, monkeypatch):
+    w = await base._world(db, exceptions=SEDE_200_CENTRO_250)
+    assert (await _help_block(db, monkeypatch, w, unit=w.centro)).startswith(
+        "- Consulta — R$ 250,00"
+    )
+    assert (await _help_block(db, monkeypatch, w, unit=w.sede)).startswith(
+        "- Consulta — R$ 200,00"
+    )

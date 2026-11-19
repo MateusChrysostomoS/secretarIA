@@ -3817,8 +3817,16 @@ async def _handle_service_help(
         outcome = await run_service_help(
             conversation_id=getattr(conversation, "id", None),
             # TASK-085 D3: the model reads the prices the service card would show - a price
-            # that differs between the doctor's units is not given to it before the unit.
-            services=[_priced_entry(service, professional) for service in services],
+            # that differs between the doctor's units is not given to it before the unit; once
+            # the unit is picked (and does the service), that unit's price (T8 review c).
+            services=[
+                _priced_entry(
+                    service,
+                    professional,
+                    _service_card_unit_id(conversation, professional, service),
+                )
+                for service in services
+            ],
             patient_message=body,
             final_round=final_round,
         )
