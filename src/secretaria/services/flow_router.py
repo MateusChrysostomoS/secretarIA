@@ -88,6 +88,7 @@ from secretaria.services.availability import (
     slot_taken_at_confirm,
     without_holds,
 )
+from secretaria.services.booking_dates import WEEKDAY_SHORT, short_day_label, short_day_phrase
 from secretaria.services.booking_details import is_convenio, price_text, service_price_text
 from secretaria.services.booking_hold import BookingGate
 from secretaria.services.booking_scope import (
@@ -478,7 +479,7 @@ _WEEKDAY_PT = {
 _WEEKDAY_ORDER = list(_WEEKDAY_PT.keys())
 # Short weekday prefix for a day-picker row title ("Seg, 18/08"). WhatsApp caps
 # list-row titles at 24 chars, so the full "Segunda-feira" never fits.
-_WEEKDAY_SHORT_PT = ("Seg", "Ter", "Qua", "Qui", "Sex", "Sáb", "Dom")
+_WEEKDAY_SHORT_PT = WEEKDAY_SHORT
 
 # --------------------------------------------------------------------------
 # Reusable day/time branch (shared by first booking, patient reschedule, and
@@ -4598,7 +4599,7 @@ async def _enter_slot_picker(
                     if held_labels
                     else ""
                 )
-                + f"{branch.slot_body_prefix} {target.strftime('%d/%m')}:",
+                + f"{branch.slot_body_prefix} {short_day_phrase(target)}:",
                 rows=rows[:MAX_LIST_ROWS],
                 button_label="Ver horários",
                 section_title="Horários livres",
@@ -6324,7 +6325,7 @@ def _appointment_local_start(appt: dict, tenant: Tenant | None) -> datetime | No
 def _appt_row_label(appt: dict, tenant: Tenant | None = None) -> str:
     """Compact list-row title for one appointment (WhatsApp caps titles at 24)."""
     start = _appointment_local_start(appt, tenant)
-    when = start.strftime("%d/%m %H:%M") if start is not None else "?"
+    when = f"{short_day_label(start)} {start.strftime('%H:%M')}" if start is not None else "?"
     appt_type = str(appt.get("appointment_type") or "Consulta")
     return truncate_list_row_title(f"{when} {appt_type}")
 

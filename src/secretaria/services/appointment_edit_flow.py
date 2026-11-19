@@ -51,6 +51,7 @@ from secretaria.services.attendee import (
     authorization_body,
     parse_attendee_name,
 )
+from secretaria.services.booking_dates import short_day_label
 from secretaria.services.booking_details import clinic_address_line
 from secretaria.services.calendar import (
     CalendarSlotTakenError,
@@ -1253,7 +1254,7 @@ async def _doctor_list(
     WhatsApp pages (`page`) like the booking's doctor list (TASK-082 S4).
     """
     plan = fr._selected_plan(tenant, draft.current["insurance"])
-    when = draft.start.strftime("%d/%m %H:%M")
+    when = f"{short_day_label(draft.start)} {draft.start.strftime('%H:%M')}"
     roster = list(professionals or [])
     shown, more = fr.professional_page(roster, page, fixed_rows=0, event="edit_doctor_list_paged")
     to_check = list(shown) + [p for p in roster[:OPTION_PAGE_SIZE] if p not in shown]

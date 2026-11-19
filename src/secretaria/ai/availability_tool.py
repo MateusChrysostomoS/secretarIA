@@ -61,6 +61,7 @@ from secretaria.services.availability_windows import (
     resolve_range,
     scan_free_windows,
 )
+from secretaria.services.booking_dates import short_day_phrase
 from secretaria.services.booking_hold import BookingGate
 from secretaria.services.booking_scope import (
     BOOKING_TOPOLOGY_MULTI,
@@ -290,7 +291,7 @@ async def _unit_minutes(tenant_id: UUID, target: _Target, units: list) -> dict[U
 
 
 def _fmt(day: date) -> str:
-    return day.strftime("%d/%m")
+    return short_day_phrase(day)
 
 
 def _note(span: DayRange, scan: WindowScan) -> str | None:
@@ -434,7 +435,8 @@ async def get_availability(
     `clamped`, a lista NÃO cobre tudo o que foi pedido: diga isso ao paciente e peça um dia
     ou período menor. `note` resume em uma frase o que a lista cobre: respeite-a. Sem
     janelas, diga que não há horário livre nesse período - NUNCA invente um horário nem
-    prometa um que não esteja na lista.
+    prometa um que não esteja na lista. Cada janela traz `weekday` (seg, ter...): ao listar
+    datas ao paciente, escreva como "seg, 24/11".
 
     Args:
         professional: Nome do profissional (ou vazio). Em clínica com vários profissionais,
