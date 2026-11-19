@@ -44,8 +44,10 @@ from secretaria.ai.tools import (
     _insurance_refusal,
     _localize_window,
     _match_by_name,
+    _own_unit_minutes,
     _persist_appointment,
     _service_unit_refusal,
+    _sized_end,
     _sole_professional_id,
     _tenant_id_ctx,
 )
@@ -244,6 +246,12 @@ async def create_event_at_unit(
     refused = await _service_unit_refusal("create_event_at_unit", unit, owner, None, canonical_type)
     if refused is not None:
         return refused
+    # TASK-085 D7 (T8 I1): the unit's own duration sizes the event, not the model's end.
+    own_minutes, refused = await _own_unit_minutes(
+        "create_event_at_unit", owner, unit, canonical_type
+    )
+    if refused is not None:
+        return refused
     # TASK-086 A14 (review): the convênio matrix at this unit, before any calendar call.
     refused = await _insurance_refusal(
         "create_event_at_unit",
@@ -257,6 +265,7 @@ async def create_event_at_unit(
 
     cal = scoped_calendar(_get_calendar(), unit)
     fallback_start, fallback_end = _localize_window(start, end, cal)
+    fallback_end = _sized_end(fallback_start, fallback_end, own_minutes)
     outside = outside_unit_hours(unit, fallback_start, fallback_end, cal.tzinfo)
     if outside is not None:
         return outside

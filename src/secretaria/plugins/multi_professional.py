@@ -60,8 +60,11 @@ from secretaria.ai.tools import (
     _insurance_refusal,
     _localize_window,
     _match_by_name,
+    _own_unit_minutes,
     _persist_appointment,
     _service_unit_refusal,
+    _sized_end,
+    _slot_service,
     _tenant_config_ctx,
     _tenant_id_ctx,
     handback_message,
@@ -227,7 +230,11 @@ async def select_professional_and_continue(professional_name: str, message: str 
 
 @tool
 async def list_free_slots_for_professional(
-    professional_name: str, day: str, max_slots: int = 6, unit_name: str = ""
+    professional_name: str,
+    day: str,
+    max_slots: int = 6,
+    unit_name: str = "",
+    appointment_type: str = "",
 ) -> dict:
     """Lista até `max_slots` horários livres de UM profissional específico,
     dentro do horário comercial da clínica, para o dia especificado. Use
@@ -239,6 +246,8 @@ async def list_free_slots_for_professional(
         max_slots: Quantidade máxima de slots a retornar (default 6, máx 10).
         unit_name: Unidade/local, quando o profissional atende em mais de uma (os horários
             são os daquela unidade). Deixe em branco se ele atende em uma só ou em nenhuma.
+        appointment_type: Nome EXATO do serviço DESTE profissional (opcional): os horários
+            vêm do tamanho desse serviço. Se ele tiver só um serviço, pode deixar em branco.
     """
     blocked = _blocked_by_toolset_v2("list_free_slots_for_professional")
     if blocked is not None:
@@ -258,11 +267,25 @@ async def list_free_slots_for_professional(
     unit, unit_error = await resolve_tool_unit(tenant_id, professional, unit_name)
     if unit_error is not None:
         return unit_error
+    minutes: int | None = None
+    if unit is not None:
+        # TASK-085 D7 (T8 I1): at a unit with its own duration, the slots have that length.
+        catalog = await _professional_services(tenant_id, professional)
+        canonical, service_error = _slot_service(
+            appointment_type, "list_free_slots_for_professional", catalog
+        )
+        if service_error is not None:
+            return service_error
+        minutes, _ignored = await _own_unit_minutes(
+            "list_free_slots_for_professional", professional, unit, canonical
+        )
     cal = scoped_calendar(await _professional_calendar(tenant_id, professional), unit)
     target_day = date.fromisoformat(day)
     day_dt = datetime.combine(target_day, datetime.min.time())
     held = await held_busy_windows(professional.id)  # a code or a Pix pending is busy time
     extra = {"extra_busy": held} if held else {}
+    if minutes:
+        extra["slot_minutes"] = minutes
     slots = await cal.list_free_slots(
         day=day_dt, max_slots=min(max(max_slots, 1), 10), **extra
     )
@@ -345,9 +368,16 @@ async def create_event_for_professional(
     )
     if refused is not None:
         return refused
+    # TASK-085 D7 (T8 I1): the unit's own duration sizes the event, not the model's end.
+    own_minutes, refused = await _own_unit_minutes(
+        "create_event_for_professional", professional, unit, canonical_type
+    )
+    if refused is not None:
+        return refused
 
     cal = scoped_calendar(await _professional_calendar(tenant_id, professional), unit)
     fallback_start, fallback_end = _localize_window(start, end, cal)
+    fallback_end = _sized_end(fallback_start, fallback_end, own_minutes)
     outside = outside_unit_hours(unit, fallback_start, fallback_end, cal.tzinfo)
     if outside is not None:
         return outside

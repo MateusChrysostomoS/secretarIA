@@ -119,6 +119,9 @@ ALLOWLIST: dict[tuple[str, str], str] = {
     ("ai/tools.py", "get_service_info"): (
         "RuntimeAppointmentType (resolved) first, then overridden by the chosen unit's terms"
     ),
+    ("ai/tools.py", "_own_unit_minutes"): (
+        "T8 I1: ResolvedTerms of resolve_entry_at_unit (own duration only) for the v1 tools"
+    ),
     ("services/flow_router.py", "_service_duration_at"): (
         "flow_units.terms_at; falls back to _service_duration (base) when no own value"
     ),
