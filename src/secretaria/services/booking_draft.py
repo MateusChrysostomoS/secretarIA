@@ -895,8 +895,15 @@ async def _land_day(
     details = _booking_details(
         checked, state, conversation=conversation, tenant=tenant, owner=owner, unit=unit
     )
-    cal = flow_units.scoped_calendar(
-        await calendar(checked.professional if checked.multi else None), unit
+    # TASK-087: the unit's agenda without the service's blocked weekdays there (the day picker
+    # and the slot list below, and the express card, all read it).
+    cal = fr._booking_calendar(
+        await calendar(checked.professional if checked.multi else None),
+        state,
+        tenant,
+        services,
+        owner,
+        unit,
     )
 
     def land(result: FlowRouterResult, *names: str) -> DraftResolution:
@@ -921,6 +928,14 @@ async def _land_day(
     if not today <= draft.day < today + dt.timedelta(days=fr.DAY_PICKER_WINDOW_DAYS):
         dropped_day(DROP_OUT_OF_WINDOW)
         return await day_picker(DRAFT_DAY_OUT_OF_WINDOW_PREFIX)
+    day_check = fr._service_day_check(
+        owner, fr._booking_service_entry(state, tenant, services, owner), unit
+    )
+    refusal = day_check(draft.day) if day_check is not None else None
+    if refusal:
+        # TASK-087: the service is not done that weekday - its plain reason, not "no free time".
+        dropped_day(DROP_DAY_UNAVAILABLE)
+        return await day_picker(refusal)
 
     # TASK-085: the unit settled above - the same length the day picker and "Confirmar" use.
     duration = fr._booking_duration(state, tenant, services, professionals, unit=unit)

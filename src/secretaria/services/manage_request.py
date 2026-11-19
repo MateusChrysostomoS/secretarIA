@@ -479,10 +479,19 @@ async def _land_new_day(
         return done(
             fr._calendar_unavailable(state, fr.MANAGE_DAY_BRANCH, fr.STEP_MANAGE_DAY), *base
         )
+    # TASK-087: the appointment's agenda (the caller's) without its service's blocked weekdays,
+    # as the buttons' reschedule offers it (`flow_router._appointment_unit_calendar`).
+    calendar = fr._appointment_service_days(calendar, target, professionals, tenant)
     today = now.astimezone(calendar.tzinfo).date()
     if not today <= request.day < today + dt.timedelta(days=fr.DAY_PICKER_WINDOW_DAYS):
         dropped_day(DROP_OUT_OF_WINDOW)
         return await day_picker(DRAFT_DAY_OUT_OF_WINDOW_PREFIX)
+    day_check = fr._appointment_day_check(target, professionals, tenant)
+    refusal = day_check(request.day) if day_check is not None else None
+    if refusal:
+        # The service is not done that weekday: its plain reason, not "no free time".
+        dropped_day(DROP_DAY_UNAVAILABLE)
+        return await day_picker(refusal)
     holds = await fr._hold_windows(fr._hold_owner(state, professionals))
     try:
         free = await free_slots_for_day(

@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import hashlib
 import re
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
@@ -131,8 +131,10 @@ from secretaria.services.tenant_config import (
     professional_business_hours,
 )
 from secretaria.services.unit_booking import (
+    blocked_on,
     confirmation_unit_lines,
     event_unit_fields,
+    service_day_refusal,
     unit_fields,
 )
 
@@ -3885,9 +3887,12 @@ async def _catalog_step(
     unit_choice = flow_units.unit_choice(
         booking_owner, service_id, **_plan_kwargs(tenant, _selected_insurance(conversation))
     )
-    calendar = _unit_calendar(
-        calendar, flow_units.effective_unit(conversation, booking_owner, service_id)
-    )
+    booking_unit = flow_units.effective_unit(conversation, booking_owner, service_id)
+    # TASK-087: every list below is also without the service's blocked days at that unit, and a
+    # blocked day typed on the day step is refused in plain words (`day_check`).
+    service_entry = _booking_service_entry(conversation, tenant, services, booking_owner)
+    calendar = _service_scoped(calendar, booking_owner, service_entry, booking_unit)
+    day_check = _service_day_check(booking_owner, service_entry, booking_unit)
     back_target = _back_target_for(unit_choice)
 
     if step == flow_units.STEP_AWAITING_UNIT:
@@ -4070,6 +4075,7 @@ async def _catalog_step(
             services=services,
             back_target=back_target,
             professionals=professionals,
+            refuse_day=day_check,
         )
 
     if step == STEP_AWAITING_SLOT:
@@ -4090,7 +4096,7 @@ async def _catalog_step(
             conversation,
             body,
             professional=_recap_professional(conversation, tenant, professionals),
-            unit=flow_units.effective_unit(conversation, booking_owner, service_id),
+            unit=booking_unit,
         )
 
     if step == STEP_AWAITING_CONFIRMATION:
@@ -4679,6 +4685,7 @@ async def _handle_day_step(
     services: list[dict],
     back_target: str | None,
     professionals: list | None,
+    refuse_day: DayRefusal | None = None,
 ) -> FlowRouterResult:
     """One inbound turn on a day step (plain, retry, or escape render).
 
@@ -4686,6 +4693,10 @@ async def _handle_day_step(
     escape row then reaches the model). Talk that is not a date attempt at all
     ("vocês têm estacionamento?") gets ONE model turn on the same step instead
     (owner, 2026-10-07, TASK-038): the picker stays tappable.
+
+    `refuse_day` (TASK-087): a day the service is not done on (typed, or tapped from a stale
+    list) gets its plain refusal line over the day picker - which already leaves it out -
+    instead of an empty slot list.
     """
     step = conversation.flow_step or branch.day_step
     if _is_day_back(body, back_target):
@@ -4728,6 +4739,23 @@ async def _handle_day_step(
     if target is None:
         # Free text is still honoured as a shortcut ("amanhã", "12/06").
         target = _parse_day(body, datetime.now(calendar.tzinfo))
+    refusal = refuse_day(target) if target is not None and refuse_day is not None else None
+    if refusal:
+        logger.info(
+            "flow_day_blocked_for_service",
+            conversation_id=str(getattr(conversation, "id", None)),
+            step=step,
+        )
+        return await enter_day_picker(
+            conversation,
+            tenant,
+            calendar,
+            duration_minutes=duration_minutes,
+            branch=branch,
+            back_target=back_target,
+            prefix=refusal,
+            professionals=professionals,
+        )
     if target is not None:
         return await _enter_slot_picker(
             conversation,
@@ -4940,7 +4968,9 @@ async def _ask_day(
     result = await enter_day_picker(
         conversation,
         tenant,
-        _unit_calendar(calendar, unit),
+        # TASK-087: without the service's blocked days at this unit (none chosen yet: only the
+        # days blocked at every unit of the service, R1).
+        _service_scoped(calendar, professional, entry, unit),
         duration_minutes=_booking_duration(
             conversation, tenant, services, professionals, unit=unit
         ),
@@ -4974,6 +5004,147 @@ def professional_has_no_hours(professional: Any, tenant: Tenant) -> bool:
 def _unit_calendar(calendar: CalendarService | None, unit: Any | None) -> Any:
     """The agenda as seen from `unit` (its hours, id and location); unchanged without one."""
     return flow_units.scoped_calendar(calendar, unit)
+
+
+# --------------------------------------------------------------------------
+# TASK-087: the service's blocked weekdays on every patient path (SPEC 5.2)
+# --------------------------------------------------------------------------
+
+# A day -> the patient's refusal line when the service is not done that weekday, else None.
+DayRefusal = Callable[[Any], str | None]
+
+
+def _service_days_calendar(calendar: Any, blocked: frozenset[str]) -> Any:
+    """`calendar` with EXACTLY `blocked` as the service's closed weekdays.
+
+    Replaces, never adds: the router re-scopes calendars it received already scoped (the
+    catalog step's agenda reaches the unit step, the confirmation, the resume), so a set left by
+    an earlier scope is cleared when this one has none. Nothing to set or clear, or an agenda
+    without the filter (test doubles): the same object.
+    """
+    if calendar is None:
+        return None
+    setter = getattr(calendar, "with_blocked_weekdays", None)
+    if not callable(setter):
+        return calendar
+    if not blocked and not getattr(calendar, "_blocked_weekdays", None):
+        return calendar
+    return setter(blocked)
+
+
+def _service_scoped(
+    calendar: Any, professional: Any | None, entry: dict | None, unit: Any | None
+) -> Any:
+    """The agenda a patient books `entry` on: `unit`'s hours (`scoped_calendar`) without the
+    service's blocked weekdays there (`flow_units.blocked_weekdays_of`: no unit yet = only the
+    days blocked at every unit of the service, R1; no service known = nothing, R5)."""
+    unit_id = getattr(unit, "id", None) if unit is not None else None
+    return _service_days_calendar(
+        flow_units.scoped_calendar(calendar, unit),
+        flow_units.blocked_weekdays_of(professional, entry, unit_id),
+    )
+
+
+def _booking_calendar(
+    calendar: Any,
+    conversation: Any,
+    tenant: Tenant,
+    services: list[dict] | None,
+    professional: Any | None,
+    unit: Any | None,
+) -> Any:
+    """`_unit_calendar` for the booking in progress, also without its service's blocked days."""
+    entry = _booking_service_entry(conversation, tenant, services, professional)
+    return _service_scoped(calendar, professional, entry, unit)
+
+
+def _service_day_check(
+    professional: Any | None, entry: dict | None, unit: Any | None
+) -> DayRefusal | None:
+    """None when the service blocks no weekday here; else day -> the refusal line or None.
+
+    The line is `unit_booking.service_day_refusal` ("Cirurgia com Dra. Ana não é feito às
+    segundas. Posso ver outro dia?") over the days blocked at `unit` (or, with none, at every
+    unit of the service). The day is read as given: callers pass the clinic's local date/time.
+    """
+    if entry is None:
+        return None
+    unit_id = getattr(unit, "id", None) if unit is not None else None
+    blocked = flow_units.blocked_weekdays_of(professional, entry, unit_id)
+    if not blocked:
+        return None
+    refusal = service_day_refusal(
+        str(entry.get("name") or ""), getattr(professional, "name", None), blocked
+    )
+
+    def check(day: Any) -> str | None:
+        return refusal if blocked_on(day, blocked) else None
+
+    return check
+
+
+def _appointment_owner_and_unit_id(
+    appt: dict, professionals: list | None
+) -> tuple[Any | None, UUID | None] | None:
+    """An existing appointment's doctor (snapshot row) and stored unit id; None if unreadable."""
+    owner_id = appt.get("professional_id")
+    try:
+        unit_id = UUID(str(appt["unit_id"])) if appt.get("unit_id") else None
+        if owner_id:
+            owner = _find_professional_by_id(professionals, UUID(str(owner_id)))
+        else:
+            rows = professionals or []
+            owner = rows[0] if len(rows) == 1 else None
+    except (TypeError, ValueError):
+        return None
+    return owner, unit_id
+
+
+def _appointment_service(
+    appt: dict | None, professionals: list | None, tenant: Tenant | None
+) -> tuple[Any | None, dict | None, Any | None]:
+    """(owner, service entry, unit) a reschedule of `appt` is checked against (TASK-087).
+
+    The entry is the owner's own one for the appointment's service (`_match_service` over the
+    owner's list); the unit is the one `flow_units.appointment_calendar` offers the new day at
+    (the appointment's, or the owner's only bookable one; several and none recorded: None, so
+    R1's "blocked at every unit"). No owner, no tenant or no match: no entry, no filter.
+    """
+    if not appt or tenant is None:
+        return None, None, None
+    parsed = _appointment_owner_and_unit_id(appt, professionals)
+    if parsed is None:
+        return None, None, None
+    owner, unit_id = parsed
+    if owner is None:
+        return None, None, None
+    entry = _match_service(
+        professional_appointment_types(owner, tenant), appt.get("appointment_type")
+    )
+    units = flow_units.bookable_units(owner)
+    unit = flow_units.find_unit(owner, unit_id) if units else None
+    if unit is None and len(units) == 1:
+        unit = units[0]
+    return owner, entry, unit
+
+
+def _appointment_service_days(
+    calendar: Any, appt: dict | None, professionals: list | None, tenant: Tenant | None
+) -> Any:
+    """`calendar` (already the appointment's agenda) without its service's blocked days."""
+    owner, entry, unit = _appointment_service(appt, professionals, tenant)
+    unit_id = getattr(unit, "id", None) if unit is not None else None
+    return _service_days_calendar(
+        calendar, flow_units.blocked_weekdays_of(owner, entry, unit_id)
+    )
+
+
+def _appointment_day_check(
+    appt: dict | None, professionals: list | None, tenant: Tenant | None
+) -> DayRefusal | None:
+    """`_service_day_check` for a reschedule of `appt`."""
+    owner, entry, unit = _appointment_service(appt, professionals, tenant)
+    return _service_day_check(owner, entry, unit)
 
 
 def _booking_service_entry(
@@ -5514,7 +5685,8 @@ async def _handle_unit_step(
     result = await enter_day_picker(
         state,
         tenant,
-        _unit_calendar(calendar, unit),
+        # TASK-087: the chosen unit's hours, minus the service's blocked days THERE.
+        _booking_calendar(calendar, conversation, tenant, services, owner, unit),
         # The pick is in `state`, not on the conversation yet: the unit is passed explicitly.
         duration_minutes=_booking_duration(
             conversation, tenant, services, professionals, unit=unit
@@ -5587,7 +5759,7 @@ async def _handle_unit_confirm_step(
     result = await enter_day_picker(
         state,
         tenant,
-        _unit_calendar(calendar, unit),
+        _service_scoped(calendar, owner, entry, unit),
         duration_minutes=_booking_duration(
             conversation, tenant, services, professionals, unit=unit
         ),
@@ -5802,12 +5974,10 @@ async def reoffer_taken_booking_slot(
     """
     # TASK-083: the promotion hands in the agenda it WROTE with (the unit's id, the agenda's
     # hours); the day picker that follows lists the chosen unit's own hours.
-    calendar = _unit_calendar(
-        calendar,
-        _booking_unit(
-            conversation, tenant, None, _booking_professional(conversation, professionals)
-        ),
-    )
+    # TASK-087: and without the service's blocked days at that unit.
+    owner = _booking_professional(conversation, professionals)
+    unit = _booking_unit(conversation, tenant, None, owner)
+    calendar = _booking_calendar(calendar, conversation, tenant, None, owner, unit)
     result = await _reoffer_taken_slot(
         conversation,
         tenant,
@@ -6012,8 +6182,31 @@ async def _handle_confirmation(
     )
     if refusal is not None:
         return refusal
-    calendar = _unit_calendar(calendar, unit)
+    calendar = _service_scoped(calendar, booking_owner, service, unit)
     unit_kwargs: dict = {"unit_id": unit.id} if unit is not None else {}
+    # TASK-087 (SPEC 5.2, R1): the service is not done that weekday at this unit - a time the AI
+    # proposed, a stale list or a unit picked after the day. Refused before the notice floor,
+    # the slot re-read and the gate (so before any event, hold or Pix): the reason, then the day
+    # picker, which already leaves the day out.
+    day_check = _service_day_check(booking_owner, service, unit)
+    refusal = day_check(start.astimezone(calendar.tzinfo)) if day_check is not None else None
+    if refusal:
+        logger.info(
+            "flow_booking_day_blocked_for_service",
+            conversation_id=str(getattr(conversation, "id", None)),
+            professional_id=str(getattr(booking_owner, "id", None)),
+            unit_id=str(unit.id) if unit is not None else None,
+        )
+        return await enter_day_picker(
+            conversation,
+            tenant,
+            calendar,
+            duration_minutes=duration,
+            branch=BOOKING_DAY_BRANCH,
+            back_target=BACK_TARGET_SERVICE,
+            prefix=refusal,
+            professionals=professionals,
+        )
     floor = booking_notice_floor(booking_owner, _notice_now(calendar.tzinfo))
     if floor is not None and start < floor:
         logger.info(
@@ -6562,7 +6755,7 @@ async def _begin_reschedule(
     return await enter_day_picker(
         _DayPickerState(flow_managing_appointment_id=managing_id),
         tenant,
-        _appointment_unit_calendar(calendar, appt, professionals),
+        _appointment_unit_calendar(calendar, appt, professionals, tenant),
         duration_minutes=(
             _appt_duration_minutes(appt, tenant)
             if appt is not None
@@ -6600,26 +6793,29 @@ def _begin_cancel(
 
 
 def _appointment_unit_calendar(
-    calendar: CalendarService | None, appt: dict | None, professionals: list | None
+    calendar: CalendarService | None,
+    appt: dict | None,
+    professionals: list | None,
+    tenant: Tenant | None = None,
 ) -> Any:
     """A reschedule keeps the appointment's unit (TASK-083 spec §8): its new day and time are
     offered within THAT unit's hours. An appointment without a unit (or whose unit the owner no
     longer attends at) of a doctor who has units is offered within the units' hours - the only
     one's, or their union (final wave I2, `flow_units.appointment_calendar`). Unchanged for a
-    doctor without units."""
+    doctor without units.
+
+    TASK-087: with `tenant`, also without the appointment's service's blocked weekdays there
+    (`_appointment_service_days`)."""
     if not appt:
         return calendar
-    owner_id = appt.get("professional_id")
-    try:
-        unit_id = UUID(str(appt["unit_id"])) if appt.get("unit_id") else None
-        if owner_id:
-            owner = _find_professional_by_id(professionals, UUID(str(owner_id)))
-        else:
-            rows = professionals or []
-            owner = rows[0] if len(rows) == 1 else None
-    except (TypeError, ValueError):
+    parsed = _appointment_owner_and_unit_id(appt, professionals)
+    if parsed is None:
         return calendar
-    return flow_units.appointment_calendar(calendar, unit_id, owner)
+    owner, unit_id = parsed
+    scoped = flow_units.appointment_calendar(calendar, unit_id, owner)
+    if tenant is None:
+        return scoped
+    return _appointment_service_days(scoped, appt, professionals, tenant)
 
 
 async def _manage_step(
@@ -6633,12 +6829,12 @@ async def _manage_step(
     patient_name: str | None = None,
 ) -> FlowRouterResult:
     step = conversation.flow_step
+    day_check: DayRefusal | None = None
     if step in (*_MANAGE_DAY_STEPS, STEP_MANAGE_SLOT, STEP_MANAGE_CONFIRM):
-        calendar = _appointment_unit_calendar(
-            calendar,
-            _find_appt_by_id(appointments, _managing_appt_id_str(conversation)),
-            professionals,
-        )
+        managed = _find_appt_by_id(appointments, _managing_appt_id_str(conversation))
+        calendar = _appointment_unit_calendar(calendar, managed, professionals, tenant)
+        # TASK-087: a blocked day typed on the reschedule day step gets its reason.
+        day_check = _appointment_day_check(managed, professionals, tenant)
 
     if step == STEP_MANAGE_PICK:
         appt = _find_appt_by_iso(appointments, body)
@@ -6697,6 +6893,7 @@ async def _manage_step(
             services=[],
             back_target=None,
             professionals=professionals,
+            refuse_day=day_check,
         )
 
     if step == STEP_MANAGE_SLOT:
@@ -6863,6 +7060,26 @@ async def _manage_reschedule(
         start = start.replace(tzinfo=calendar.tzinfo)
     duration = _appt_duration_minutes(appt, tenant)
     end = start + timedelta(minutes=duration)
+
+    # TASK-087: the consultation's service is not done that weekday (at its unit) - a card the AI
+    # drew or a stale list. Refused before anything moves or is created (also the "Outro horário"
+    # rebook below): the reason, then the reschedule day picker without that day.
+    day_check = _appointment_day_check(appt, professionals, tenant)
+    refusal = day_check(start.astimezone(calendar.tzinfo)) if day_check is not None else None
+    if refusal:
+        logger.info(
+            "flow_reschedule_day_blocked_for_service",
+            conversation_id=str(getattr(conversation, "id", None)),
+        )
+        return await enter_day_picker(
+            conversation,
+            tenant,
+            calendar,
+            duration_minutes=duration,
+            branch=MANAGE_DAY_BRANCH,
+            prefix=refusal,
+            professionals=professionals,
+        )
 
     rebook = _rebook_ids(appt)
     if rebook is not None:
@@ -7379,8 +7596,14 @@ async def _resume_bubbles(
     )
     # TASK-083: the chosen unit's agenda; the unit list again when it was being asked.
     booking_owner = _booking_professional(conversation, professionals)
-    calendar = _unit_calendar(
-        calendar, _booking_unit(conversation, tenant, services, booking_owner)
+    # TASK-087: and without the service's blocked days at that unit.
+    calendar = _booking_calendar(
+        calendar,
+        conversation,
+        tenant,
+        services,
+        booking_owner,
+        _booking_unit(conversation, tenant, services, booking_owner),
     )
     if step in (flow_units.STEP_AWAITING_UNIT, flow_units.STEP_AWAITING_UNIT_CONFIRM):
         # The unit list, or the Sim/Não on the only unit, again - whichever fits now.
@@ -7563,6 +7786,27 @@ def _rebooking_duration(tenant: Tenant, service_name: str | None) -> int:
     return tenant.appointment_duration_min
 
 
+def _rebooking_calendar(
+    calendar: CalendarService | None,
+    tenant: Tenant,
+    professionals: list | None,
+    professional_id: UUID | None,
+    service_name: str | None,
+) -> Any:
+    """The rebooking doctor's agenda without the service's blocked days (TASK-087, R1).
+
+    No unit is chosen yet on this offer, so a day stays while ANY unit where that doctor does the
+    service allows it (`flow_units.blocked_weekdays_of(..., None)`); the unit step and the
+    confirmation narrow it later. The service is the doctor's own entry for `service_name`;
+    unknown doctor or service: unchanged (R5).
+    """
+    owner = _find_professional_by_id(professionals, professional_id)
+    if owner is None:
+        return calendar
+    entry = _match_service(professional_appointment_types(owner, tenant), service_name)
+    return _service_days_calendar(calendar, flow_units.blocked_weekdays_of(owner, entry, None))
+
+
 def rebooking_candidates(
     tenant: Tenant,
     professionals: list,
@@ -7630,7 +7874,9 @@ async def enter_rebooking(
         result = await enter_day_picker(
             conversation,
             tenant,
-            calendar,
+            _rebooking_calendar(
+                calendar, tenant, professionals, cancelled_professional_id, service_name
+            ),
             duration_minutes=duration,
             branch=BOOKING_DAY_BRANCH,
             professionals=professionals,
@@ -7657,7 +7903,7 @@ async def enter_rebooking(
         result = await enter_day_picker(
             conversation,
             tenant,
-            calendar,
+            _rebooking_calendar(calendar, tenant, pool, pool[0].id, service_name),
             duration_minutes=duration,
             branch=BOOKING_DAY_BRANCH,
             professionals=professionals,
