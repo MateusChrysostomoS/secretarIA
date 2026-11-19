@@ -5063,9 +5063,10 @@ def _service_day_check(
 ) -> DayRefusal | None:
     """None when the service blocks no weekday here; else day -> the refusal line or None.
 
-    The line is `unit_booking.service_day_refusal` ("Cirurgia com Dra. Ana não é feito às
-    segundas. Posso ver outro dia?") over the days blocked at `unit` (or, with none, at every
-    unit of the service). The day is read as given: callers pass the clinic's local date/time.
+    The line is `unit_booking.service_day_refusal` ("Cirurgia com Dra. Ana não está disponível
+    às segundas. Posso ver outro dia?") over the days blocked at `unit` (or, with none, at the
+    units of the service - `flow_units.blocked_weekdays_of`). The day is read as given: callers
+    pass the clinic's local date/time.
     """
     if entry is None:
         return None

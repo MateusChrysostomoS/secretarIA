@@ -24,9 +24,8 @@ from secretaria.models import FlowState
 from secretaria.services import flow_router as fr, flow_units
 from secretaria.services.attendee import ATTENDEE_SELF
 from secretaria.services.service_catalog import entry_service_id
-from secretaria.services.service_terms import WEEKDAY_KEYS
 from secretaria.services.tenant_config import ClinicFeatures, PatientIdentityStatus
-from secretaria.services.unit_booking import weekday_plural_pt
+from secretaria.services.unit_booking import weekday_list_pt
 
 _BOOKING = "do agendamento"
 _MANAGE = "da consulta já marcada"
@@ -146,14 +145,11 @@ def _with_blocked_days(name: str, blocked: frozenset[str]) -> str:
     """ "Cirurgia (não às segundas e sextas)" - the days the service is NOT done on (TASK-087).
 
     The bare name when nothing is blocked, so a clinic that does not use the feature reads
-    exactly what it read before. "aos" when the first day is Saturday/Sunday.
+    exactly what it read before. The days read like the patient's refusal sentence
+    (`unit_booking.weekday_list_pt`: "às sextas e aos sábados").
     """
-    days = weekday_plural_pt(blocked)
-    if not days:
-        return name
-    first = next(day for day in WEEKDAY_KEYS if day in blocked)
-    preposition = "aos" if first in ("saturday", "sunday") else "às"
-    return f"{name} (não {preposition} {days})"
+    days = weekday_list_pt(blocked)
+    return f"{name} (não {days})" if days else name
 
 
 def _professional_service_names(professional, tenant) -> str:

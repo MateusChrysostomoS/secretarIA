@@ -157,40 +157,56 @@ def test_weekday_plural_pt():
     assert unit_booking.weekday_plural_pt({"funday"}) == ""
 
 
+def test_weekday_list_pt_gives_each_gender_its_article():
+    # TASK-087 review P6: "às" for the feminine weekdays, "aos" for Saturday/Sunday; a mixed list
+    # gives every day its own article ("às sextas e aos sábados", never "às sextas e sábados").
+    assert unit_booking.weekday_list_pt({"monday"}) == "às segundas"
+    assert unit_booking.weekday_list_pt({"friday", "monday"}) == "às segundas e sextas"
+    assert unit_booking.weekday_list_pt({"sunday", "saturday"}) == "aos sábados e domingos"
+    assert unit_booking.weekday_list_pt({"saturday", "friday"}) == "às sextas e aos sábados"
+    assert (
+        unit_booking.weekday_list_pt({"saturday", "friday", "monday"})
+        == "às segundas, às sextas e aos sábados"
+    )
+    assert unit_booking.weekday_list_pt({"funday"}) == ""
+    assert unit_booking.weekday_list_pt(None) == ""
+
+
 def test_refusal_text():
+    # Review P6: "não está disponível" agrees with any service name ("Consulta", "Retorno").
     assert (
         unit_booking.service_day_refusal("Cirurgia", "Dra. Ana", {"monday", "friday"})
-        == "Cirurgia com Dra. Ana não é feito às segundas e sextas. Posso ver outro dia?"
+        == "Cirurgia com Dra. Ana não está disponível às segundas e sextas. Posso ver outro dia?"
     )
     assert (
         unit_booking.service_day_refusal("Cirurgia", "Dra. Ana", {"saturday"})
-        == "Cirurgia com Dra. Ana não é feito aos sábados. Posso ver outro dia?"
+        == "Cirurgia com Dra. Ana não está disponível aos sábados. Posso ver outro dia?"
     )
     assert (
         unit_booking.service_day_refusal("Cirurgia", None, {"monday"})
-        == "Cirurgia não é feito às segundas. Posso ver outro dia?"
+        == "Cirurgia não está disponível às segundas. Posso ver outro dia?"
     )
     assert (
         unit_booking.service_day_refusal(" Cirurgia ", "  ", {"monday"})
-        == "Cirurgia não é feito às segundas. Posso ver outro dia?"
+        == "Cirurgia não está disponível às segundas. Posso ver outro dia?"
     )
 
 
-def test_refusal_mixed_list_uses_first_day_preposition():
+def test_refusal_mixed_list_gives_each_day_its_article():
     assert (
         unit_booking.service_day_refusal("Exame", "Dr. Leo", {"sunday", "saturday"})
-        == "Exame com Dr. Leo não é feito aos sábados e domingos. Posso ver outro dia?"
+        == "Exame com Dr. Leo não está disponível aos sábados e domingos. Posso ver outro dia?"
     )
     assert (
         unit_booking.service_day_refusal("Exame", "Dr. Leo", {"sunday", "friday"})
-        == "Exame com Dr. Leo não é feito às sextas e domingos. Posso ver outro dia?"
+        == "Exame com Dr. Leo não está disponível às sextas e aos domingos. Posso ver outro dia?"
     )
 
 
 def test_refusal_without_known_days_still_reads_well():
     assert (
         unit_booking.service_day_refusal("Exame", "Dr. Leo", ())
-        == "Exame com Dr. Leo não é feito nesse dia. Posso ver outro dia?"
+        == "Exame com Dr. Leo não está disponível nesse dia. Posso ver outro dia?"
     )
 
 

@@ -65,7 +65,7 @@ HOURS = {"Sede": SEDE_HOURS, "Centro": CENTRO_HOURS}
 FRIDAY = {"start": "2026-07-10T09:00:00", "end": "2026-07-10T09:30:00", "summary": "Consulta"}
 MONDAY = {"start": "2026-07-13T09:00:00", "end": "2026-07-13T09:30:00", "summary": "Consulta"}
 TUESDAY = {"start": "2026-07-14T09:00:00", "end": "2026-07-14T09:30:00", "summary": "Consulta"}
-MONDAY_REFUSAL = "Cirurgia com Dra. Ana não é feito às segundas"
+MONDAY_REFUSAL = "Cirurgia com Dra. Ana não está disponível às segundas"
 
 
 @pytest.fixture(autouse=True)
@@ -401,7 +401,7 @@ async def test_create_event_at_unit_uses_the_units_own_days(db):  # noqa: F811
         booked = await mu.create_event_at_unit.ainvoke(
             {"unit_name": "Centro", "appointment_type": "Cirurgia", **centro_window}
         )
-    assert "Cirurgia com Dra. Ana não é feito às sextas" in refused["error"]
+    assert "Cirurgia com Dra. Ana não está disponível às sextas" in refused["error"]
     assert "id" in booked
     assert len(agenda.log["created"]) == 1
 
@@ -430,7 +430,7 @@ async def test_service_day_refusal_for_is_none_when_allowed_or_no_service(db):  
         unknown = await service_day_refusal_for(
             session, world.tenant.id, world.ana, None, None, monday
         )
-    assert blocked == "Cirurgia com Dra. Ana não é feito às segundas. Posso ver outro dia?"
+    assert blocked == "Cirurgia com Dra. Ana não está disponível às segundas. Posso ver outro dia?"
     assert free is None and unknown is None
 
 
@@ -517,6 +517,13 @@ def test_llm_context_weekend_days_use_aos():
     cirurgia = uuid4()
     ana = _doctor("Dra. Ana", [_entry("Cirurgia", cirurgia, ["saturday"])])
     assert "Cirurgia (não aos sábados)" in _state([ana])
+
+
+def test_llm_context_mixed_days_give_each_its_article():
+    # Review P6: the same list as the patient's sentence (`unit_booking.weekday_list_pt`).
+    cirurgia = uuid4()
+    ana = _doctor("Dra. Ana", [_entry("Cirurgia", cirurgia, ["saturday", "friday"])])
+    assert "Cirurgia (não às sextas e aos sábados)" in _state([ana])
 
 
 def test_llm_context_silent_without_block():

@@ -40,7 +40,7 @@ from tests.test_flow_router_units import TZ, _conversation, _Gate, _unit_tap  # 
 
 CIRURGIA_ID = uuid4()
 CONSULTA_ID = uuid4()
-REFUSAL_MONDAY = "Cirurgia com Dra. Ana não é feito às segundas. Posso ver outro dia?"
+REFUSAL_MONDAY = "Cirurgia com Dra. Ana não está disponível às segundas. Posso ver outro dia?"
 
 
 @pytest.fixture(autouse=True)
@@ -296,7 +296,7 @@ async def test_confirm_on_blocked_day_at_the_unit_refused(db):  # noqa: F811
     )
     assert gate.decided == []
     assert _slots_bubble(result).body.startswith(
-        "Cirurgia com Dra. Ana não é feito às sextas. Posso ver outro dia?"
+        "Cirurgia com Dra. Ana não está disponível às sextas. Posso ver outro dia?"
     )
 
 
