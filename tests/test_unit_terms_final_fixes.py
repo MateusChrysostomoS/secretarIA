@@ -307,13 +307,14 @@ async def test_v2_availability_keeps_the_one_units_label(db, monkeypatch):  # no
     result = await _availability(db, monkeypatch, {"Dra. Ana": ["Centro"]})
     out = allowlisted("get_availability", result)
     assert out["unit"] == "Centro"
-    assert all(set(w) == {"day", "start", "end"} for w in out["windows"])
+    # `weekday` rides on every window since TASK-087 T7 (dia da semana nas listas).
+    assert all(set(w) == {"day", "weekday", "start", "end"} for w in out["windows"])
 
 
 async def test_v2_availability_without_units_is_unchanged(db, monkeypatch):  # noqa: F811
     result = await _availability(db, monkeypatch, {"Dra. Ana": []})
     assert "unit" not in result
-    assert all(set(w) == {"day", "start", "end"} for w in result["windows"])
+    assert all(set(w) == {"day", "weekday", "start", "end"} for w in result["windows"])
     assert allowlisted("get_availability", result) == result
 
 

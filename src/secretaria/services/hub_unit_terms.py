@@ -37,7 +37,7 @@ from secretaria.services.service_catalog import (
     load_service_catalog,
     match_service,
 )
-from secretaria.services.service_terms import load_terms
+from secretaria.services.service_terms import WEEKDAY_KEYS, load_terms
 
 # Wire-only fields of a service entry: they never belong in the stored JSON.
 WIRE_ONLY_FIELDS: tuple[str, ...] = ("unit_terms", "apply_to_all")
@@ -46,8 +46,13 @@ UNIT_TERMS_WITHOUT_SERVICE = "unit_terms_without_service"
 UNKNOWN_UNIT_IDS = "unknown_unit_ids"
 UNIT_NOT_LINKED = "unit_not_linked"
 SERVICE_NOT_AT_UNIT = "service_not_at_unit"
+BLOCKED_WEEKDAYS_INVALID = "blocked_weekdays_invalid"
 
 _MESSAGES = {
+    BLOCKED_WEEKDAYS_INVALID: (
+        "Os dias escolhidos para este serviço não são válidos. "
+        "Escolha pelo menos um dia em que pacientes podem marcar este serviço e salve de novo."
+    ),
     UNIT_TERMS_WITHOUT_SERVICE: (
         "Só serviços do catálogo da clínica podem ter valor ou duração por unidade. "
         "Escolha o serviço da lista e salve de novo."
@@ -91,14 +96,47 @@ class UnitTermsInvalid(Exception):
         return body
 
 
+def check_blocked_weekdays(raw: object) -> None:
+    """Refuse a `blocked_weekdays` list the hub cannot store (TASK-087); `None` is always fine.
+
+    Only the keys of `business_hours` (`monday`..`sunday`), each at most once, and never all seven:
+    a service nobody can book is "turn off Oferecer", not a day list. Raises `UnitTermsInvalid`
+    with the stable code `blocked_weekdays_invalid`.
+    """
+    if raw is None:
+        return
+    keys = list(raw) if isinstance(raw, (list, tuple)) else None
+    if (
+        keys is None
+        or len(set(keys)) != len(keys)
+        or any(key not in WEEKDAY_KEYS for key in keys)
+        or len(keys) >= len(WEEKDAY_KEYS)
+    ):
+        raise UnitTermsInvalid(BLOCKED_WEEKDAYS_INVALID)
+
+
+def sorted_weekdays(raw: object) -> list[str]:
+    """The canonical stored shape: known keys only, Monday first. `None` -> `[]`."""
+    wanted = set(raw) if isinstance(raw, (list, tuple, set, frozenset)) else set()
+    return [day for day in WEEKDAY_KEYS if day in wanted]
+
+
 def strip_unit_fields(entries: Iterable) -> list:
-    """The entries as they are STORED: without `unit_terms` / `apply_to_all`."""
-    return [
-        {key: value for key, value in entry.items() if key not in WIRE_ONLY_FIELDS}
-        if isinstance(entry, dict)
-        else entry
-        for entry in entries
-    ]
+    """The entries as they are STORED: without `unit_terms` / `apply_to_all`.
+
+    The base `blocked_weekdays` (TASK-087), when the entry carries it, is saved as an ordered list
+    (`null` -> `[]`); an entry that does not carry it keeps not having it.
+    """
+    out: list = []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            out.append(entry)
+            continue
+        stored = {key: value for key, value in entry.items() if key not in WIRE_ONLY_FIELDS}
+        if "blocked_weekdays" in stored:
+            stored["blocked_weekdays"] = sorted_weekdays(stored["blocked_weekdays"])
+        out.append(stored)
+    return out
 
 
 def _entries(data: dict) -> list[dict] | None:
@@ -135,6 +173,11 @@ async def check_unit_terms(
     entries = _entries(data)
     if not entries:
         return
+
+    for entry in entries:
+        check_blocked_weekdays(entry.get("blocked_weekdays"))
+        for item in entry.get("unit_terms") or []:
+            check_blocked_weekdays(item.get("blocked_weekdays"))
 
     for entry in entries:
         if _wants_terms(entry) and entry_service_id(entry) is None:
@@ -205,10 +248,11 @@ async def apply_unit_terms(
 
     * a service that is no longer in the new list loses its exceptions (switching an entry OFF
       keeps them; so does an entry the catalog matches by name without a `service_id`);
-    * `apply_to_all` erases every exception of the service (deactivated units' included: "Todas"
-      is all);
-    * a `unit_terms` array replaces the set on the clinic's ACTIVE units (a deactivated unit's
+    * `apply_to_all` erases every unit's own price/duration of the service (deactivated units'
+      included: "Todas" is all) but keeps the units' own weekdays (TASK-087: it is per subject);
+    * a `unit_terms` array then replaces the set on the clinic's ACTIVE units (a deactivated unit's
       exception is preserved, like its link hours); absent / null leaves the service alone.
+      `apply_to_all` and `unit_terms` may travel together: the erase runs first.
     """
     entries = _entries(data)
     if entries is None:
@@ -245,12 +289,22 @@ async def apply_unit_terms(
     active_ids = {unit.id for unit in await pu.active_units(session, tenant_id)}
     for service_id, entry in plan.items():
         if entry.get("apply_to_all"):
-            await session.execute(
-                delete(ProfessionalServiceUnitTerms).where(
+            # "Todas as unidades" is PER SUBJECT (TASK-087): price/duration go back to the base on
+            # every unit (deactivated ones included); a unit's own weekdays are another subject
+            # and stay. A row left with nothing of its own is erased. Decided in Python: a JSON
+            # `null` and an SQL NULL both read back as None here.
+            rows = await session.scalars(
+                select(ProfessionalServiceUnitTerms).where(
                     *scope, ProfessionalServiceUnitTerms.service_id == service_id
                 )
             )
-            continue
+            for row in rows.all():
+                if row.blocked_weekdays is None:
+                    await session.delete(row)
+                else:
+                    row.price = None
+                    row.duration_min = None
+            await session.flush()
         terms = entry.get("unit_terms")
         if terms is None:
             continue
@@ -266,6 +320,11 @@ async def apply_unit_terms(
             unit_id = UUID(str(item["unit_id"]))
             if unit_id not in active_ids:
                 continue
+            fields: dict = {}
+            if item.get("blocked_weekdays") is not None:
+                # Only when set: an explicit None on a JSON column is stored as JSON `null`,
+                # which is not the SQL NULL the CHECK and "inherit the base" rely on.
+                fields["blocked_weekdays"] = sorted_weekdays(item["blocked_weekdays"])
             session.add(
                 ProfessionalServiceUnitTerms(
                     tenant_id=tenant_id,
@@ -274,9 +333,15 @@ async def apply_unit_terms(
                     unit_id=unit_id,
                     price=item.get("price"),
                     duration_min=item.get("duration_min"),
+                    **fields,
                 )
             )
     await session.flush()
+
+
+def _wire_days(days: frozenset[str] | None) -> list[str] | None:
+    """A unit's own weekdays on the wire: `None` = inherits the base, a list otherwise."""
+    return None if days is None else sorted_weekdays(days)
 
 
 async def entries_with_terms(
@@ -305,6 +370,7 @@ async def entries_with_terms(
                         "unit_id": str(unit_id),
                         "price": by_unit[unit_id].price,
                         "duration_min": by_unit[unit_id].duration_min,
+                        "blocked_weekdays": _wire_days(by_unit[unit_id].blocked_weekdays),
                     }
                     for unit_id in order
                     if unit_id in by_unit

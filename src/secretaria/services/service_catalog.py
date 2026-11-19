@@ -307,8 +307,12 @@ def offer_to_professional(
     *,
     duration_min: int,
     price: str | None,
+    blocked_weekdays: Sequence[str] | None = None,
 ) -> bool:
     """Add `service` to what `professional` offers, with their own duration and price.
+
+    `blocked_weekdays` (TASK-087): when given (already validated and ordered by the caller,
+    services/hub_unit_terms.py), the entry carries the weekdays patients cannot book it on.
 
     The write behind "create a service and offer it" (api/hub/services.py): a
     catalog row on its own is offered by nobody, so for a clinic with one doctor
@@ -337,19 +341,20 @@ def offer_to_professional(
     for entry in entries:
         if entry_service_id(entry) == service.id or normalize(entry.get("name")) == key:
             return False
-    entries.append(
-        {
-            "name": service.name,
-            SERVICE_ID_KEY: str(service.id),
-            "description": None,
-            "duration_min": duration_min,
-            "is_active": True,
-            "sort_order": len(entries),
-            "price": price,
-            "long_description": None,
-            "requirements": [],
-        }
-    )
+    new_entry: dict = {
+        "name": service.name,
+        SERVICE_ID_KEY: str(service.id),
+        "description": None,
+        "duration_min": duration_min,
+        "is_active": True,
+        "sort_order": len(entries),
+        "price": price,
+        "long_description": None,
+        "requirements": [],
+    }
+    if blocked_weekdays is not None:
+        new_entry["blocked_weekdays"] = list(blocked_weekdays)
+    entries.append(new_entry)
     # A new list, never an in-place append: the column is plain JSON, and an
     # in-place mutation is invisible to the ORM's change tracking.
     professional.appointment_types = entries

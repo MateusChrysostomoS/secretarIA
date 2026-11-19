@@ -30,6 +30,9 @@ class ServiceOffer(BaseModel):
     professional_id: str = Field(min_length=1, max_length=64)
     duration_min: int = Field(gt=0, le=600)
     price: str | None = Field(default=None, max_length=40)
+    # TASK-087: weekdays patients cannot book this service on (`monday`..`sunday`). Checked by
+    # services/hub_unit_terms.py (422 `blocked_weekdays_invalid`) before anything is written.
+    blocked_weekdays: list[str] | None = None
 
 
 class ServiceCreate(BaseModel):

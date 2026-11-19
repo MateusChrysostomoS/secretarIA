@@ -55,7 +55,10 @@ from secretaria.schemas.service import (
     ServiceRead,
     ServiceUpdate,
 )
-from secretaria.services import hub_configuration as hubcfg
+from secretaria.services import (
+    hub_configuration as hubcfg,
+    hub_unit_terms as unit_terms_service,
+)
 from secretaria.services.service_catalog import (
     find_near_duplicates,
     load_service_catalog,
@@ -215,6 +218,15 @@ async def create_service(
     if not normalized:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, detail="service_name_required")
 
+    offer_days: list[str] | None = None
+    if payload.offer is not None and payload.offer.blocked_weekdays is not None:
+        # TASK-087: refused before anything is read or written, in the hub's usual 422 shape.
+        try:
+            unit_terms_service.check_blocked_weekdays(payload.offer.blocked_weekdays)
+        except unit_terms_service.UnitTermsInvalid as exc:
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, detail=exc.detail()) from None
+        offer_days = unit_terms_service.sorted_weekdays(payload.offer.blocked_weekdays)
+
     professional = None
     if payload.offer is not None:
         try:
@@ -274,6 +286,7 @@ async def create_service(
             service,
             duration_min=payload.offer.duration_min,
             price=(payload.offer.price or "").strip() or None,
+            blocked_weekdays=offer_days,
         )
         if offered:
             try:

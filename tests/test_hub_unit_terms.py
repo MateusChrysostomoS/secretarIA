@@ -236,8 +236,13 @@ async def test_read_returns_the_exceptions_in_link_order(client, world):
     await _seed_terms(w, ("consulta", "centro", "R$ 250,00", None), ("consulta", "sede", None, 40))
     doctor = await _list_doctor(client, w)
     assert _by_name(doctor)["Consulta"]["unit_terms"] == [
-        {"unit_id": str(w["sede"].id), "price": None, "duration_min": 40},
-        {"unit_id": str(w["centro"].id), "price": "R$ 250,00", "duration_min": None},
+        {"unit_id": str(w["sede"].id), "price": None, "duration_min": 40, "blocked_weekdays": None},
+        {
+            "unit_id": str(w["centro"].id),
+            "price": "R$ 250,00",
+            "duration_min": None,
+            "blocked_weekdays": None,
+        },
     ]
     assert _by_name(doctor)["Retorno"]["unit_terms"] == []
 
@@ -363,15 +368,18 @@ async def test_apply_to_all_writes_the_base_and_erases_every_exception(client, w
     assert await _rows(w) == {("retorno", "sede"): ("R$ 7,00", None)}
 
 
-async def test_apply_to_all_with_exceptions_is_refused(client, world):
+async def test_apply_to_all_with_exceptions_erases_first_then_writes_them(client, world):
+    # TASK-087 relaxed the 085 refusal: "Todas as unidades" is per subject and may travel with
+    # `unit_terms` (the erase runs first, then the list is applied).
     w = world
+    await _seed_terms(w, ("consulta", "centro", "R$ 9,00", None))
     response = await _put(
         client,
         w,
         [_entry(w, "consulta", apply_to_all=True, unit_terms=[_term(w["sede"], price="R$ 1,00")])],
     )
-    assert response.status_code == 422
-    assert await _rows(w) == {}
+    assert response.status_code == 200, response.text
+    assert await _rows(w) == {("consulta", "sede"): ("R$ 1,00", None)}
 
 
 async def test_apply_to_all_with_an_empty_unit_terms_is_fine(client, world):
@@ -594,7 +602,12 @@ async def test_legacy_professional_config_route_writes_and_reads_the_same_way(cl
     )
     assert response.status_code == 200, response.text
     assert _by_name(response.json())["Consulta"]["unit_terms"] == [
-        {"unit_id": str(w["centro"].id), "price": "R$ 250,00", "duration_min": None}
+        {
+            "unit_id": str(w["centro"].id),
+            "price": "R$ 250,00",
+            "duration_min": None,
+            "blocked_weekdays": None,
+        }
     ]
     response = await client.put(
         url,
