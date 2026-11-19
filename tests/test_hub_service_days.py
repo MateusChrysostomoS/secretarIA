@@ -423,3 +423,144 @@ async def test_create_service_offer_with_invalid_days_creates_nothing(client, wo
             )
             is None
         )
+
+
+# ---------------------------------------------------------------- D1: absent key = keep
+
+
+async def _put_legacy(client, w, entries):
+    return await client.put(
+        f"/tenants/me/professionals/{w['doctor'].id}/config",
+        headers=HEADERS,
+        json={"appointment_types": entries},
+    )
+
+
+async def test_put_without_the_key_keeps_the_stored_base_days(client, world):
+    w = world
+    first = [_entry(w, "consulta", blocked_weekdays=["monday"]), _entry(w, "retorno")]
+    assert (await _put(client, w, first)).status_code == 200
+    # a client that does not know the field (secretarIA-frontend, stale Portal tab)
+    stale = [_entry(w, "consulta", price="R$ 210,00"), _entry(w, "retorno")]
+    response = await _put(client, w, stale)
+    assert response.status_code == 200, response.text
+    assert (await _stored_entry(w, "consulta"))["blocked_weekdays"] == ["monday"]
+    assert _by_name(await _list_doctor(client, w))["Consulta"]["blocked_weekdays"] == ["monday"]
+    assert "blocked_weekdays" not in await _stored_entry(w, "retorno")
+    # explicit null clears, a list replaces
+    assert (
+        await _put(client, w, [_entry(w, "consulta", blocked_weekdays=None), _entry(w, "retorno")])
+    ).status_code == 200
+    assert (await _stored_entry(w, "consulta"))["blocked_weekdays"] == []
+
+
+async def test_put_without_the_key_keeps_days_on_the_legacy_route_too(client, world):
+    w = world
+    assert (
+        await _put_legacy(client, w, [_entry(w, "consulta", blocked_weekdays=["friday"])])
+    ).status_code == 200
+    assert (await _put_legacy(client, w, [_entry(w, "consulta")])).status_code == 200
+    assert (await _stored_entry(w, "consulta"))["blocked_weekdays"] == ["friday"]
+    assert (
+        await _put_legacy(client, w, [_entry(w, "consulta", blocked_weekdays=["monday"])])
+    ).status_code == 200
+    assert (await _stored_entry(w, "consulta"))["blocked_weekdays"] == ["monday"]
+
+
+async def test_put_without_the_key_matches_by_name_when_there_is_no_service_id(client, world):
+    w = world
+    assert (
+        await _put(client, w, [_entry(w, "consulta", blocked_weekdays=["monday"])])
+    ).status_code == 200
+    bare = _entry(w, "consulta")
+    bare.pop("service_id")
+    bare["name"] = "  consulta "
+    # the entry now has no link, but the stored entry of the same name keeps its days
+    async with w["db"]() as session:
+        doctor = await session.get(Professional, w["doctor"].id)
+        stored = [dict(e) for e in doctor.appointment_types]
+    assert stored[0]["blocked_weekdays"] == ["monday"]
+    from secretaria.services import hub_configuration as hubcfg
+
+    class _P:
+        appointment_types = stored
+
+    hubcfg.apply_professional_config(_P, {"appointment_types": [bare]})
+    assert _P.appointment_types[0]["blocked_weekdays"] == ["monday"]
+
+
+async def test_inheriting_professional_saving_without_the_key_is_fine(client, world):
+    w = world
+    async with w["db"]() as session:
+        doctor = await session.get(Professional, w["doctor"].id)
+        doctor.appointment_types = None
+        await session.commit()
+    response = await _put(client, w, [_entry(w, "consulta")])
+    assert response.status_code == 200, response.text
+    assert "blocked_weekdays" not in await _stored_entry(w, "consulta")
+
+
+# ---------------------------------------------------------------- F1: apply_to_all + unit_terms: []
+
+
+async def test_apply_to_all_with_empty_unit_terms_clears_every_row(client, world):
+    w = world
+    await _seed_terms(w, ("consulta", "norte", "R$ 700,00", None))
+    async with w["db"]() as session:
+        session.add_all(
+            [
+                ProfessionalServiceUnitTerms(
+                    professional_id=w["doctor"].id,
+                    service_id=w["consulta"].id,
+                    unit_id=w["centro"].id,
+                    tenant_id=w["tenant"].id,
+                    price=None,
+                    duration_min=None,
+                    blocked_weekdays=["friday"],
+                ),
+                ProfessionalServiceUnitTerms(
+                    professional_id=w["doctor"].id,
+                    service_id=w["consulta"].id,
+                    unit_id=w["inactive"].id,
+                    tenant_id=w["tenant"].id,
+                    price="R$ 2,00",
+                    duration_min=None,
+                    blocked_weekdays=["monday"],
+                ),
+            ]
+        )
+        await session.commit()
+    response = await _put(client, w, [_entry(w, "consulta", apply_to_all=True, unit_terms=[])])
+    assert response.status_code == 200, response.text
+    assert await _rows_full(w) == {("consulta", "inactive"): (None, None, ["monday"])}
+
+
+async def test_apply_to_all_with_unit_terms_replaces_an_existing_row(client, world):
+    w = world
+    async with w["db"]() as session:
+        session.add(
+            ProfessionalServiceUnitTerms(
+                professional_id=w["doctor"].id,
+                service_id=w["consulta"].id,
+                unit_id=w["centro"].id,
+                tenant_id=w["tenant"].id,
+                price="R$ 250,00",
+                duration_min=None,
+                blocked_weekdays=["friday"],
+            )
+        )
+        await session.commit()
+    response = await _put(
+        client,
+        w,
+        [
+            _entry(
+                w,
+                "consulta",
+                apply_to_all=True,
+                unit_terms=[_days_term(w["centro"], blocked=["monday"])],
+            )
+        ],
+    )
+    assert response.status_code == 200, response.text
+    assert await _rows_full(w) == {("consulta", "centro"): (None, None, ["monday"])}

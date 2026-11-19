@@ -139,6 +139,42 @@ def strip_unit_fields(entries: Iterable) -> list:
     return out
 
 
+def keep_stored_blocked_weekdays(entries: list, stored: object) -> list:
+    """"Absent = keep" for the base `blocked_weekdays` (TASK-087, D1).
+
+    A client that does not know the field (the secretarIA-frontend config screen, a stale Portal
+    tab) saves entries without the key; the PUT replaces the whole list, so without this the
+    stored days would vanish. Only when the professional has an OWN list: an incoming entry with
+    no `blocked_weekdays` key gets the stored entry's one (matched by service id, else by name
+    trimmed + casefolded). An explicit `null` was already turned into `[]` by `strip_unit_fields`.
+    """
+    if not isinstance(stored, list):
+        return entries
+    by_id: dict[UUID, list] = {}
+    by_name: dict[str, list] = {}
+    for old in stored:
+        if not isinstance(old, dict) or "blocked_weekdays" not in old:
+            continue
+        service_id = entry_service_id(old)
+        if service_id is not None:
+            by_id.setdefault(service_id, old["blocked_weekdays"])
+        name = old.get("name")
+        if isinstance(name, str) and name.strip():
+            by_name.setdefault(name.strip().casefold(), old["blocked_weekdays"])
+    out: list = []
+    for entry in entries:
+        if isinstance(entry, dict) and "blocked_weekdays" not in entry:
+            service_id = entry_service_id(entry)
+            days = by_id.get(service_id) if service_id is not None else None
+            name = entry.get("name")
+            if days is None and isinstance(name, str) and name.strip():
+                days = by_name.get(name.strip().casefold())
+            if days is not None:
+                entry = {**entry, "blocked_weekdays": list(days)}
+        out.append(entry)
+    return out
+
+
 def _entries(data: dict) -> list[dict] | None:
     """The patch's entries, or None when it does not carry a list (absent / null = untouched)."""
     entries = data.get("appointment_types")
