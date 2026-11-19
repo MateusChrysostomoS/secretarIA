@@ -73,7 +73,7 @@ V2_TOOL_OUTPUTS: Mapping[str, OutputAllowlist] = {
                 "error",
             }
         ),
-        records={"windows": frozenset({"day", "start", "end", "unit"})},
+        records={"windows": frozenset({"day", "weekday", "start", "end", "unit"})},
     ),
     "list_patient_appointments": OutputAllowlist(
         frozenset({"appointments", "count", "nota", "error"}),

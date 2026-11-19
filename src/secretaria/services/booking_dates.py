@@ -16,6 +16,19 @@ _WEEKDAY_NUMBERS = {
 }
 
 
+WEEKDAY_SHORT = ("Seg", "Ter", "Qua", "Qui", "Sex", "Sáb", "Dom")
+
+
+def short_day_label(day: date | datetime) -> str:
+    """Patient-facing date label, e.g. "Seg, 24/11" (TASK-087 D4)."""
+    return f"{WEEKDAY_SHORT[day.weekday()]}, {day.strftime('%d/%m')}"
+
+
+def short_day_phrase(day: date | datetime) -> str:
+    """Same date inside a sentence, e.g. "seg, 24/11"."""
+    return short_day_label(day)[0].lower() + short_day_label(day)[1:]
+
+
 _HHMM = re.compile(r"(\d{1,2}):(\d{2})")
 
 

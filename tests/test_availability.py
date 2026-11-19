@@ -182,7 +182,7 @@ async def test_the_slot_picker_is_byte_identical_after_the_extraction():
         _at_day_step(), _tenant(), _FakeCalendar(slots=_SLOTS), _DAY_TAP, gate=gate
     )
     (bubble,) = res.bubbles
-    assert bubble.body == "Horários livres em 05/10:"
+    assert bubble.body == "Horários livres em seg, 05/10:"
     assert bubble.rows == [
         ("slot|2026-10-05T08:00", decorate(EMOJI_SCHEDULE, "08:00")),
         ("slot|2026-10-05T08:40", decorate(EMOJI_SCHEDULE, "08:40")),
@@ -218,7 +218,7 @@ async def test_a_partly_held_day_lists_the_free_times_under_the_held_ones():
     )
     (bubble,) = res.bubbles
     assert bubble.body == (
-        fr.HELD_SLOTS_NOTICE.format(times="08:00") + "\n\nHorários livres em 05/10:"
+        fr.HELD_SLOTS_NOTICE.format(times="08:00") + "\n\nHorários livres em seg, 05/10:"
     )
     assert [row[0] for row in bubble.rows][:1] == ["slot|2026-10-05T08:40"]
 
