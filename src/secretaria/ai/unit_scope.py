@@ -16,6 +16,7 @@ its id / location on the event the booking writes. Database reads open their own
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from datetime import datetime
 from typing import Any
 from uuid import UUID
@@ -23,10 +24,13 @@ from uuid import UUID
 from secretaria.services.booking_scope import service_entry_name
 from secretaria.services.professional_service_units import allowed_unit_ids, read_marks
 from secretaria.services.service_catalog import entry_service_id
+from secretaria.services.service_terms import blocked_weekdays_at
 from secretaria.services.unit_booking import (
     UnitOption,
     UnitRefused,
+    blocked_on,
     check_unit,
+    service_day_refusal,
     unit_options_for,
     within_hours,
 )
@@ -125,6 +129,18 @@ def service_id_of(catalog: list | None, service_name: str | None) -> UUID | None
     return None
 
 
+def service_entry_of(catalog: list | None, service_name: str | None) -> dict | None:
+    """The stored catalog entry (a dict) named `service_name`, or None - no such entry, or the
+    catalog holds runtime objects (they carry no day lists). TASK-087: where the days live."""
+    target = (service_name or "").strip().casefold()
+    if not target:
+        return None
+    for entry in catalog or []:
+        if isinstance(entry, dict) and str(service_entry_name(entry)).strip().casefold() == target:
+            return entry
+    return None
+
+
 async def owner_service_catalog(tenant_id: UUID, professional: Any | None) -> list[dict]:
     """THIS professional's own catalog as stored dicts (each with its `service_id`), resolved
     through the clinic's canonical catalog - what the service-per-unit rule reads.
@@ -209,6 +225,32 @@ async def _service_refusal_payload(
     return {"error": error, "valid_units": valid}
 
 
+async def service_day_refusal_for(
+    session: Any,
+    tenant_id: UUID,
+    professional: Any | None,
+    entry: Mapping | None,
+    unit_id: UUID | None,
+    start: datetime,
+) -> str | None:
+    """The patient sentence when `entry`'s service is not done on `start`'s weekday, else None.
+
+    TASK-087 (G3): the confirmation-time check of every AI booking tool, next to the unit check.
+    The days come from the doctor's rule at `unit_id` (its own list, else the base; no unit = the
+    base) read tenant-scoped. No service known (`entry` None) refuses nothing (R5). `start` is on
+    the clinic's clock - the weekday is read as it comes.
+    """
+    if entry is None:
+        return None
+    professional_id = getattr(professional, "id", None)
+    blocked = await blocked_weekdays_at(session, tenant_id, professional_id, entry, unit_id)
+    if not blocked_on(start, blocked):
+        return None
+    return service_day_refusal(
+        service_entry_name(entry), getattr(professional, "name", None), blocked
+    )
+
+
 def outside_unit_hours(unit: UnitOption | None, start: datetime, end: datetime, tz) -> dict | None:
     """A tool-error when [start, end) is outside the unit's own hours, else None."""
     hours = getattr(unit, "business_hours", None) if unit is not None else None
@@ -240,6 +282,8 @@ __all__ = [
     "owner_service_catalog",
     "professional_unit_options",
     "resolve_tool_unit",
+    "service_day_refusal_for",
+    "service_entry_of",
     "service_id_of",
     "service_unit_refusal",
     "sole_professional_row",
