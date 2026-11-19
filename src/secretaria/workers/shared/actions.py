@@ -1,7 +1,6 @@
 """actions - split out of workers/tasks.py (TASK-023)."""
 
 from datetime import UTC, datetime
-from types import SimpleNamespace
 from uuid import UUID
 
 from sqlalchemy import select
@@ -59,6 +58,7 @@ from secretaria.services.tenant_config import (
     load_tenant_config,
     resolve_professional_calendar,
 )
+from secretaria.services.unit_booking import attach_unit_options
 from secretaria.workers.shared.appointment_edit_support import (
     edit_guards,
     visit_suspended,
@@ -74,6 +74,7 @@ from secretaria.workers.shared.flow_runner import (
     _apply_flow_result,
 )
 from secretaria.workers.shared.greeting import (
+    _flow_professionals,
     _format_appointment_when,
 )
 from secretaria.workers.shared.llm_context import (
@@ -213,6 +214,21 @@ async def _execute_appointment_cancel(
             appointment_id=str(appointment.id),
         )
     return text
+
+
+async def _router_roster(
+    session: AsyncSession, tenant: Tenant, professional_rows: list, services: list | None
+) -> list:
+    """The router-shaped roster a button's day picker reads - the same one `route()` gets.
+
+    `_flow_professionals` (catalog resolved, `business_hours` verbatim, NULL and all) plus each
+    doctor's units, per-service unit marks and per-unit terms (`attach_unit_options`), exactly
+    like `service_change_actions._rebook_entry`. Without them the picker would use the base
+    hours and the base blocked weekdays instead of the unit's (TASK-087 review P1).
+    """
+    professionals = _flow_professionals(professional_rows, services)
+    await attach_unit_options(session, tenant, professional_rows, professionals)
+    return professionals
 
 
 async def _announce_button_cancel(redis, tenant: Tenant, appointment_id, was_live: bool) -> None:
@@ -490,24 +506,8 @@ async def _handle_action_button(
                 )
                 return
             professional_rows = await list_active_professionals(session, tenant.id)
-            professionals = [
-                SimpleNamespace(
-                    id=p.id,
-                    name=p.name,
-                    specialty=p.specialty,
-                    about=p.about,
-                    context_doctor_message=p.context_doctor_message,
-                    min_booking_notice_hours=p.min_booking_notice_hours,
-                    appointment_types=p.appointment_types,
-                    # Verbatim, NULL and all: the router reads it through
-                    # `professional_business_hours`, whose whole contract is
-                    # that NULL inherits the clinic's hours and `{}` does not.
-                    # Flattening it here would erase that distinction and make
-                    # an inheriting doctor look unbookable.
-                    business_hours=p.business_hours,
-                )
-                for p in professional_rows
-            ]
+            services = await load_service_catalog(session, tenant.id)
+            professionals = await _router_roster(session, tenant, professional_rows, services)
             same = action == "rebooksame"
             service_name = appointment.appointment_type
             candidates: list = []
@@ -515,7 +515,6 @@ async def _handle_action_button(
             if same:
                 target_id = appointment.professional_id
             else:
-                services = await load_service_catalog(session, tenant.id)
                 candidates, prefix = rebooking_candidates(
                     tenant,
                     professionals,
@@ -576,24 +575,9 @@ async def _handle_action_button(
                 session, tenant.id, appointment.patient_id
             )
             professional_rows = await list_active_professionals(session, tenant.id)
-            professionals = [
-                SimpleNamespace(
-                    id=p.id,
-                    name=p.name,
-                    specialty=p.specialty,
-                    about=p.about,
-                    context_doctor_message=p.context_doctor_message,
-                    min_booking_notice_hours=p.min_booking_notice_hours,
-                    appointment_types=p.appointment_types,
-                    # Verbatim, NULL and all: the router reads it through
-                    # `professional_business_hours`, whose whole contract is
-                    # that NULL inherits the clinic's hours and `{}` does not.
-                    # Flattening it here would erase that distinction and make
-                    # an inheriting doctor look unbookable.
-                    business_hours=p.business_hours,
-                )
-                for p in professional_rows
-            ]
+            professionals = await _router_roster(
+                session, tenant, professional_rows, await load_service_catalog(session, tenant.id)
+            )
             # The reschedule opens the day picker in this very turn, so it
             # needs THIS appointment's own agenda resolved here, inside the
             # session. A failure leaves it None and the picker answers

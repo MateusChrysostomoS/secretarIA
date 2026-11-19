@@ -65,8 +65,9 @@ Helpers que aplicam/consultam o filtro (nenhum caminho do paciente reimplementa 
 - `services/unit_booking.py`: `service_calendar(calendar, blocked)` (sem bloqueio = o mesmo objeto), `blocked_on`,
   `weekday_plural_pt`, `service_day_refusal(serviço, médico, dias)` — a frase "<serviço> com <médico> não é feito às
   segundas. Posso ver outro dia?".
-- `services/flow_units.py`: `blocked_weekdays_of(professional, entry, unit_id)` (sem unidade = só o bloqueado em
-  todas, R1; sem entrada = nada, R5) e `service_scoped_calendar(calendar, professional, entry, unit)`.
+- `services/flow_units.py`: `blocked_weekdays_of(professional, entry, unit_id)` (sem unidade = o bloqueado em
+  todas + o dia em que toda unidade que ABRE nele o bloqueia, R1/revisão P2; sem entrada = nada, R5). A agenda do
+  paciente com unidade + dias é montada só em `flow_router._service_scoped` (substitui o conjunto anterior).
 - `services/service_terms.py`: os resolvedores acima.
 
 ## Onde cada caminho do paciente aplica
@@ -121,7 +122,8 @@ dia depois bloqueado.
 ## Dia da semana nas listas do paciente (D4)
 
 Um helper só, `services/booking_dates.py::short_day_label` ("Seg, 24/11") e `short_day_phrase` ("seg, 24/11"), usados
-por: título dos horários ("Horários livres em seg, 24/11:" / "Novos horários em ..."), `_appt_row_label`, "Livre/Ocupado
+por: título dos horários ("Horários livres em seg, 24/11:" / "Novos horários em ..."), `_appt_row_label` (só dia e
+hora; o serviço vai na descrição da linha — revisão P4), "Livre/Ocupado
 seg, dd/mm hh:mm" do "Alterar dados", notas de intervalo da IA ("de seg, 05/10 a seg, 12/10"), `FreeWindow.payload()`
 (ganhou `weekday`) e a allowlist `ai/tool_output.py` (mantém `weekday` em `windows[]`; sem isso a IA nunca o veria).
 Os botões de dia já eram assim. Limite do WhatsApp (24 caracteres) respeitado. Confirmações, lembretes e e-mails não

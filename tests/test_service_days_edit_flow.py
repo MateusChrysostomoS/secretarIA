@@ -15,12 +15,14 @@ from datetime import datetime
 
 os.environ.setdefault("APP_ENV", "test")
 
+from secretaria.ai.formatter import SlotsBubble  # noqa: E402
 from secretaria.services import (  # noqa: E402
     appointment_edit as ae,
     appointment_edit_flow as ef,
     flow_router as fr,
 )
 from secretaria.services.appointment_edit_flow import edit_step  # noqa: E402
+from secretaria.services.unit_booking import service_day_refusal  # noqa: E402
 from tests._edit_flow_support import (  # noqa: E402
     DOCTOR_A,
     DOCTOR_B,
@@ -31,6 +33,7 @@ from tests._edit_flow_support import (  # noqa: E402
     draft_for,
     original_appointment,
     professionals,
+    slots,
     tenant,
 )
 
@@ -59,6 +62,11 @@ class BlockableCalendar(EditCalendar):
     async def list_available_days(self, start_day, days, slot_minutes=None):
         found = await super().list_available_days(start_day, days, slot_minutes)
         return [day for day in found if not self._is_blocked(day)]
+
+    async def list_free_slots(self, day, slot_minutes=None, max_slots=6):
+        if self._is_blocked(day):
+            return []
+        return await super().list_free_slots(day, slot_minutes, max_slots)
 
     async def is_slot_free(self, start, end, *, ignore_event_id=None):
         if self._is_blocked(start):
@@ -279,3 +287,148 @@ async def test_edit_ai_proposed_blocked_day_asks_for_another_day():
 
     assert result.flow_step != fr.STEP_EDIT_CONFIRM
     assert result.flow_step in fr._EDIT_DAY_STEPS
+
+
+# --- Review A1: a blocked day is refused WITH its reason -------------------------------------
+
+DIOGO = "Dr. Diogo Raposo"
+
+
+def _picker(result) -> SlotsBubble:
+    [bubble] = [b for b in result.bubbles if isinstance(b, SlotsBubble)]
+    return bubble
+
+
+def _assert_refused_with_days(result, refusal: str, hidden_day: str) -> None:
+    assert result.flow_step in fr._EDIT_DAY_STEPS
+    assert _picker(result).body.startswith(refusal), _picker(result).body
+    assert not any(f"day|{hidden_day}" in row for row in _row_ids(result))
+
+
+async def test_edit_typed_blocked_date_refused():
+    """After "Data", a typed Wednesday (Consulta is not done on Wednesdays): the reason and the
+    day picker - never "Quer mudar o horário também?"."""
+    doctors = _doctors(consulta_blocks=("wednesday",))
+    ctx, _ = _ctx()
+    appt = appointment()
+    draft = draft_for(appt).with_stage(mode="date")
+
+    result = await _step(
+        fr.STEP_EDIT_DAY, "16/10/2030", doctors=doctors, ctx=ctx, draft=draft, appt=appt
+    )
+
+    _assert_refused_with_days(
+        result, service_day_refusal("Consulta", DIOGO, {"wednesday"}), WEDNESDAY
+    )
+    assert _draft(result).stage.get("mode") == "date"  # the next typed date still asks the time
+    assert "target_day" not in _draft(result).stage
+
+
+async def test_edit_tapped_stale_blocked_day_refused():
+    """A Wednesday row from a list sent before the rule changed, in the day-then-time picker."""
+    doctors = _doctors(consulta_blocks=("wednesday",))
+    ctx, _ = _ctx()
+    appt = appointment()
+    draft = draft_for(appt).with_stage(mode="reslot")
+
+    result = await _step(
+        fr.STEP_EDIT_DAY,
+        f"Qua, 16/10 ({WEDNESDAY}|0)",
+        doctors=doctors,
+        ctx=ctx,
+        draft=draft,
+        appt=appt,
+    )
+
+    _assert_refused_with_days(
+        result, service_day_refusal("Consulta", DIOGO, {"wednesday"}), WEDNESDAY
+    )
+
+
+async def test_edit_time_too_on_a_blocked_day_refused():
+    """A day stored before the rule changed, answered "Não" (keep the time): refused, explained."""
+    doctors = _doctors(consulta_blocks=("wednesday",))
+    ctx, _ = _ctx()
+    appt = appointment()
+    draft = draft_for(appt).with_stage(mode="date", target_day=WEDNESDAY)
+
+    result = await _step(
+        fr.STEP_EDIT_TIME_TOO,
+        ae.LABEL_TIME_TOO_NO,
+        doctors=doctors,
+        ctx=ctx,
+        draft=draft,
+        appt=appt,
+    )
+
+    _assert_refused_with_days(
+        result, service_day_refusal("Consulta", DIOGO, {"wednesday"}), WEDNESDAY
+    )
+
+
+async def test_edit_time_entry_on_a_now_blocked_day_explains_and_asks_a_day():
+    """Tapping "Horário" on the Tuesday visit, Tuesdays blocked for Consulta since: a new time
+    cannot be on Tuesday (R4: the time changes), so the reason and the day picker."""
+    doctors = _doctors(consulta_blocks=("tuesday",))
+    ctx, _ = _ctx()
+
+    result = await _step(fr.STEP_EDIT_MENU, ae.LABEL_EDIT_TIME, doctors=doctors, ctx=ctx)
+
+    _assert_refused_with_days(
+        result, service_day_refusal("Consulta", DIOGO, {"tuesday"}), "2030-10-15"
+    )
+
+
+async def test_edit_time_entry_on_an_open_day_lists_its_times():
+    """Characterization: an allowed day still opens its time list."""
+    doctors = _doctors(consulta_blocks=("wednesday",))
+    ctx = context(calendars={str(DOCTOR_A): BlockableCalendar(slots=slots("16:00"))})
+
+    result = await _step(fr.STEP_EDIT_MENU, ae.LABEL_EDIT_TIME, doctors=doctors, ctx=ctx)
+
+    assert result.flow_step == fr.STEP_EDIT_SLOT
+
+
+# --- Review A2/A3: R4 - the visit as booked is never re-checked ------------------------------
+
+
+async def test_edit_repicking_the_same_service_on_a_now_blocked_day_keeps_the_visit():
+    """Tuesdays were blocked for Consulta after the Tuesday visit was booked; tapping Consulta
+    again changes nothing, so no new day is asked and the agenda is not even consulted."""
+    doctors = _doctors(consulta_blocks=("tuesday",))
+    ctx, calendars = _ctx()
+
+    result = await _step(
+        fr.STEP_EDIT_SERVICE, fr._service_row_title("Consulta"), doctors=doctors, ctx=ctx
+    )
+
+    assert result.flow_step == fr.STEP_EDIT_CONFIRM
+    assert _draft(result).changed() == []
+    assert calendars[str(DOCTOR_A)].checked == []
+
+
+async def test_edit_doctor_list_keeps_the_visits_own_doctor_free_on_a_now_blocked_day():
+    """The visit's own doctor at its own slot is still "Livre" (R4) although Tuesdays were
+    blocked for Consulta since; another doctor blocking Tuesday still reads "Ocupado"."""
+    doctors = _doctors(consulta_blocks=("tuesday",), b_consulta_blocks=("tuesday",))
+    ctx, _ = _ctx()
+
+    result = await _step(fr.STEP_EDIT_MENU, ae.LABEL_EDIT_DOCTOR, doctors=doctors, ctx=ctx)
+
+    rows = {row[0]: row for bubble in result.bubbles for row in bubble.rows}
+    assert "Livre" in rows[f"prof|{DOCTOR_A}"][2]
+    assert "Ocupado" in rows[f"prof|{DOCTOR_B}"][2]
+
+
+# --- Review P5: the free/busy mark reads the day in lower case inside the line ---------------
+
+
+async def test_edit_doctor_list_mark_uses_the_sentence_day():
+    doctors = _doctors(b_consulta_blocks=("tuesday",))
+    ctx, _ = _ctx()
+
+    result = await _step(fr.STEP_EDIT_MENU, ae.LABEL_EDIT_DOCTOR, doctors=doctors, ctx=ctx)
+
+    rows = {row[0]: row for bubble in result.bubbles for row in bubble.rows}
+    assert rows[f"prof|{DOCTOR_A}"][2].startswith(f"{ae.MARK_FREE} Livre ter, 15/10 15:20")
+    assert rows[f"prof|{DOCTOR_B}"][2].startswith(f"{ae.MARK_BUSY} Ocupado ter, 15/10 15:20")
