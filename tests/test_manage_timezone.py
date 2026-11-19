@@ -90,16 +90,18 @@ async def test_multiple_appointments_local_labels_keep_original_iso_ids(intent):
             fr.LABEL_MANAGE_APPOINTMENT,
             upcoming_appointments=appointments,
         )
+    # TASK-087 review P4: the title is the day and time only; the service rides, whole, in the
+    # row's description (it used to be cut: "Sex, 16/10 14:40 Consul…").
     assert result.bubbles[0].rows == [
-        (f"slot|{first['start_at'].isoformat()}", "Sex, 16/10 14:40 Consul…"),
-        (f"slot|{second['start_at'].isoformat()}", "Sex, 16/10 22:10 Consul…"),
+        (f"slot|{first['start_at'].isoformat()}", "Sex, 16/10 14:40", "Consulta"),
+        (f"slot|{second['start_at'].isoformat()}", "Sex, 16/10 22:10", "Consulta"),
     ]
     if intent != "reschedule":
         picked = await fr.route(
             _conversation(flow_state=result.flow_state, flow_step=result.flow_step),
             tenant,
             None,
-            f"Sex, 16/10 14:40 Consul… ({first['start_at'].isoformat()})",
+            f"Sex, 16/10 14:40 ({first['start_at'].isoformat()})",
             upcoming_appointments=appointments,
         )
         assert "16/10/2026 às 14:40" in picked.bubbles[0].body

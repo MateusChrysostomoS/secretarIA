@@ -1,6 +1,6 @@
 # CHECKPOINT — Dias da semana por serviço + dia da semana nas listas do paciente (TASK-087)
 
-Estado (2026-11-19): **pronto e validado, só LOCAL. Commitado na branch `task/TASK-087-dias-do-servico` (worktree
+Estado (2026-11-19): **pronto, revisado (T11: READY) e validado, só LOCAL. Commitado na branch `task/TASK-087-dias-do-servico` (worktree
 `BRAIN-worktrees/TASK-087/secretarIA`, base `c7423f0` = branch `task/TASK-083-multi-unidades` com 085+086); NÃO foi
 para `main`, NÃO houve push, NÃO foi deployado.** Deploy, merge e push só a pedido do dono (`Deployment: NOT
 AUTHORIZED`). Registro central: `../tasks/TASK-087/` (raiz de BRAIN: `SPEC.md` = autoridade, `PLAN.md`,
@@ -63,8 +63,9 @@ horários e `is_slot_free` saem todos de `_windows_for_day`, os três caem junto
 Helpers que aplicam/consultam o filtro (nenhum caminho do paciente reimplementa a regra):
 
 - `services/unit_booking.py`: `service_calendar(calendar, blocked)` (sem bloqueio = o mesmo objeto), `blocked_on`,
-  `weekday_plural_pt`, `service_day_refusal(serviço, médico, dias)` — a frase "<serviço> com <médico> não é feito às
-  segundas. Posso ver outro dia?".
+  `weekday_plural_pt`, `weekday_list_pt` (dias com artigo: "às segundas e sextas", "às sextas e aos sábados"),
+  `service_day_refusal(serviço, médico, dias)` — a frase "<serviço> com <médico> não está disponível às segundas.
+  Posso ver outro dia?" (revisão P6: concorda com qualquer nome de serviço).
 - `services/flow_units.py`: `blocked_weekdays_of(professional, entry, unit_id)` (sem unidade = o bloqueado em
   todas + o dia em que toda unidade que ABRE nele o bloqueia, R1/revisão P2; sem entrada = nada, R5). A agenda do
   paciente com unidade + dias é montada só em `flow_router._service_scoped` (substitui o conjunto anterior).
@@ -92,8 +93,14 @@ Helpers que aplicam/consultam o filtro (nenhum caminho do paciente reimplementa 
   serviço nomeado, sem filtro — R5; falha de leitura cai para a base — R8); `unit_scope.service_day_refusal_for` e
   `service_entry_of`; `tools._service_day_refusal` chamada em `create_event`, e nos plugins
   `multi_professional.create_event_for_professional` e `multi_unit.create_event_at_unit` (depois do horário local,
-  ANTES de qualquer escrita; falha de leitura recusa). `services/llm_context.py` diz por serviço (e por unidade)
-  "(não às segundas e sextas)" — só quando há bloqueio; sem bloqueio o texto é idêntico ao de antes.
+  ANTES de qualquer escrita; falha de leitura recusa com `SERVICE_DAYS_LOOKUP_FAILED_ERROR`, revisão A4).
+  A ferramenta de disponibilidade lê as exceções UMA vez por chamada e só varre as unidades onde o médico faz o
+  serviço (marcas da 083; revisão A5). `services/llm_context.py` diz por serviço (e por unidade) "(não às segundas e
+  sextas)" / "(não às sextas e aos sábados)" — só quando há bloqueio; sem bloqueio o texto é idêntico ao de antes.
+- **Entradas que montam o retrato do médico fora do `route()`** (revisão P1): botões de remarcar após cancelamento
+  do médico e "Remarcar" do lembrete (`workers/shared/actions.py::_router_roster`) e as entradas de agendamento
+  guiado/rascunho legado (`workers/shared/sentinels.py`, `ctx.professionals`) usam o retrato com unidades, marcas e
+  exceções por unidade — sem isso a lista de dias usava só a base.
 
 ## O que fica FORA da regra (D3)
 
@@ -112,7 +119,16 @@ dia depois bloqueado.
   serviço no catálogo, `schemas/service.py`) também aceita `blocked_weekdays`.
 - `apply_to_all` agora é **por assunto** (`services/hub_unit_terms.py::apply_unit_terms`): zera só preço/duração
   próprios (ativas e inativas; apaga as linhas que ficam sem nada) e preserva os dias; pode vir junto com
-  `unit_terms` só-dias. A recusa antiga de `apply_to_all` + `unit_terms` saiu.
+  `unit_terms` só-dias. A recusa antiga de `apply_to_all` + `unit_terms` saiu. Desde a revisão (F1) o Portal manda
+  `unit_terms` SEMPRE junto com `apply_to_all` (mesmo `[]`), para que dias próprios que a tela já tirou não fiquem no
+  servidor.
+- **"Ausente = mantém" para os dias da base** (revisão D1, `hub_unit_terms.keep_stored_blocked_weekdays`, chamado em
+  `hub_configuration.apply_professional_config`): entrada que chega SEM a chave `blocked_weekdays` (tela
+  `/configuracao` do secretarIA-frontend, aba antiga do Portal) herda os dias guardados da mesma entrada (por
+  `service_id`, senão por nome); `null` explícito limpa (`[]`). Sem isso, salvar só um preço por outra tela apagava os
+  bloqueios.
+- A coluna usa `JSON(none_as_null=True)` (revisão D2): `None` em Python vira NULL de SQL (o CHECK e o "herda a base"
+  dependem disso), nunca JSON `null`. Sem migração.
 - **422 `blocked_weekdays_invalid`** (`{code, message}`, mesmo formato das recusas de `unit_terms`;
   `check_blocked_weekdays`): chave desconhecida, repetida ou os 7 dias. "Não sobra dia em que o médico atende" não é
   validado no servidor (R7); é impedido na tela.
@@ -132,6 +148,16 @@ mudaram. Seis testes antigos tiveram só a asserção atualizada para os novos r
 
 ## Validação
 
+- **Revisão final (T11), código em `dd8be65`:** a suíte completa foi interrompida aos 68% (6953 testes) pelo próprio
+  Claude Code por falta de memória na máquina (não por falha) — até ali, só 3 falhas, todas do mesmo teste
+  (`test_manage_timezone::test_multiple_appointments_local_labels_keep_original_iso_ids`, que fixava o título antigo
+  cortado "… Consul…" — justamente o defeito da revisão P4; expectativa atualizada, 21/21). Os 32% restantes foram
+  cobertos em lotes curtos onde a T11 mexeu: 576 (lembretes, botões do worker, remarcação, camadas do worker,
+  sinal/remarcar) + 972 (unidades, exceções por unidade, "Alterar dados", rótulos, WhatsApp, prompts, todos os
+  `test_service_days_*`) + 47 (os 4 arquivos de sinal que chamam os botões do worker ou a tabela de exceções) = 1595
+  passed, 0 falhas. Não re-rodados na T11: ~84 arquivos de áreas que a T11 não toca (ofertas de vaga, webhook,
+  segurança, assinatura…; conferido por busca) — passaram na suíte completa da T10 (`d9f81c6`). `ruff check` limpo
+  nos 46 `.py` alterados desde `c7423f0`; `alembic heads` = só `c8e2a4f6b1d3`.
 - **Suíte completa do secretarIA no HEAD da branch (`d9f81c6`, `BOT_ALLOWLIST_WA_IDS=""`):** 9981 passed, 131 skipped,
   1 xfailed, **2 failed** — as 2 antigas aceitas de `tests/test_service_change_agenda.py` (flake de horário UTC, ver
   memória `secretaria-human-backup-utc-flake`). Nenhuma regressão nova. `ruff check` limpo nos 41 `.py` alterados
@@ -155,7 +181,8 @@ Screenshots em `../tasks/TASK-087/evidencias/` (raiz de BRAIN). Nenhum defeito e
   com a dica "Para não oferecer este serviço, desligue “Oferecer”."
 - **Portal do paciente:** Retorno → lista de dias sem segunda (Sex 20/11, Ter 24/11 …); títulos "Horários livres em
   ter, 24/11:"; calendário "Outra data" com a segunda desligada; data digitada 23/11 recusada com "Retorno com Dra.
-  Multi Teste não é feito às segundas. Posso ver outro dia?". Consulta na Sede mostra segunda e sexta; Consulta na
+  Multi Teste não é feito às segundas. Posso ver outro dia?" (texto da época; desde a revisão P6: "… não está
+  disponível às segundas …"). Consulta na Sede mostra segunda e sexta; Consulta na
   Unidade Centro não mostra sexta; agendamento de Consulta na segunda 23/11 10:00 confirmado.
 - **Agenda da recepção:** marcou Retorno numa segunda (HTTP 201), sem recusa (D3).
 - Não testado: WhatsApp real (Portal é o único ambiente liberado, `CHECKPOINT_ambiente_secretaria.md`), nem IA com
@@ -175,6 +202,31 @@ Screenshots em `../tasks/TASK-087/evidencias/` (raiz de BRAIN). Nenhum defeito e
    bloqueada nessa topologia).
 6. Dias próprios por unidade continuam ligados à linha de exceção da 085: o médico que salva "Todas as unidades" no
    preço **não** perde os dias próprios (por assunto) — comportamento novo para quem já usava a 085.
+7. **Remarcação acha o serviço pelo NOME guardado na consulta** (revisão P3, aceito): a consulta não guarda
+   `service_id`; se o serviço for renomeado depois de marcado, a remarcação daquela consulta não acha a entrada e não
+   filtra os dias (a recepção pode remarcar; nada quebra). Corrigir exige `service_id` na consulta — fora do escopo.
+8. **Dias "para todas as unidades" não alcançam unidade DESATIVADA** (revisão D3, aceito): o Portal manda os dias já
+   resolvidos por unidade ativa; uma unidade desativada guarda os dias próprios que tinha e volta com eles se for
+   reativada (o preço em "Todas" alcança as desativadas). Raro; o médico revê os dias ao reativar.
+9. A recusa na confirmação volta com `BACK_TARGET_SERVICE` mesmo quando a unidade veio de lista (revisão P8, aceito:
+   copia o ramo do prazo mínimo que já existia).
+
+## Revisão final (T11, 2026-11-19)
+
+Revisão independente em 4 frentes (caminhos do paciente, IA + "Alterar dados", dados/migração/isolamento, tela) —
+achados e decisão em `../tasks/TASK-087/REVIEW.md` (raiz de BRAIN). Corrigidos aqui: **P1** (retrato sem unidades em
+lembrete/remarcar/legado), **P2** (R1 com unidades que abrem em dias diferentes: `blocked_weekdays_of` agora soma o dia
+em que toda unidade que ABRE nele o bloqueia), **D1** (ausente = mantém), **A1** ("Alterar dados" explica a recusa:
+`_day_check`, `_refused_day_picker`, `_time_entry`), **A2/A3** (R4: `_rechecks_day` — escolher de novo o mesmo
+serviço/médico não força novo dia; o próprio médico da consulta não aparece "Ocupado"), **P4** (lista "suas
+consultas" no WhatsApp: título só dia e hora, serviço na descrição), **P5** ("Livre seg, 24/11"), **P6** (texto da
+recusa), **P7** (`flow_units.service_scoped_calendar` removido; `flow_router._service_scoped` é o único), **A4**, **A5**,
+**A6**, **D2**, **D4** (`_nearest_price` ignora linhas só-de-dias). Aceitos sem mudança: P3, P8, D3 (acima).
+Re-revisão das correções: **RR1** (pedido de remarcar da IA com o modo `ai_draft_v2` ligado também usa o retrato com
+unidades — `sentinels._handle_manage_appointment`), **RR2** ("ausente = mantém" só casa por nome entrada SEM
+`service_id`), **RR3** ("Alterar dados": escolher de novo o próprio médico/unidade checa a consulta como marcada, R4 —
+`appointment_edit_flow._calendar(service_days=...)`). Aceito: **RR4** (o histórico que a IA lê da lista "suas
+consultas" mostra só dia e hora; o serviço foi para a descrição da linha).
 
 ## Deploy (não autorizado)
 
@@ -185,6 +237,15 @@ existentes).
 ## Commits da branch (`c7423f0..HEAD`)
 
 ```
+dd8be65 fix(service-days): re-review - AI v2 reschedule roster, D1 name fallback, R4 own doctor   (T11)
+e7d272a fix(service-days): P6 refusal agrees with any service name and mixed weekday lists        (T11)
+368cefe merge: TASK-087 T11 fixes (patient flows, edit flow) into dias-do-servico
+0f0e55e fix(service-days): A1 explain blocked days in "Alterar dados", A2/A3 R4 ..., P4/P5 list labels (T11)
+90ade47 fix(service-days): P1 unit-aware roster on button/AI entries, P2 R1 by opening units, P7 ...  (T11)
+fd90b14 merge: TASK-087 T11 fixes (data, hub, AI) into dias-do-servico
+86b6381 fix(service-days): D2 ..., D4 ..., A4 ..., A5/D5 ..., A6 docstrings                          (T11)
+24d4777 fix(service-days): D1 keep stored base blocked_weekdays when a PUT omits the key; F1 tests   (T11)
+2393c0f docs(service-days): checkpoint + pointer                                                     (T10)
 d9f81c6 merge: TASK-087 T6 into dias-do-servico
 8df12d1 merge: TASK-087 T5 into dias-do-servico
 333e602 feat(service-days): button flow, reschedule and rebooking respect service days   (T4)
