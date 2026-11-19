@@ -160,7 +160,19 @@ def _nearest_price(
     price = matched.price if matched else None
     owner_id = nearest.get("professional_id")
     owner = next((p for p in professionals or [] if owner_id and str(p.id) == str(owner_id)), None)
-    terms = flow_units.service_unit_terms_of(owner)
+    # Days-only rows (TASK-087) carry no price/duration: they must not count as "per-unit
+    # values" here (D4), or they would hide the price of an inherited list / an entry that is off.
+    terms = {
+        service_id: priced
+        for service_id, by_unit in flow_units.service_unit_terms_of(owner).items()
+        if (
+            priced := {
+                unit_id: row
+                for unit_id, row in by_unit.items()
+                if row.price is not None or row.duration_min is not None
+            }
+        )
+    }
     if not terms:
         return price
     entry = next(

@@ -529,3 +529,178 @@ def test_llm_context_silent_without_block():
     assert "não às" not in text and "não aos" not in text
     assert "Sede: Cirurgia, Retorno | Centro: Cirurgia, Retorno" in text
     assert "Dra. Bia: Cirurgia, Retorno" in text
+
+
+# ====================================================== D4: days-only rows hide no price
+
+
+def test_nearest_price_is_kept_when_the_owner_only_has_days_only_rows():
+    from secretaria.workers.shared import llm_context
+
+    service_id, unit_id, owner_id = uuid4(), uuid4(), uuid4()
+    owner = SimpleNamespace(
+        id=owner_id,
+        # an inherited list (no own entries) would hide the price if days-only rows counted
+        appointment_types=None,
+        service_unit_terms={
+            service_id: {unit_id: UnitTerms(None, None, frozenset({"monday"}))},
+        },
+    )
+    matched = RuntimeAppointmentType(
+        name="Cirurgia", description=None, duration_min=30, price="R$ 300,00"
+    )
+    nearest = {"professional_id": str(owner_id), "unit_id": str(unit_id)}
+    assert llm_context._nearest_price(nearest, "Cirurgia", matched, [owner]) == "R$ 300,00"
+    # a row that does carry a price keeps the old guarded behaviour (never a wrong price)
+    owner.service_unit_terms = {service_id: {unit_id: UnitTerms("R$ 1,00", None, None)}}
+    assert llm_context._nearest_price(nearest, "Cirurgia", matched, [owner]) is None
+
+
+# ====================================================== A4: unreadable days = its own message
+
+
+@pytest.mark.asyncio
+async def test_unreadable_days_refuse_with_the_service_days_message_on_all_three_tools(
+    db,  # noqa: F811
+    monkeypatch,
+):
+    from secretaria.ai import unit_scope
+
+    world = await _world(db, base_blocked=["monday"], second_doctor=True)
+    agenda = _Agenda()
+
+    async def _calendar(tenant_id, professional):
+        return agenda
+
+    async def _boom(*_args, **_kwargs):
+        raise RuntimeError("days read down")
+
+    monkeypatch.setattr(mp, "_professional_calendar", _calendar)
+    monkeypatch.setattr(unit_scope, "service_day_refusal_for", _boom)
+    expected = ai_tools.SERVICE_DAYS_LOOKUP_FAILED_ERROR
+    assert expected != ai_tools.UNIT_LOOKUP_FAILED_ERROR
+    with _context(
+        world.tenant.id, calendar=agenda, sole=world.ana.id, catalog=("Cirurgia", "Retorno")
+    ):
+        base = await ai_tools.create_event.ainvoke({"appointment_type": "Cirurgia", **TUESDAY})
+        other = await mp.create_event_for_professional.ainvoke(
+            {"professional_name": "Dr. Bruno", "appointment_type": "Cirurgia", **TUESDAY}
+        )
+    assert base["error"] == expected and other["error"] == expected
+    assert agenda.log["created"] == [] and await _booked(db) == []
+
+    unit_world = await _world(db, units=("Sede", "Centro"))
+    unit_agenda = _Agenda()
+    with _context(
+        unit_world.tenant.id,
+        calendar=unit_agenda,
+        sole=unit_world.ana.id,
+        catalog=("Cirurgia", "Retorno"),
+    ):
+        at_unit = await mu.create_event_at_unit.ainvoke(
+            {
+                "unit_name": "Centro",
+                "appointment_type": "Cirurgia",
+                **{**TUESDAY, "start": "2026-07-14T10:00:00", "end": "2026-07-14T10:30:00"},
+            }
+        )
+    assert at_unit["error"] == expected
+    assert unit_agenda.log["created"] == [] and await _booked(db) == []
+
+
+# ====================================================== A5: one terms read, units of the service
+
+
+async def _add_norte(db, world, *, mark_units: tuple[str, ...] | None):  # noqa: F811
+    """A third unit (Norte) for Ana; `mark_units` restricts Cirurgia to those unit names."""
+    from secretaria.models import ProfessionalServiceUnit
+
+    async with db() as session:
+        norte = Unit(id=uuid4(), tenant_id=world.tenant.id, name="Norte", address="Rua Norte, 1")
+        session.add(norte)
+        await session.flush()
+        session.add(
+            ProfessionalUnit(
+                professional_id=world.ana.id, unit_id=norte.id, business_hours=ALL_DAY, sort_order=2
+            )
+        )
+        for name in mark_units or ():
+            unit = world.units.get(name)
+            session.add(
+                ProfessionalServiceUnit(
+                    professional_id=world.ana.id,
+                    service_id=world.cirurgia.id,
+                    unit_id=unit.id,
+                )
+            )
+        await session.commit()
+    return norte
+
+
+def _patch_tool_load_terms(monkeypatch, behaviour):
+    """Replace `load_terms` ONLY while the availability tool reads (the config load uses it too)."""
+    from secretaria.services import service_terms
+
+    real_load, real_scope, active = service_terms.load_terms, at._service_unit_scope, []
+
+    async def load(*args, **kwargs):
+        if active:
+            return await behaviour(real_load, *args, **kwargs)
+        return await real_load(*args, **kwargs)
+
+    async def scope(*args, **kwargs):
+        active.append(1)
+        try:
+            return await real_scope(*args, **kwargs)
+        finally:
+            active.pop()
+
+    monkeypatch.setattr(service_terms, "load_terms", load)
+    monkeypatch.setattr(at, "_service_unit_scope", scope)
+
+
+@pytest.mark.asyncio
+async def test_availability_reads_the_terms_once_for_all_units(db, monkeypatch):  # noqa: F811
+    world = await _world(db, units=("Sede", "Centro"), unit_days={"Sede": ["monday"]})
+    await _add_norte(db, world, mark_units=None)
+    calls: list[int] = []
+
+    async def counting(real, *args, **kwargs):
+        calls.append(1)
+        return await real(*args, **kwargs)
+
+    _patch_tool_load_terms(monkeypatch, counting)
+    result = await _availability(db, monkeypatch, world, {"service": "Cirurgia"})
+    assert len(calls) == 1
+    monday = _next_monday().isoformat()
+    assert {w.get("unit") for w in result["windows"] if w["day"] == monday} == {"Centro", "Norte"}
+
+
+@pytest.mark.asyncio
+async def test_availability_unreadable_terms_fall_back_to_the_base_for_every_unit(
+    db,  # noqa: F811
+    monkeypatch,
+):
+    world = await _world(
+        db, base_blocked=["monday"], units=("Sede", "Centro"), unit_days={"Sede": []}
+    )
+
+    async def boom(_real, *_args, **_kwargs):
+        raise RuntimeError("terms down")
+
+    _patch_tool_load_terms(monkeypatch, boom)
+    result = await _availability(db, monkeypatch, world, {"service": "Cirurgia"})
+    # Sede's own "nothing blocked" is unreadable: the base (Monday blocked) holds everywhere.
+    assert _next_monday().isoformat() not in _days(result)
+    assert (_next_monday() + timedelta(days=1)).isoformat() in _days(result)
+
+
+@pytest.mark.asyncio
+async def test_availability_only_lists_the_units_that_do_the_service(db, monkeypatch):  # noqa: F811
+    world = await _world(db, units=("Sede", "Centro"))
+    await _add_norte(db, world, mark_units=("Sede", "Centro"))
+    result = await _availability(db, monkeypatch, world, {"service": "Cirurgia"})
+    assert {w.get("unit") for w in result["windows"]} == {"Sede", "Centro"}
+    # another service of the same doctor has no marks: every unit
+    other = await _availability(db, monkeypatch, world, {"service": "Retorno"})
+    assert {w.get("unit") for w in other["windows"]} == {"Sede", "Centro", "Norte"}

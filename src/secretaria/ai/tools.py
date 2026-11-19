@@ -546,6 +546,13 @@ UNIT_LOOKUP_FAILED_ERROR = (
     "Tente de novo em instantes ou chame start_guided_booking para seguir pelos botões."
 )
 
+# Said when the service's blocked weekdays could not be read before a WRITE (TASK-087 A4):
+# fail-closed, and about the SERVICE days - a clinic without units has no unit to confirm.
+SERVICE_DAYS_LOOKUP_FAILED_ERROR = (
+    "Não consegui confirmar os dias deste serviço agora, então não marquei a consulta. "
+    "Tente de novo em instantes."
+)
+
 
 async def _sole_professional_unit(
     tool_name: str, *, fail_closed: bool = False
@@ -647,7 +654,7 @@ async def _service_day_refusal(
         logger.warning(
             "agent_tool_service_day_check_failed", tool=tool_name, error=type(exc).__name__
         )
-        return {"error": UNIT_LOOKUP_FAILED_ERROR}
+        return {"error": SERVICE_DAYS_LOOKUP_FAILED_ERROR}
     return {"error": refusal} if refusal is not None else None
 
 
