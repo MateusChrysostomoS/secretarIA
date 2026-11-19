@@ -6516,11 +6516,22 @@ def _appointment_local_start(appt: dict, tenant: Tenant | None) -> datetime | No
 
 
 def _appt_row_label(appt: dict, tenant: Tenant | None = None) -> str:
-    """Compact list-row title for one appointment (WhatsApp caps titles at 24)."""
+    """List-row title for one appointment: "Sáb, 28/11 10:00" (WhatsApp caps titles at 24).
+
+    Only the day and time: with the weekday in front (TASK-087 D4) a service after them was cut
+    mid-word (review P4) - the service rides in the row's description (`_appt_row_description`).
+    """
     start = _appointment_local_start(appt, tenant)
     when = f"{short_day_label(start)} {start.strftime('%H:%M')}" if start is not None else "?"
-    appt_type = str(appt.get("appointment_type") or "Consulta")
-    return truncate_list_row_title(f"{when} {appt_type}")
+    return truncate_list_row_title(when)
+
+
+def _appt_row_description(appt: dict) -> str:
+    """The pick-list row's description: the appointment's service, whole (up to the 72-char
+    description cap)."""
+    return truncate_plain(
+        str(appt.get("appointment_type") or "Consulta"), MAX_LIST_ROW_DESCRIPTION_CHARS
+    )
 
 
 def _appt_summary(appt: dict, tenant: Tenant | None = None) -> str:
@@ -6601,7 +6612,11 @@ def _manage_pick_list_bubble(
             shown=MAX_MANAGE_APPOINTMENT_ROWS,
         )
     rows = [
-        (f"slot|{appt['start_at'].isoformat()}", _appt_row_label(appt, tenant))
+        (
+            f"slot|{appt['start_at'].isoformat()}",
+            _appt_row_label(appt, tenant),
+            _appt_row_description(appt),
+        )
         for appt in valid[:MAX_MANAGE_APPOINTMENT_ROWS]
     ]
     return SlotsBubble(

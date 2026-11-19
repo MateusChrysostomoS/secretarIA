@@ -122,7 +122,8 @@ dia depois bloqueado.
 ## Dia da semana nas listas do paciente (D4)
 
 Um helper só, `services/booking_dates.py::short_day_label` ("Seg, 24/11") e `short_day_phrase` ("seg, 24/11"), usados
-por: título dos horários ("Horários livres em seg, 24/11:" / "Novos horários em ..."), `_appt_row_label`, "Livre/Ocupado
+por: título dos horários ("Horários livres em seg, 24/11:" / "Novos horários em ..."), `_appt_row_label` (só dia e
+hora; o serviço vai na descrição da linha — revisão P4), "Livre/Ocupado
 seg, dd/mm hh:mm" do "Alterar dados", notas de intervalo da IA ("de seg, 05/10 a seg, 12/10"), `FreeWindow.payload()`
 (ganhou `weekday`) e a allowlist `ai/tool_output.py` (mantém `weekday` em `windows[]`; sem isso a IA nunca o veria).
 Os botões de dia já eram assim. Limite do WhatsApp (24 caracteres) respeitado. Confirmações, lembretes e e-mails não
