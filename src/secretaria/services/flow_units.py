@@ -35,11 +35,13 @@ from secretaria.services.service_catalog import entry_service_id
 from secretaria.services.service_terms import (
     ResolvedTerms,
     TermsByService,
+    blocked_weekdays_everywhere,
+    blocked_weekdays_for,
     price_differs_across_units,
     resolve_terms,
     terms_for_entry,
 )
-from secretaria.services.unit_booking import scoped_calendar
+from secretaria.services.unit_booking import scoped_calendar, service_calendar
 
 if TYPE_CHECKING:
     from secretaria.services.insurance_acceptance import AcceptanceExceptions
@@ -171,6 +173,36 @@ def terms_at(professional: Any | None, entry: Mapping, unit_id: UUID | None) -> 
     """`entry`'s effective price/duration for this professional at `unit_id` (None = base)."""
     terms = terms_for_entry(service_unit_terms_of(professional), entry)
     return resolve_terms(entry, terms, unit_id)
+
+
+def blocked_weekdays_of(
+    professional: Any | None, entry: Mapping | None, unit_id: UUID | None
+) -> frozenset[str]:
+    """Weekdays patients cannot book `entry`'s service with `professional` (TASK-087).
+
+    Unit given: that unit's rule (its own list, else the base). No unit yet and the professional
+    does the service at bookable units: only the days blocked at EVERY one of them (R1 - a day
+    stays while any unit allows it). No units: the base. No service known (`entry` None): nothing
+    (R5). Pure: reads the snapshot's `service_unit_terms` (older snapshots predate it = base).
+    """
+    if entry is None:
+        return frozenset()
+    terms = terms_for_entry(service_unit_terms_of(professional), entry)
+    if unit_id is not None:
+        return blocked_weekdays_for(entry, terms, unit_id)
+    units = units_for_service(professional, entry_service_id(entry))
+    return blocked_weekdays_everywhere(entry, terms, [unit.id for unit in units])
+
+
+def service_scoped_calendar(
+    calendar: Any, professional: Any | None, entry: Mapping | None, unit: Any | None
+) -> Any:
+    """The agenda a patient books `entry` on: seen from `unit` (`scoped_calendar`) and without
+    the service's blocked weekdays there (`service_calendar`). The one place both apply."""
+    unit_id = getattr(unit, "id", None) if unit is not None else None
+    return service_calendar(
+        scoped_calendar(calendar, unit), blocked_weekdays_of(professional, entry, unit_id)
+    )
 
 
 @dataclass(frozen=True)
@@ -511,6 +543,7 @@ __all__ = [
     "UNIT_LIST_BODY",
     "UnitChoice",
     "appointment_calendar",
+    "blocked_weekdays_of",
     "bookable_units",
     "effective_unit",
     "find_unit",
@@ -518,6 +551,7 @@ __all__ = [
     "offered_units",
     "scope",
     "selected_unit_id",
+    "service_scoped_calendar",
     "service_units_of",
     "services_at_unit",
     "union_hours",

@@ -227,6 +227,27 @@ def terms_for_entry(
     return terms.get(service_id)
 
 
+async def blocked_weekdays_at(
+    session: AsyncSession,
+    tenant_id: UUID,
+    professional_id: UUID | None,
+    entry: Mapping | None,
+    unit_id: UUID | None,
+) -> frozenset[str]:
+    """`blocked_weekdays_for` for DB readers (TASK-087): the AI tools, a booked appointment.
+
+    No entry = nothing blocked (R5). The BASE without any query when `unit_id` or
+    `professional_id` is None or the entry has no service_id; otherwise that professional's rows
+    are loaded tenant-scoped (another tenant's rows never count) and resolved at `unit_id`.
+    """
+    if entry is None:
+        return frozenset()
+    if unit_id is None or professional_id is None or entry_service_id(entry) is None:
+        return blocked_weekdays_for(entry, None, None)
+    terms = await load_terms(session, tenant_id, professional_id)
+    return blocked_weekdays_for(entry, terms_for_entry(terms, entry), unit_id)
+
+
 async def resolve_entry_at_unit(
     session: AsyncSession,
     tenant_id: UUID,

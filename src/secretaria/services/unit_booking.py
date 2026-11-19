@@ -17,9 +17,9 @@ exactly today's.
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Collection, Iterable
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime
 from types import SimpleNamespace
 from typing import Any
 from uuid import UUID
@@ -37,7 +37,7 @@ from secretaria.services.professional_service_units import (
     read_marks,
     read_marks_for,
 )
-from secretaria.services.service_terms import load_terms_for
+from secretaria.services.service_terms import WEEKDAY_KEYS, load_terms_for
 from secretaria.services.tenant_config import professional_business_hours
 
 logger = get_logger(__name__)
@@ -287,6 +287,70 @@ def scoped_calendar(calendar: Any, unit: Any | None, *, with_hours: bool = True)
     )
 
 
+def service_calendar(calendar: Any, blocked: Collection[str] | None) -> Any:
+    """`calendar` without the service's `blocked` weekdays (TASK-087), or `calendar` itself.
+
+    Unchanged when nothing is blocked, and for a calendar without the seam (a test double that
+    implements only `with_unit`): the block is then simply not applied.
+    """
+    if not blocked or calendar is None:
+        return calendar
+    with_blocked = getattr(calendar, "with_blocked_weekdays", None)
+    if not callable(with_blocked):
+        return calendar
+    return with_blocked(frozenset(blocked))
+
+
+def blocked_on(day: date | datetime, blocked: Collection[str] | None) -> bool:
+    """Whether `day`'s weekday is one of `blocked`. A datetime must be on the clinic's clock."""
+    return bool(blocked) and WEEKDAY_KEYS[day.weekday()] in blocked
+
+
+# Plural weekday names for a sentence ("não é feito às segundas"), Monday first.
+_WEEKDAY_PLURAL_PT = {
+    "monday": "segundas",
+    "tuesday": "terças",
+    "wednesday": "quartas",
+    "thursday": "quintas",
+    "friday": "sextas",
+    "saturday": "sábados",
+    "sunday": "domingos",
+}
+_MASCULINE_DAYS = frozenset({"saturday", "sunday"})
+
+
+def _ordered_days(keys: Collection[str] | None) -> list[str]:
+    return [day for day in WEEKDAY_KEYS if day in (keys or ())]
+
+
+def weekday_plural_pt(keys: Collection[str] | None) -> str:
+    """ "segundas e sextas" - known keys only, Monday first, commas then " e ". "" for none."""
+    names = [_WEEKDAY_PLURAL_PT[day] for day in _ordered_days(keys)]
+    if len(names) <= 1:
+        return "".join(names)
+    return f"{', '.join(names[:-1])} e {names[-1]}"
+
+
+def service_day_refusal(
+    service_name: str, professional_name: str | None, blocked: Collection[str] | None
+) -> str:
+    """The patient's sentence for a service asked on a day it is not done (TASK-087).
+
+    "Cirurgia com Dra. Ana não é feito às segundas. Posso ver outro dia?" - " com <médico>" only
+    when known; "aos" when the first day is Saturday/Sunday; "nesse dia" when no day is known.
+    """
+    service = _clean(service_name)
+    doctor = _clean(professional_name)
+    who = f"{service} com {doctor}" if doctor else service
+    days = _ordered_days(blocked)
+    if not days:
+        when = "nesse dia"
+    else:
+        preposition = "aos" if days[0] in _MASCULINE_DAYS else "às"
+        when = f"{preposition} {weekday_plural_pt(days)}"
+    return f"{who} não é feito {when}. Posso ver outro dia?"
+
+
 async def tenant_unit(session: AsyncSession, tenant_id: UUID, unit_id: UUID | None) -> Unit | None:
     """The tenant's own unit row (any state), or None - never another clinic's."""
     if unit_id is None:
@@ -382,6 +446,7 @@ __all__ = [
     "UnitOption",
     "UnitRefused",
     "attach_unit_options",
+    "blocked_on",
     "booking_unit_fields",
     "calendar_at_unit",
     "check_unit",
@@ -390,11 +455,14 @@ __all__ = [
     "professional_name",
     "professional_terms_view",
     "scoped_calendar",
+    "service_calendar",
+    "service_day_refusal",
     "service_offered_at_unit",
     "tenant_unit",
     "unit_fields",
     "unit_line",
     "unit_location",
     "unit_options_for",
+    "weekday_plural_pt",
     "within_hours",
 ]
