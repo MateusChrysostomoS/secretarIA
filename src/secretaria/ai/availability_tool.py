@@ -6,7 +6,7 @@ Spec §4.6. On the v2 toolset (`flow_router.ai_draft_v2_enabled`) the AI loses
 `cancel_event` there only stage the confirmation card, ai/staging_tools.py). What it keeps,
 to answer "tem horário semana que vem?", is this tool, and the answer has exactly one shape:
 
-    {"windows": [{"day": "2026-10-08", "start": "08:00", "end": "11:20"}, ...],
+    {"windows": [{"day": "2026-10-08", "weekday": "qui", "start": "08:00", "end": "11:20"}, ...],
      "timezone": "America/Sao_Paulo", "slot_minutes": 40,
      "day_from": "2026-10-05", "day_to": "2026-10-18"}      (+ `professional`, `clamped`, `note`)
 
@@ -74,6 +74,7 @@ from secretaria.services.booking_scope import (
 )
 from secretaria.services.calendar import CalendarService, CalendarUnavailableError
 from secretaria.services.flow_router import DAY_PICKER_WINDOW_DAYS
+from secretaria.services.service_catalog import entry_service_id
 from secretaria.services.unit_booking import scoped_calendar, service_calendar
 
 logger = get_logger(__name__)
@@ -262,26 +263,62 @@ async def _resolve_target(tenant_id: UUID, professional: str, service: str) -> _
     )
 
 
-async def _unit_minutes(tenant_id: UUID, target: _Target, units: list) -> dict[UUID, int]:
-    """{unit id: minutes} for the units where the named service has its OWN duration (D7).
+async def _service_unit_scope(
+    tenant_id: UUID, target: _Target, units: list
+) -> tuple[list, bool, Any | None]:
+    """The units the named service is done at, plus the professional's terms - ONE session.
 
-    Read once, scoped to `tenant_id` (services/service_terms.py). A unit absent from the result
-    keeps `target.slot_minutes` - today's duration - and so does everything without units, a
-    named service or a professional. A failed read degrades to that same base, like the units
-    read above it (a read tool; the flow re-checks the slot when booking).
+    Returns `(units, restricted_to_none, terms)`:
+    * `units`: the bookable units narrowed to the ones the doctor marked for the service
+      (TASK-083 `professional_service_units`; no marks = all of them, as `units_for_service`
+      does). A restriction whose units are all closed yields `[]` with the flag set - never
+      "all". A failed marks read keeps every unit (a read tool; the booking re-checks).
+    * `terms`: the exception rows of THIS service (`terms_for_entry`), read once for both the
+      per-unit durations (D7) and the per-unit blocked days (TASK-087). None when there is
+      nothing to read (no units, professional, or linked service) or the read FAILED - the
+      callers then fall back to the base for every unit (R8), like the units read above.
+
+    Everything is scoped to `tenant_id` (services/service_terms.py).
     """
     entry, professional = target.entry, target.professional
     if not units or professional is None or not isinstance(entry, dict):
-        return {}
+        return units, False, None
+    service_id = entry_service_id(entry)
+    if service_id is None:
+        return units, False, None
     from secretaria.core.database import async_session_factory
-    from secretaria.services.service_terms import load_terms, resolve_terms, terms_for_entry
+    from secretaria.services.professional_service_units import allowed_unit_ids, read_marks
+    from secretaria.services.service_terms import load_terms, terms_for_entry
 
-    try:
-        async with async_session_factory() as session:
+    restricted_to_none = False
+    terms = None
+    async with async_session_factory() as session:
+        try:
+            allowed = allowed_unit_ids(await read_marks(session, professional.id), service_id)
+            if allowed is not None:
+                units = [unit for unit in units if unit.id in allowed]
+                restricted_to_none = not units
+        except Exception as exc:  # noqa: BLE001 - see the docstring
+            logger.warning("agent_availability_marks_failed", error_type=type(exc).__name__)
+        try:
             terms = terms_for_entry(await load_terms(session, tenant_id, professional.id), entry)
-    except Exception as exc:  # noqa: BLE001 - see the docstring
-        logger.warning("agent_availability_unit_terms_failed", error_type=type(exc).__name__)
+        except Exception as exc:  # noqa: BLE001 - see the docstring
+            logger.warning("agent_availability_unit_terms_failed", error_type=type(exc).__name__)
+    return units, restricted_to_none, terms
+
+
+def _unit_minutes(target: _Target, units: list, terms: Any | None) -> dict[UUID, int]:
+    """{unit id: minutes} for the units where the named service has its OWN duration (D7).
+
+    A unit absent from the result keeps `target.slot_minutes` - today's duration - and so does
+    everything without units, a named service or a professional, and a failed terms read
+    (`terms` None): the base, like the units read (a read tool; the flow re-checks the slot).
+    """
+    entry = target.entry
+    if not units or terms is None or not isinstance(entry, dict):
         return {}
+    from secretaria.services.service_terms import resolve_terms
+
     out: dict[UUID, int] = {}
     for unit in units:
         resolved = resolve_terms(entry, terms, unit.id)
@@ -290,34 +327,25 @@ async def _unit_minutes(tenant_id: UUID, target: _Target, units: list) -> dict[U
     return out
 
 
-async def _unit_blocked_days(
-    tenant_id: UUID, target: _Target, units: list
+def _unit_blocked_days(
+    target: _Target, units: list, terms: Any | None
 ) -> dict[UUID | None, frozenset[str]]:
     """{unit id (None = no unit): weekdays the named service is NOT done on} (TASK-087).
 
-    Only with a named service of a professional (R5: no service, no filter). One read of the
-    professional's exception rows, scoped to `tenant_id`; a unit without its own list gets the
-    base. A failed read degrades to the BASE list for every unit - the booking tools still
-    refuse a blocked day at confirmation (G3), so this read never lets one through.
+    Only with a named service of a professional (R5: no service, no filter). A unit without its
+    own list gets the base. `terms` None (nothing to read, or the read failed) = the BASE list
+    for every unit (R8) - the booking tools still refuse a blocked day at confirmation (G3), so
+    this read never lets one through.
     """
     entry, professional = target.entry, target.professional
     if professional is None or not isinstance(entry, dict):
         return {}
-    from secretaria.core.database import async_session_factory
-    from secretaria.services.service_terms import blocked_weekdays_at, blocked_weekdays_for
+    from secretaria.services.service_terms import blocked_weekdays_for
 
-    base = blocked_weekdays_for(entry, None, None)
-    try:
-        async with async_session_factory() as session:
-            return {
-                unit.id if unit else None: await blocked_weekdays_at(
-                    session, tenant_id, professional.id, entry, unit.id if unit else None
-                )
-                for unit in units or [None]
-            }
-    except Exception as exc:  # noqa: BLE001 - see the docstring
-        logger.warning("agent_availability_blocked_days_failed", error_type=type(exc).__name__)
-        return {unit.id if unit else None: base for unit in units or [None]}
+    return {
+        unit.id if unit else None: blocked_weekdays_for(entry, terms, unit.id if unit else None)
+        for unit in units or [None]
+    }
 
 
 def _fmt(day: date) -> str:
@@ -385,13 +413,15 @@ async def _read_availability(
         offered = []
     units = [unit for unit in offered if unit.bookable]
     # TASK-085 D7: each unit's windows are sized with the service's duration AT that unit.
-    own_minutes = await _unit_minutes(tenant_id, target, units)
+    # Only the units the doctor does the named service at (marks), read together with the terms.
+    units, no_unit_does_it, terms = await _service_unit_scope(tenant_id, target, units)
+    own_minutes = _unit_minutes(target, units, terms)
     # TASK-087: the weekdays the named service is not done on, per unit (none without a service).
-    blocked_by_unit = await _unit_blocked_days(tenant_id, target, units)
+    blocked_by_unit = _unit_blocked_days(target, units, terms)
     scanned: set[int] = set()
     labelled: list[tuple[Any, str | None]] = []
     truncated = False
-    for unit in units or [None]:
+    for unit in [] if no_unit_does_it else units or [None]:
         minutes = own_minutes.get(unit.id, target.slot_minutes) if unit else target.slot_minutes
         scanned.add(minutes)
         unit_scan = await scan_free_windows(
@@ -455,7 +485,7 @@ async def get_availability(
     day_to: str = "",
 ) -> dict:
     """Consulta os HORÁRIOS LIVRES da agenda de um profissional - só isso. Devolve janelas
-    {day, start, end} no fuso da clínica (campo `timezone`), já sem os horários
+    {day, weekday, start, end} no fuso da clínica (campo `timezone`), já sem os horários
     indisponíveis (nunca diga que um horário está "reservado" para alguém).
     Nunca devolve compromissos, nomes nem horários ocupados: o
     que não está na lista não está livre. Use para responder "tem horário?" ou "tem vaga

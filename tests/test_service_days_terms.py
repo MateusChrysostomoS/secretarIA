@@ -221,3 +221,26 @@ async def test_load_terms_distinguishes_empty_list_from_null(db):
     async with db() as s:
         got = await load_terms(s, w.tenant.id, w.doctor.id)
     assert got[w.service.id][w.sede.id].blocked_weekdays == frozenset()
+
+
+@pytest.mark.asyncio
+async def test_python_none_everywhere_is_sql_null_so_the_check_refuses_it(db):
+    """D2: a JSON column would store the literal `null` and slip past the CHECK."""
+    w = await _world(db)
+    async with db() as s:
+        s.add(_row(w, w.sede, price=None, duration_min=None, blocked_weekdays=None))
+        with pytest.raises(IntegrityError):
+            await s.commit()
+
+
+@pytest.mark.asyncio
+async def test_none_days_with_a_price_reads_back_as_none_inherit(db):
+    from sqlalchemy import select
+
+    w = await _world(db)
+    async with db() as s:
+        s.add(_row(w, w.sede, price="R$ 10,00", blocked_weekdays=None))
+        await s.commit()
+    async with db() as s:
+        row = await s.scalar(select(ProfessionalServiceUnitTerms))
+        assert row.blocked_weekdays is None

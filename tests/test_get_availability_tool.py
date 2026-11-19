@@ -488,7 +488,7 @@ def test_the_model_facing_contract_is_pinned_for_the_prompt_writer():
     text = tool.description
     for phrase in (
         "HORÁRIOS LIVRES",
-        "{day, start, end}",
+        "{day, weekday, start, end}",
         "Nunca devolve compromissos, nomes nem horários ocupados",
         "set_booking_draft",
         "create_event",

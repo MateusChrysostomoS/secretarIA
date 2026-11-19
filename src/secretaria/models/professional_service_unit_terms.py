@@ -62,7 +62,7 @@ class ProfessionalServiceUnitTerms(Base):
     duration_min: Mapped[int | None] = mapped_column(Integer, nullable=True)
     # TASK-087: weekdays (`monday`..`sunday`) patients cannot book this service at this unit.
     # NULL = inherit the base list of the professional's entry; [] = own, nothing blocked.
-    blocked_weekdays: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    blocked_weekdays: Mapped[list | None] = mapped_column(JSON(none_as_null=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
