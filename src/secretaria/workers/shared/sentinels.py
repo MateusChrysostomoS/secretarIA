@@ -742,7 +742,9 @@ async def _handle_start_guided_booking(
         conversation_id=reply.conversation_id,
         professional_id=selected_id,
         insurance=ctx.conversation.flow_selected_insurance,
-        professionals=ctx.professional_rows,
+        # The router-shaped roster (units, unit marks and per-unit terms attached), never the
+        # ORM rows: the day picker reads the unit's hours and blocked weekdays off it (P1).
+        professionals=ctx.professionals,
         attendee_name=ctx.conversation.flow_attendee_name,
     )
     logger.info(
@@ -984,10 +986,11 @@ async def _legacy_booking_draft(
                 services=professional_appointment_types(
                     professional, tenant_snapshot, service_catalog
                 ),
-                professionals=professional_rows,
+                professionals=ctx.professionals,
                 attendee_name=attendee,
             )
     else:
+        # `ctx.professionals`, the router-shaped roster: see `_handle_start_guided_booking`.
         result = await enter_guided_booking(
             tenant_snapshot,
             booking_calendar,
@@ -995,7 +998,7 @@ async def _legacy_booking_draft(
             conversation_id=reply.conversation_id,
             professional_id=selected_id,
             insurance=insurance,
-            professionals=professional_rows,
+            professionals=ctx.professionals,
             attendee_name=attendee,
         )
     logger.info(

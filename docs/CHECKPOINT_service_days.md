@@ -65,8 +65,9 @@ Helpers que aplicam/consultam o filtro (nenhum caminho do paciente reimplementa 
 - `services/unit_booking.py`: `service_calendar(calendar, blocked)` (sem bloqueio = o mesmo objeto), `blocked_on`,
   `weekday_plural_pt`, `service_day_refusal(serviço, médico, dias)` — a frase "<serviço> com <médico> não é feito às
   segundas. Posso ver outro dia?".
-- `services/flow_units.py`: `blocked_weekdays_of(professional, entry, unit_id)` (sem unidade = só o bloqueado em
-  todas, R1; sem entrada = nada, R5) e `service_scoped_calendar(calendar, professional, entry, unit)`.
+- `services/flow_units.py`: `blocked_weekdays_of(professional, entry, unit_id)` (sem unidade = o bloqueado em
+  todas + o dia em que toda unidade que ABRE nele o bloqueia, R1/revisão P2; sem entrada = nada, R5). A agenda do
+  paciente com unidade + dias é montada só em `flow_router._service_scoped` (substitui o conjunto anterior).
 - `services/service_terms.py`: os resolvedores acima.
 
 ## Onde cada caminho do paciente aplica

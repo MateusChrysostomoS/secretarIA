@@ -28,7 +28,7 @@ from secretaria.services.manage_request import (  # noqa: E402
     resolve_manage_request,
 )
 from secretaria.services.service_terms import UnitTerms  # noqa: E402
-from secretaria.services.unit_booking import UnitOption  # noqa: E402
+from secretaria.services.unit_booking import UnitOption, service_day_refusal  # noqa: E402
 from tests._local_agenda import (  # noqa: E402
     WEEK_HOURS,
     agenda,
@@ -491,6 +491,67 @@ async def test_reschedule_at_the_appointments_unit_uses_its_days(db):  # noqa: F
 
     assert 4 not in _weekdays(await reschedule(centro))
     assert 4 in _weekdays(await reschedule(sul))
+
+
+async def test_reschedule_without_unit_blocks_a_day_no_open_unit_allows(db):  # noqa: F811
+    """Review P2 / R1: Centro opens Mon-Fri and blocks Monday (own list); Norte opens Tue-Fri and
+    inherits the empty base. An appointment without a unit is offered within the UNION of the
+    units' hours (Monday comes from Centro), yet no unit does Cirurgia on Monday: no Monday row,
+    and a forged confirmation on a Monday is refused."""
+    mon_fri = ("monday", "tuesday", "wednesday", "thursday", "friday")
+    centro = UnitOption(
+        id=uuid4(), name="Centro", address=None, business_hours={d: WEEK_HOURS[d] for d in mon_fri}
+    )
+    norte = UnitOption(
+        id=uuid4(),
+        name="Norte",
+        address=None,
+        business_hours={d: WEEK_HOURS[d] for d in mon_fri[1:]},
+    )
+    doctor = _doctor(
+        units=(centro, norte),
+        terms={CIRURGIA_ID: {centro.id: UnitTerms(None, None, frozenset({"monday"}))}},
+    )
+    appt = _appointment(doctor)  # no unit: from before the units, or a reception "encaixe"
+    cal = await _agenda(db)
+
+    listed = await fr.route(
+        _conversation(
+            flow_state=FlowState.MANAGE_BOOKING,
+            flow_step=fr.STEP_MANAGE_ACTION,
+            flow_selected_type=None,
+            flow_managing_appointment_id=fr._appt_uuid(appt),
+        ),
+        _tenant(doctor.appointment_types),
+        cal,
+        fr.LABEL_RESCHEDULE,
+        upcoming_appointments=[appt],
+        professionals=[doctor],
+    )
+    assert listed.flow_step == fr.STEP_MANAGE_DAY
+    assert 0 not in _weekdays(listed)
+
+    monday = _next(0)
+    forged = await fr.route(
+        _conversation(
+            flow_state=FlowState.MANAGE_BOOKING,
+            flow_step=fr.STEP_MANAGE_CONFIRM,
+            flow_selected_type=None,
+            flow_managing_appointment_id=fr._appt_uuid(appt),
+            flow_selected_day=monday.isoformat(),
+            flow_selected_slot=f"{monday.isoformat()}T09:00",
+        ),
+        _tenant(doctor.appointment_types),
+        cal,
+        fr.LABEL_CONFIRM,
+        upcoming_appointments=[appt],
+        professionals=[doctor],
+    )
+    assert forged.appointment_reschedule is None
+    assert forged.flow_step == fr.STEP_MANAGE_DAY
+    assert _slots_bubble(forged).body.startswith(
+        service_day_refusal("Cirurgia", "Dra. Ana", frozenset({"monday"}))
+    )
 
 
 # --------------------------------------------------------------------------- colleague offer (R1)

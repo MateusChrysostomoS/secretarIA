@@ -14,7 +14,7 @@ from uuid import uuid4
 import pytest
 
 from secretaria.models import Professional, ProfessionalServiceUnitTerms, Service, Unit
-from secretaria.services import flow_units, service_terms, unit_booking
+from secretaria.services import flow_router, flow_units, service_terms, unit_booking
 from secretaria.services.local_calendar import LocalCalendarService
 from secretaria.services.service_terms import UnitTerms
 from secretaria.services.unit_booking import UnitOption
@@ -239,6 +239,40 @@ def test_blocked_weekdays_of_unit_none_only_counts_units_of_the_service():
     assert flow_units.blocked_weekdays_of(doctor, entry, None) == frozenset({"friday"})
 
 
+def _open_on(*days: str, name: str = "Unidade") -> UnitOption:
+    return UnitOption(
+        id=uuid4(), name=name, address=None, business_hours={day: MORNINGS for day in days}
+    )
+
+
+MON_FRI = ("monday", "tuesday", "wednesday", "thursday", "friday")
+
+
+def test_blocked_weekdays_of_unit_none_blocks_a_day_no_open_unit_allows():
+    """Review P2 / R1: Centro opens Mon-Fri and blocks Monday (its own list); Norte opens Tue-Fri
+    and inherits the empty base. The plain intersection of the lists is empty, but no unit that
+    OPENS on Monday does the service then - Monday is blocked."""
+    centro, norte = _open_on(*MON_FRI, name="Centro"), _open_on(*MON_FRI[1:], name="Norte")
+    doctor = _doctor(
+        units=(centro, norte),
+        terms={SERVICE: {centro.id: UnitTerms(None, None, frozenset({"monday"}))}},
+    )
+
+    assert flow_units.blocked_weekdays_of(doctor, _entry(), None) == frozenset({"monday"})
+    assert flow_units.blocked_weekdays_of(doctor, _entry(), norte.id) == frozenset()
+
+
+def test_blocked_weekdays_of_unit_none_keeps_a_day_one_open_unit_allows():
+    """R1 still holds: Norte opening on Monday (inheriting the empty base) keeps Monday."""
+    centro, norte = _open_on(*MON_FRI, name="Centro"), _open_on(*MON_FRI, name="Norte")
+    doctor = _doctor(
+        units=(centro, norte),
+        terms={SERVICE: {centro.id: UnitTerms(None, None, frozenset({"monday"}))}},
+    )
+
+    assert flow_units.blocked_weekdays_of(doctor, _entry(), None) == frozenset()
+
+
 def test_blocked_weekdays_of_without_units_is_the_base():
     doctor = _doctor(units=())
     assert flow_units.blocked_weekdays_of(doctor, _entry(["monday"]), None) == {"monday"}
@@ -256,7 +290,11 @@ def test_blocked_weekdays_of_tolerates_an_old_snapshot():
     assert flow_units.blocked_weekdays_of(None, _entry(["sunday"]), None) == {"sunday"}
 
 
-async def test_service_scoped_calendar_uses_unit_hours_and_unit_block(db):
+# The one place a patient's agenda gets the unit's hours AND the service's days (review P7: the
+# unused `flow_units.service_scoped_calendar`, which could only ADD days, is gone).
+
+
+async def test_service_scoped_uses_unit_hours_and_unit_block(db):
     tenant = await seed_tenant(db)
     cal = agenda(tenant.id)
     centro = UnitOption(
@@ -270,7 +308,7 @@ async def test_service_scoped_calendar_uses_unit_hours_and_unit_block(db):
         terms={SERVICE: {centro.id: UnitTerms(None, None, frozenset({"tuesday"}))}},
     )
 
-    scoped = flow_units.service_scoped_calendar(cal, doctor, _entry(["monday"]), centro)
+    scoped = flow_router._service_scoped(cal, doctor, _entry(["monday"]), centro)
 
     assert scoped.unit_id == centro.id
     assert await scoped.list_free_slots(day=_local(cal, _next(1))) == []  # unit's own block
@@ -278,20 +316,36 @@ async def test_service_scoped_calendar_uses_unit_hours_and_unit_block(db):
     assert await scoped.list_free_slots(day=_local(cal, _next(2))) == []  # unit closed Wed
 
 
-async def test_service_scoped_calendar_without_unit_uses_base(db):
+async def test_service_scoped_without_unit_uses_base(db):
     tenant = await seed_tenant(db)
     cal = agenda(tenant.id)
     doctor = _doctor(units=())
 
-    scoped = flow_units.service_scoped_calendar(cal, doctor, _entry(["monday"]), None)
+    scoped = flow_router._service_scoped(cal, doctor, _entry(["monday"]), None)
 
     assert await scoped.list_free_slots(day=_local(cal, _next(0))) == []
     assert await scoped.list_free_slots(day=_local(cal, _next(1))) != []
 
 
-def test_service_scoped_calendar_without_block_is_scoped_calendar():
+async def test_service_scoped_replaces_a_stale_block(db):
+    """An agenda scoped earlier for another service (Monday blocked) and re-scoped for a service
+    without blocks offers Monday again: the set is replaced, never added to."""
+    tenant = await seed_tenant(db)
+    cal = agenda(tenant.id).with_blocked_weekdays({"monday"})
+    doctor = _doctor(units=())
+
+    scoped = flow_router._service_scoped(cal, doctor, _entry(), None)
+
+    assert await scoped.list_free_slots(day=_local(cal, _next(0))) != []
+
+
+def test_service_scoped_without_block_is_scoped_calendar():
     double = SimpleNamespace()
-    assert flow_units.service_scoped_calendar(double, _doctor(), _entry(), None) is double
+    assert flow_router._service_scoped(double, _doctor(), _entry(), None) is double
+
+
+def test_flow_units_has_no_additive_service_scope():
+    assert not hasattr(flow_units, "service_scoped_calendar")
 
 
 # --------------------------------------------------------------------------- service_terms (DB)
