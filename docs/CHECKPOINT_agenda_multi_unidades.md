@@ -12,6 +12,13 @@ Deploy e push só a pedido do dono.
 (`graphify-out/` é versionado e grande — atualizar na branch só geraria conflito de merge): o grafo fica
 STALE (referência histórica) até um `update` depois do merge.
 
+**Junção final (2026-11-20, só LOCAL):** branch `feature/multi-unidades-integrada` (worktree
+`BRAIN-worktrees/INTEGRACAO-MULTI-UNIDADES/secretarIA`) = esta branch (`c7423f0`, já com 085+086) + correções das
+revisões finais 085 T8 / 086 T9 + TASK-087. Uma ponta de migração só (`c8e2a4f6b1d3`; nenhuma ponte nova foi
+necessária). Decisão do dono na junção: na tela "Remarcar" depois do cancelamento pela clínica, os dias bloqueados
+valem os da unidade onde a lista é lida (ver `CHECKPOINT_service_days.md`). Registro: `../tasks/INTEGRACAO-MULTI-UNIDADES/`.
+Sem `main`, sem push, sem deploy.
+
 ## Por quê
 
 1. **Multi-unidades.** Médico que usa a secretarIA como assistente pessoal atende em mais de um lugar. Antes,

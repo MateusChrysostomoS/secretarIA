@@ -83,7 +83,10 @@ Helpers que aplicam/consultam o filtro (nenhum caminho do paciente reimplementa 
   dela; várias unidades e nenhuma gravada = R1). Um bloqueio só em `_manage_reschedule`, antes do desvio para
   `_manage_rebook`: cobre os dois e nada é movido nem criado. Botão de lembrete/da consulta herda.
 - **Oferta de colega** (`enter_rebooking`, "Outro horário"): `_rebooking_calendar` (agenda do colega sem os dias
-  bloqueados, R1).
+  bloqueados, R1). **Junção com a TASK-085 T8 (b), decisão do dono 2026-11-20:** quando a lista é lida numa unidade
+  (a da consulta cancelada, ou a única do médico para o serviço), valem os dias bloqueados DESSA unidade (própria,
+  senão a base) - `_service_scoped`, como em todo outro passo; sem unidade decidida, segue R1. Teste:
+  `test_service_days_flow.py::test_rebooking_at_the_cancelled_unit_uses_that_units_days`.
 - **"Alterar dados"** (`services/appointment_edit_flow.py`): `_blocked_days` + `_calendar(ctx, draft, professionals,
   tenant)` é o ponto único do fluxo (lista de dias/horários, "Mudar data/horário", livre-após-trocar,
   dia proposto pela IA); `_doctor_list` mostra "Ocupado" para médico que não faz o serviço no dia; `_service_step`
