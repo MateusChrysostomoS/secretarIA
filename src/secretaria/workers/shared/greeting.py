@@ -290,6 +290,8 @@ def _flow_professionals(
             # The doctor's minimum notice for a new booking (services/availability.py::
             # booking_notice_floor reads it off this snapshot).
             min_booking_notice_hours=p.min_booking_notice_hours,
+            # The doctor's buffer between consultations, in minutes (TASK-088).
+            buffer_minutes=p.buffer_minutes,
             appointment_types=(
                 resolve_entries(p.appointment_types, services)
                 if p.appointment_types

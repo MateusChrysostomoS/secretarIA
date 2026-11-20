@@ -142,6 +142,9 @@ class ProfessionalConfigUpdate(BaseModel):
     # default (BOOKING_NOTICE_DEFAULT_HOURS, 12h), 0 = no limit. At most 30 days: past
     # that no slot of the 20-day picker could ever be offered.
     min_booking_notice_hours: int | None = Field(default=None, ge=0, le=720)
+    # The doctor's "intervalo entre consultas", in minutes (models/professional.py). Absent =
+    # untouched, null or 0 = no buffer. At most 2 hours.
+    buffer_minutes: int | None = Field(default=None, ge=0, le=120)
 
     @field_validator("business_hours")
     @classmethod
@@ -230,6 +233,8 @@ class ProfessionalListItem(BaseModel):
     # None = not configured (the 12h default applies), 0 = no limit. Defaulted so an older
     # reader building this model never 500s.
     min_booking_notice_hours: int | None = None
+    # None/0 = no buffer between consultations. Defaulted for the same reason.
+    buffer_minutes: int | None = None
     business_hours: dict
     business_hours_inherited: bool
     appointment_types: list

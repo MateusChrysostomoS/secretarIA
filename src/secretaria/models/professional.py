@@ -100,6 +100,13 @@ class Professional(Base):
     # never limited by it.
     min_booking_notice_hours: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
+    # TASK-088: the doctor's "intervalo entre consultas", in minutes (0-120). NULL/0 = no
+    # buffer. With N, a time the patient is OFFERED or CONFIRMS must leave N free minutes
+    # before and after the doctor's other appointments; the clinic's own agenda is never
+    # limited by it, and neither the service duration nor the event written to the agenda
+    # changes.
+    buffer_minutes: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
     # TASK-083: the shared calendar identity of this PERSON across clinics. Every
     # `professionals` row of one brain-api account points at the same `agendas` row
     # (services/agenda_linking.py), and services/agenda.py reads the siblings' busy time
