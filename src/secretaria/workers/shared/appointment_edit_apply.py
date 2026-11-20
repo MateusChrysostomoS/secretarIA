@@ -46,7 +46,10 @@ from secretaria.models import (
     is_live_status,
 )
 from secretaria.services import reminder_hooks
-from secretaria.services.appointment_edit import appointment_email_version
+from secretaria.services.appointment_edit import (
+    EDIT_INSURANCE_NOT_ACCEPTED,
+    appointment_email_version,
+)
 from secretaria.services.appointment_edit_write import (
     row_draft as _row_draft,
     write_appointment_edit,
@@ -521,9 +524,12 @@ async def apply_appointment_edit(
     window_before = _window(appointment)
     if blocked and edit["time_changed"]:
         return None
-    # TASK-086 A18 (W8/W9): the convênio matrix, fresh, before any write or money decision.
+    # TASK-086 A18 (W8/W9): the convênio matrix, fresh, before any write or money decision. A
+    # refusal is NOT a lost row (`None` reads as a calendar outage: "agenda indisponível", a human
+    # handover and a false alert to the clinic): the patient is told why, the agenda goes back to
+    # the committed row (T9 review I1).
     if await _insurance_refused_now(session, tenant_id, appointment, edit):
-        return None
+        return _refused(appointment.id, EDIT_INSURANCE_NOT_ACCEPTED)
     if paid and changed:
         # The money decides (services/payments/service_change.py), for every money field.
         return await _apply_paid_change(

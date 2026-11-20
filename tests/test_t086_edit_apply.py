@@ -35,6 +35,7 @@ from secretaria.models import (  # noqa: E402
 from secretaria.models.insurance_acceptance_exception import (  # noqa: E402
     InsuranceAcceptanceException,
 )
+from secretaria.services.appointment_edit import EDIT_INSURANCE_NOT_ACCEPTED  # noqa: E402
 from secretaria.services.appointment_edit_write import row_draft  # noqa: E402
 from secretaria.services.payments import service_change  # noqa: E402
 from secretaria.workers.shared import appointment_edit_apply as apply_mod  # noqa: E402
@@ -174,7 +175,9 @@ async def test_a_convenio_refused_after_the_card_is_refused_and_nothing_written(
     plan = w.amil if mode == "shared" else w.prof_amil
     await _refuse(db, w, w.consulta, w.centro, plan)
 
-    assert await _apply(db, w, insurance="Amil") is None
+    applied = await _apply(db, w, insurance="Amil")
+    # TASK-086 T9 review I1: a refusal the patient is told about, never `None` (= calendar outage).
+    assert applied is not None and applied.refusal == EDIT_INSURANCE_NOT_ACCEPTED
     row = await _row(db, w)
     assert row.insurance == "Unimed"
     assert row.insurance_plan_id is None and row.insurance_professional_plan_id is None
@@ -183,14 +186,16 @@ async def test_a_convenio_refused_after_the_card_is_refused_and_nothing_written(
 async def test_a_service_change_into_a_refused_cell_is_refused(db):
     w = await _world(db)
     await _refuse(db, w, w.retorno, w.centro, w.unimed)
-    assert await _apply(db, w, appointment_type="Retorno", service_id=w.retorno.id) is None
+    applied = await _apply(db, w, appointment_type="Retorno", service_id=w.retorno.id)
+    assert applied is not None and applied.refusal == EDIT_INSURANCE_NOT_ACCEPTED
     assert (await _row(db, w)).appointment_type == "Consulta"
 
 
 async def test_a_unit_change_into_a_refused_cell_is_refused(db):
     w = await _world(db)
     await _refuse(db, w, w.consulta, w.sul, w.unimed)
-    assert await _apply(db, w, unit_id=w.sul.id) is None
+    applied = await _apply(db, w, unit_id=w.sul.id)
+    assert applied is not None and applied.refusal == EDIT_INSURANCE_NOT_ACCEPTED
     assert (await _row(db, w)).unit_id == w.centro.id
 
 
@@ -244,7 +249,7 @@ async def test_a_paid_service_change_into_a_refused_cell_is_refused_before_the_m
     applied = await _apply(
         db, w, appointment_type="Retorno", service_id=w.retorno.id, calendar_deferred=True
     )
-    assert applied is None
+    assert applied is not None and applied.refusal == EDIT_INSURANCE_NOT_ACCEPTED
 
 
 async def test_the_refusal_is_logged_with_ids_only(db, monkeypatch):
@@ -252,7 +257,8 @@ async def test_the_refusal_is_logged_with_ids_only(db, monkeypatch):
     await _refuse(db, w, w.consulta, w.centro, w.amil)
     seen: list = []
     monkeypatch.setattr(apply_mod, "log_refusal", lambda event, **ids: seen.append((event, ids)))
-    assert await _apply(db, w, insurance="Amil") is None
+    applied = await _apply(db, w, insurance="Amil")
+    assert applied is not None and applied.refusal == EDIT_INSURANCE_NOT_ACCEPTED
     [(event, ids)] = seen
     assert event == "appointment_edit_insurance_refused"
     assert "Amil" not in str(ids) and "Unimed" not in str(ids)
