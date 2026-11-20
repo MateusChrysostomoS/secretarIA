@@ -140,6 +140,11 @@ def test_an_undeclared_key_is_dropped_and_logged_by_name_only(log):
     assert CANARY not in repr(log.events)
 
 
+def test_a_window_keeps_its_weekday(log):
+    window = {"day": "2026-10-06", "weekday": "ter", "start": "08:00", "end": "09:00"}
+    assert allowlisted("get_availability", {"windows": [window]}) == {"windows": [window]}
+
+
 def test_a_record_keeps_only_its_declared_fields(log):
     answer = {
         "windows": [

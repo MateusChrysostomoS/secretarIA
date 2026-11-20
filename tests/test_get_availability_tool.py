@@ -253,9 +253,9 @@ async def test_the_answer_is_windows_and_only_the_documented_keys(clinic):
     assert set(result) <= DOCUMENTED_KEYS
     assert result == {
         "windows": [
-            {"day": "2026-10-06", "start": "08:00", "end": "09:30"},
-            {"day": "2026-10-06", "start": "10:00", "end": "10:30"},
-            {"day": "2026-10-07", "start": "14:00", "end": "15:00"},
+            {"day": "2026-10-06", "weekday": "ter", "start": "08:00", "end": "09:30"},
+            {"day": "2026-10-06", "weekday": "ter", "start": "10:00", "end": "10:30"},
+            {"day": "2026-10-07", "weekday": "qua", "start": "14:00", "end": "15:00"},
         ],
         "timezone": "America/Sao_Paulo",
         "slot_minutes": 30,
@@ -263,7 +263,7 @@ async def test_the_answer_is_windows_and_only_the_documented_keys(clinic):
         "day_to": "2026-10-08",
         "professional": doctor.name,
     }
-    assert all(set(window) == {"day", "start", "end"} for window in result["windows"])
+    assert all(set(window) == {"day", "weekday", "start", "end"} for window in result["windows"])
     json.dumps(result)  # serializable as it is
 
 
@@ -299,7 +299,7 @@ async def test_a_doctor_with_no_free_window_gets_an_empty_list_and_a_sentence(cl
         result = await _ask(day_from="2026-10-05", day_to="2026-10-12")
     assert result["windows"] == []
     assert "clamped" not in result
-    assert result["note"] == "Nenhum horário livre de 05/10 a 12/10."
+    assert result["note"] == "Nenhum horário livre de seg, 05/10 a seg, 12/10."
 
 
 async def test_the_timezone_is_the_clinics_even_when_it_is_not_utc(clinic):
@@ -373,8 +373,8 @@ async def test_today_with_hours_already_passed_goes_through_the_real_calendar(
     with _turn(clinic.tenant_id, calendar=real):
         result = await _ask(day_from="2026-10-05", day_to="2026-10-06")
     assert result["windows"] == [
-        {"day": "2026-10-05", "start": "15:00", "end": "18:00"},
-        {"day": "2026-10-06", "start": "08:00", "end": "18:00"},
+        {"day": "2026-10-05", "weekday": "seg", "start": "15:00", "end": "18:00"},
+        {"day": "2026-10-06", "weekday": "ter", "start": "08:00", "end": "18:00"},
     ]
 
 
@@ -433,8 +433,8 @@ async def test_a_calendar_event_never_reaches_the_ai_in_any_field(clinic, monkey
 
     # The busy hour is simply not offered ...
     assert result["windows"] == [
-        {"day": "2026-10-06", "start": "08:00", "end": "09:00"},
-        {"day": "2026-10-06", "start": "10:00", "end": "12:00"},
+        {"day": "2026-10-06", "weekday": "ter", "start": "08:00", "end": "09:00"},
+        {"day": "2026-10-06", "weekday": "ter", "start": "10:00", "end": "12:00"},
     ]
     # ... and nothing of the event survives, in any form.
     assert set(result) <= DOCUMENTED_KEYS
@@ -488,7 +488,7 @@ def test_the_model_facing_contract_is_pinned_for_the_prompt_writer():
     text = tool.description
     for phrase in (
         "HORÁRIOS LIVRES",
-        "{day, start, end}",
+        "{day, weekday, start, end}",
         "Nunca devolve compromissos, nomes nem horários ocupados",
         "set_booking_draft",
         "create_event",
@@ -914,8 +914,8 @@ async def test_a_slot_another_conversation_is_holding_is_not_offered(real_roster
     with _turn(tenant.id, calendar=agenda, config=_config(tenant.id)):
         result = await _ask(day_from="2026-10-06", day_to="2026-10-06")
     assert result["windows"] == [
-        {"day": "2026-10-06", "start": "09:00", "end": "10:00"},
-        {"day": "2026-10-06", "start": "10:30", "end": "11:00"},
+        {"day": "2026-10-06", "weekday": "ter", "start": "09:00", "end": "10:00"},
+        {"day": "2026-10-06", "weekday": "ter", "start": "10:30", "end": "11:00"},
     ]
 
 

@@ -439,6 +439,9 @@ def apply_professional_config(professional: Professional, data: dict) -> None:
                 # `unit_terms` / `apply_to_all` are wire-only (TASK-085): they go to
                 # professional_service_unit_terms via `apply_unit_terms`, never into the JSON.
                 value = unit_terms_service.strip_unit_fields(value)
+                value = unit_terms_service.keep_stored_blocked_weekdays(
+                    value, professional.appointment_types
+                )
             setattr(professional, field_name, value)
 
 

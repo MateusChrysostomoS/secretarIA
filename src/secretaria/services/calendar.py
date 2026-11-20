@@ -17,7 +17,7 @@ a worker thread with asyncio.to_thread to keep the event loop responsive.
 
 import asyncio
 import copy
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Collection
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta, tzinfo
 from typing import TYPE_CHECKING, Any, ClassVar
@@ -468,6 +468,9 @@ class CalendarService:
     # None so every agenda built without one - and every copy - reads "no unit".
     _unit_id: UUID | None = None
     _location: str | None = None
+    # TASK-087 spec §5.2: weekdays (business_hours keys) a patient may not book the service on
+    # (`with_blocked_weekdays`). Class-level empty so every agenda - and copy - blocks nothing.
+    _blocked_weekdays: frozenset[str] = frozenset()
 
     def __init__(self, settings: Settings | None = None) -> None:
         self._settings = settings or get_settings()
@@ -555,6 +558,18 @@ class CalendarService:
         scoped._location = location
         if business_hours is not None:
             scoped._business_hours = business_hours
+        return scoped
+
+    def with_blocked_weekdays(self, blocked: Collection[str]) -> "CalendarService":
+        """This agenda for ONE service a patient books (TASK-087 spec §5.2) - a copy.
+
+        `blocked` (weekday keys, `monday`...`sunday`) replaces any earlier set: on those days the
+        copy offers no window at all - no day in the day list, no slot, `is_slot_free` False -
+        even when the hours are empty and would fall back to 08-18 (R6). Busy time, unit and
+        writes are untouched. Patient paths only (D3): the staff's agenda never calls it.
+        """
+        scoped = copy.copy(self)
+        scoped._blocked_weekdays = frozenset(blocked or ())
         return scoped
 
     @property
@@ -1007,9 +1022,12 @@ class CalendarService:
 
         Uses the tenant's per-weekday business_hours when configured; otherwise
         falls back to a single [open_hour, close_hour) window (Fase A / dev).
-        Returns an empty list for a closed day.
+        Returns an empty list for a closed day, and for a weekday the service is blocked on
+        (`with_blocked_weekdays`) - checked first, so the 08-18 fallback never reopens it.
         """
         weekday_key = _WEEKDAY_KEYS[day_local.weekday()]
+        if weekday_key in self._blocked_weekdays:
+            return []
         configured = self._business_hours.get(weekday_key) if self._business_hours else None
         windows: list[tuple[datetime, datetime]] = []
         if configured:

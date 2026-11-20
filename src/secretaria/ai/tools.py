@@ -546,6 +546,13 @@ UNIT_LOOKUP_FAILED_ERROR = (
     "Tente de novo em instantes ou chame start_guided_booking para seguir pelos botões."
 )
 
+# Said when the service's blocked weekdays could not be read before a WRITE (TASK-087 A4):
+# fail-closed, and about the SERVICE days - a clinic without units has no unit to confirm.
+SERVICE_DAYS_LOOKUP_FAILED_ERROR = (
+    "Não consegui confirmar os dias deste serviço agora, então não marquei a consulta. "
+    "Tente de novo em instantes."
+)
+
 
 async def _sole_professional_unit(
     tool_name: str, *, fail_closed: bool = False
@@ -664,6 +671,49 @@ def _slot_service(
     if not (text or "").strip() and len(names) != 1:
         return None, None
     return _canonical_appointment_type(text, tool_name, catalog)
+
+
+async def _service_day_refusal(
+    tool_name: str,
+    unit: Any | None,
+    professional: Any | None,
+    catalog: list | None,
+    canonical_type: str | None,
+    start: datetime,
+) -> dict | None:
+    """The tool-error when the doctor does not do `canonical_type` on `start`'s weekday.
+
+    TASK-087 (G3): the confirmation-time twin of `_service_unit_refusal` - whatever date the
+    model typed, a day the service is blocked on (the unit's own list, else the base) is never
+    booked. `start` is on the clinic's clock. Nothing to check without a doctor or a named
+    service (R5). A failed lookup refuses, like the unit check (never a booking on an unproven
+    day). `catalog` None reads the doctor's own stored catalog, which carries the day lists.
+    """
+    tenant_id = _tenant_id_ctx.get()
+    if tenant_id is None or professional is None or not canonical_type:
+        return None
+    from secretaria.ai.unit_scope import (
+        owner_service_catalog,
+        service_day_refusal_for,
+        service_entry_of,
+    )
+    from secretaria.core.database import async_session_factory
+
+    try:
+        if catalog is None:
+            catalog = await owner_service_catalog(tenant_id, professional)
+        entry = service_entry_of(catalog, canonical_type)
+        unit_id = unit.id if unit is not None else None
+        async with async_session_factory() as session:
+            refusal = await service_day_refusal_for(
+                session, tenant_id, professional, entry, unit_id, start
+            )
+    except Exception as exc:  # noqa: BLE001 - see the docstring
+        logger.warning(
+            "agent_tool_service_day_check_failed", tool=tool_name, error=type(exc).__name__
+        )
+        return {"error": SERVICE_DAYS_LOOKUP_FAILED_ERROR}
+    return {"error": refusal} if refusal is not None else None
 
 
 # TASK-086 A14 (W5): the convênio matrix refuses this (doctor, service, unit, plan) cell.
@@ -1511,17 +1561,17 @@ async def create_event(
     unit, unit_error = await _sole_professional_unit("create_event", fail_closed=True)
     if unit_error is not None:
         return unit_error
+    from secretaria.ai.unit_scope import sole_professional_row
+
+    tenant_id = _tenant_id_ctx.get()
+    owner = (
+        await sole_professional_row(tenant_id, _sole_professional_id())
+        if tenant_id is not None
+        else None
+    )
     own_minutes: int | None = None
     if unit is not None:
         # The service must be one the doctor does at this unit (spec §6.1, §9.13).
-        from secretaria.ai.unit_scope import sole_professional_row
-
-        tenant_id = _tenant_id_ctx.get()
-        owner = (
-            await sole_professional_row(tenant_id, _sole_professional_id())
-            if tenant_id is not None
-            else None
-        )
         refused = await _service_unit_refusal("create_event", unit, owner, None, canonical_type)
         if refused is not None:
             return refused
@@ -1540,6 +1590,17 @@ async def create_event(
     cal = scoped_calendar(_get_calendar(), unit)
     fallback_start, fallback_end = _localize_window(start, end, cal)
     fallback_end = _sized_end(fallback_start, fallback_end, own_minutes)
+    # TASK-087 G3: a day the service is blocked on is never booked, whatever date was typed.
+    refused = await _service_day_refusal(
+        "create_event",
+        unit,
+        owner,
+        None,
+        canonical_type,
+        fallback_start.astimezone(cal.tzinfo),
+    )
+    if refused is not None:
+        return refused
     if unit is not None:
         from secretaria.ai.unit_scope import outside_unit_hours
 

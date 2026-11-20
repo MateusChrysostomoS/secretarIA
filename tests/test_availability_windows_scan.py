@@ -281,7 +281,7 @@ async def test_a_busy_event_removes_its_time_and_none_of_its_fields_survive(monk
     ]
     payload = json.dumps([w.payload() for w in scan.windows])
     assert CANARY not in payload
-    assert set(scan.windows[0].payload()) == {"day", "start", "end"}
+    assert set(scan.windows[0].payload()) == {"day", "start", "end", "weekday"}
 
 
 def test_the_calendar_exposes_the_slot_length_it_walks_by_default():

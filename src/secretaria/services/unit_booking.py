@@ -18,9 +18,9 @@ exactly today's.
 from __future__ import annotations
 
 import re
-from collections.abc import Iterable
+from collections.abc import Collection, Iterable
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime
 from types import SimpleNamespace
 from typing import Any
 from uuid import UUID
@@ -38,7 +38,7 @@ from secretaria.services.professional_service_units import (
     read_marks,
     read_marks_for,
 )
-from secretaria.services.service_terms import load_terms_for
+from secretaria.services.service_terms import WEEKDAY_KEYS, load_terms_for
 from secretaria.services.tenant_config import professional_business_hours
 
 logger = get_logger(__name__)
@@ -305,6 +305,92 @@ def scoped_calendar(calendar: Any, unit: Any | None, *, with_hours: bool = True)
     )
 
 
+def service_calendar(calendar: Any, blocked: Collection[str] | None) -> Any:
+    """`calendar` without the service's `blocked` weekdays (TASK-087), or `calendar` itself.
+
+    Unchanged when nothing is blocked, and for a calendar without the seam (a test double that
+    implements only `with_unit`): the block is then simply not applied.
+    """
+    if not blocked or calendar is None:
+        return calendar
+    with_blocked = getattr(calendar, "with_blocked_weekdays", None)
+    if not callable(with_blocked):
+        return calendar
+    return with_blocked(frozenset(blocked))
+
+
+def blocked_on(day: date | datetime, blocked: Collection[str] | None) -> bool:
+    """Whether `day`'s weekday is one of `blocked`. A datetime must be on the clinic's clock."""
+    return bool(blocked) and WEEKDAY_KEYS[day.weekday()] in blocked
+
+
+# Plural weekday names for a sentence ("não está disponível às segundas"), Monday first.
+_WEEKDAY_PLURAL_PT = {
+    "monday": "segundas",
+    "tuesday": "terças",
+    "wednesday": "quartas",
+    "thursday": "quintas",
+    "friday": "sextas",
+    "saturday": "sábados",
+    "sunday": "domingos",
+}
+_MASCULINE_DAYS = frozenset({"saturday", "sunday"})
+
+
+def _ordered_days(keys: Collection[str] | None) -> list[str]:
+    return [day for day in WEEKDAY_KEYS if day in (keys or ())]
+
+
+def _join_pt(parts: list[str]) -> str:
+    """ "a", "a e b", "a, b e c"."""
+    if len(parts) <= 1:
+        return "".join(parts)
+    return f"{', '.join(parts[:-1])} e {parts[-1]}"
+
+
+def weekday_plural_pt(keys: Collection[str] | None) -> str:
+    """ "segundas e sextas" - known keys only, Monday first, commas then " e ". "" for none."""
+    return _join_pt([_WEEKDAY_PLURAL_PT[day] for day in _ordered_days(keys)])
+
+
+def weekday_list_pt(keys: Collection[str] | None) -> str:
+    """The days with their article, for a sentence - Monday first, known keys only, "" for none.
+
+    "às segundas e sextas", "aos sábados e domingos"; a list mixing both genders gives every day
+    its own article: "às sextas e aos sábados", "às segundas, às sextas e aos sábados" (TASK-087
+    review P6 - never "às sextas e sábados").
+    """
+    days = _ordered_days(keys)
+    if not days:
+        return ""
+    masculine = [day in _MASCULINE_DAYS for day in days]
+    if all(masculine) or not any(masculine):
+        return f"{'aos' if masculine[0] else 'às'} {weekday_plural_pt(days)}"
+    return _join_pt(
+        [
+            f"{'aos' if is_masc else 'às'} {_WEEKDAY_PLURAL_PT[day]}"
+            for day, is_masc in zip(days, masculine, strict=True)
+        ]
+    )
+
+
+def service_day_refusal(
+    service_name: str, professional_name: str | None, blocked: Collection[str] | None
+) -> str:
+    """The patient's sentence for a service asked on a day it is not done (TASK-087).
+
+    "Cirurgia com Dra. Ana não está disponível às segundas. Posso ver outro dia?" - " com
+    <médico>" only when known; the days through `weekday_list_pt` ("às sextas e aos sábados");
+    "nesse dia" when no day is known. "não está disponível" agrees with any service name
+    ("Consulta", "Retorno") - review P6.
+    """
+    service = _clean(service_name)
+    doctor = _clean(professional_name)
+    who = f"{service} com {doctor}" if doctor else service
+    when = weekday_list_pt(blocked) or "nesse dia"
+    return f"{who} não está disponível {when}. Posso ver outro dia?"
+
+
 async def tenant_unit(session: AsyncSession, tenant_id: UUID, unit_id: UUID | None) -> Unit | None:
     """The tenant's own unit row (any state), or None - never another clinic's."""
     if unit_id is None:
@@ -400,6 +486,7 @@ __all__ = [
     "UnitOption",
     "UnitRefused",
     "attach_unit_options",
+    "blocked_on",
     "booking_unit_fields",
     "calendar_at_unit",
     "check_unit",
@@ -408,11 +495,15 @@ __all__ = [
     "professional_name",
     "professional_terms_view",
     "scoped_calendar",
+    "service_calendar",
+    "service_day_refusal",
     "service_offered_at_unit",
     "tenant_unit",
     "unit_fields",
     "unit_line",
     "unit_location",
     "unit_options_for",
+    "weekday_list_pt",
+    "weekday_plural_pt",
     "within_hours",
 ]

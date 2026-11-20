@@ -28,6 +28,7 @@ from datetime import date, datetime, time, timedelta
 from typing import TYPE_CHECKING
 
 from secretaria.services.availability import Window, days_with_free_slots, free_slots_for_day
+from secretaria.services.booking_dates import WEEKDAY_SHORT
 
 if TYPE_CHECKING:
     from secretaria.services.calendar import CalendarService
@@ -143,9 +144,10 @@ class FreeWindow:
     end: time
 
     def payload(self) -> dict[str, str]:
-        """The three keys, and only the three, the AI is shown."""
+        """The four keys, and only the four, the AI is shown."""
         return {
             "day": self.day.isoformat(),
+            "weekday": WEEKDAY_SHORT[self.day.weekday()].lower(),
             "start": self.start.strftime("%H:%M"),
             "end": self.end.strftime("%H:%M"),
         }

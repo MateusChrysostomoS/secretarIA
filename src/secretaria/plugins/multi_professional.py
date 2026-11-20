@@ -62,6 +62,7 @@ from secretaria.ai.tools import (
     _match_by_name,
     _own_unit_minutes,
     _persist_appointment,
+    _service_day_refusal,
     _service_unit_refusal,
     _sized_end,
     _slot_service,
@@ -378,6 +379,17 @@ async def create_event_for_professional(
     cal = scoped_calendar(await _professional_calendar(tenant_id, professional), unit)
     fallback_start, fallback_end = _localize_window(start, end, cal)
     fallback_end = _sized_end(fallback_start, fallback_end, own_minutes)
+    # TASK-087 G3: a day THIS doctor does not do the service on is never booked.
+    refused = await _service_day_refusal(
+        "create_event_for_professional",
+        unit,
+        professional,
+        catalog,
+        canonical_type,
+        fallback_start.astimezone(cal.tzinfo),
+    )
+    if refused is not None:
+        return refused
     outside = outside_unit_hours(unit, fallback_start, fallback_end, cal.tzinfo)
     if outside is not None:
         return outside

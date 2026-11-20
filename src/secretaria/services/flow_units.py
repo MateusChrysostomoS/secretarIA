@@ -33,8 +33,11 @@ from secretaria.core.whatsapp_limits import (
 from secretaria.services.professional_service_units import allowed_unit_ids
 from secretaria.services.service_catalog import entry_service_id
 from secretaria.services.service_terms import (
+    WEEKDAY_KEYS,
     ResolvedTerms,
     TermsByService,
+    blocked_weekdays_everywhere,
+    blocked_weekdays_for,
     price_differs_across_units,
     resolve_terms,
     terms_for_entry,
@@ -171,6 +174,55 @@ def terms_at(professional: Any | None, entry: Mapping, unit_id: UUID | None) -> 
     """`entry`'s effective price/duration for this professional at `unit_id` (None = base)."""
     terms = terms_for_entry(service_unit_terms_of(professional), entry)
     return resolve_terms(entry, terms, unit_id)
+
+
+def _is_window(window: Any) -> bool:
+    """A usable open window ({"start", "end"}), the same test `union_hours` applies."""
+    return isinstance(window, dict) and bool(window.get("start")) and bool(window.get("end"))
+
+
+def _open_weekdays(unit: Any) -> frozenset[str]:
+    """The weekdays `unit` opens on: those with at least one window, read like `union_hours`.
+
+    A unit without hours at all opens every day - the agenda falls back to 08-18 (R6), so such a
+    unit never makes a day count as closed everywhere."""
+    hours = getattr(unit, "business_hours", None) or {}
+    if not hours:
+        return frozenset(WEEKDAY_KEYS)
+    return frozenset(
+        day for day, windows in hours.items() if any(_is_window(w) for w in windows or [])
+    )
+
+
+def blocked_weekdays_of(
+    professional: Any | None, entry: Mapping | None, unit_id: UUID | None
+) -> frozenset[str]:
+    """Weekdays patients cannot book `entry`'s service with `professional` (TASK-087).
+
+    Unit given: that unit's rule (its own list, else the base). No unit yet and the professional
+    does the service at bookable units (R1 - a day stays while one unit both OPENS on it and
+    allows it): the days blocked at every one of those units, plus the days on which at least one
+    of them opens and every unit that opens then blocks it. The unit-less agenda offers the UNION
+    of the units' hours (`union_hours`), so a day only one unit opens on - and blocks - must not
+    come back from the other units' lists (review P2). No units: the base. No service known
+    (`entry` None): nothing (R5). Pure: reads the snapshot's `units` and `service_unit_terms`
+    (older snapshots predate them = the base).
+    """
+    if entry is None:
+        return frozenset()
+    terms = terms_for_entry(service_unit_terms_of(professional), entry)
+    if unit_id is not None:
+        return blocked_weekdays_for(entry, terms, unit_id)
+    units = units_for_service(professional, entry_service_id(entry))
+    everywhere = blocked_weekdays_everywhere(entry, terms, [unit.id for unit in units])
+    rules = [(_open_weekdays(unit), blocked_weekdays_for(entry, terms, unit.id)) for unit in units]
+    closed_where_open = frozenset(
+        day
+        for day in WEEKDAY_KEYS
+        if any(day in opens for opens, _ in rules)
+        and all(day in blocked for opens, blocked in rules if day in opens)
+    )
+    return everywhere | closed_where_open
 
 
 @dataclass(frozen=True)
@@ -349,7 +401,7 @@ def union_hours(units: list) -> dict:
     for unit in units:
         for day, windows in (getattr(unit, "business_hours", None) or {}).items():
             for window in windows or []:
-                if isinstance(window, dict) and window.get("start") and window.get("end"):
+                if _is_window(window):
                     spans.setdefault(day, []).append((str(window["start"]), str(window["end"])))
     merged: dict[str, list[dict]] = {}
     for day, pairs in spans.items():
@@ -511,6 +563,7 @@ __all__ = [
     "UNIT_LIST_BODY",
     "UnitChoice",
     "appointment_calendar",
+    "blocked_weekdays_of",
     "bookable_units",
     "effective_unit",
     "find_unit",

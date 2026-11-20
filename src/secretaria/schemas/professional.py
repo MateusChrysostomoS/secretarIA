@@ -11,13 +11,19 @@ class UnitTermsItem(BaseModel):
     """One price/duration exception of a service at ONE unit (TASK-085).
 
     `price` / `duration_min` mirror the base entry (`AppointmentType`): free text up to 40 chars and
-    1..600 minutes. `null` (or a blank price) means "use the base value"; at least one of the two
-    must be set - the same rule as the table's CHECK, answered here as a plain 422.
+    1..600 minutes. `null` (or a blank price) means "use the base value"; at least one of the
+    three must be set - the same rule as the table's CHECK, answered here as a plain 422.
+
+    `blocked_weekdays` (TASK-087) is the third axis: `null` = inherit the entry's base list, `[]` =
+    own, nothing blocked at this unit, a list = own. Its keys are checked by
+    services/hub_unit_terms.py (422 `blocked_weekdays_invalid`), not here, so the answer carries
+    the stable code the Portal reads.
     """
 
     unit_id: str = Field(min_length=1, max_length=64)
     price: str | None = Field(default=None, max_length=40)
     duration_min: int | None = Field(default=None, gt=0, le=600)
+    blocked_weekdays: list[str] | None = None
 
     @field_validator("price", mode="before")
     @classmethod
@@ -29,8 +35,8 @@ class UnitTermsItem(BaseModel):
 
     @model_validator(mode="after")
     def _something_to_override(self) -> "UnitTermsItem":
-        if self.price is None and self.duration_min is None:
-            raise ValueError("a unit exception needs a price, a duration or both")
+        if self.price is None and self.duration_min is None and self.blocked_weekdays is None:
+            raise ValueError("a unit exception needs a price, a duration or blocked weekdays")
         return self
 
 
@@ -42,20 +48,25 @@ class ProfessionalAppointmentType(AppointmentType):
 
       unit_terms     absent / null -> this service's exceptions stay as they are; a list REPLACES
                      the set (`[]` erases it);
-      apply_to_all   rule A ("Todas as unidades"): the entry becomes the base AND every exception
-                     of this service is erased; it cannot travel with a non-empty `unit_terms`.
+      apply_to_all   "Todas as unidades", PER SUBJECT (TASK-087): the entry's price/duration become
+                     the base AND every unit's own price/duration is erased; the unit's own
+                     blocked weekdays stay. It may travel with `unit_terms` (the list is applied
+                     after the erase).
+
+    `blocked_weekdays` is the entry's BASE list of weekdays patients cannot book this service on
+    (stored in the entry's JSON; `null` is saved as `[]`). Its keys are checked by
+    services/hub_unit_terms.py (422 `blocked_weekdays_invalid`).
     """
 
     unit_terms: list[UnitTermsItem] | None = None
     apply_to_all: bool = False
+    blocked_weekdays: list[str] | None = None
 
     @model_validator(mode="after")
     def _terms_are_coherent(self) -> "ProfessionalAppointmentType":
         units = [item.unit_id for item in self.unit_terms or []]
         if len(units) != len(set(units)):
             raise ValueError("unit_terms repeats a unit")
-        if self.apply_to_all and units:
-            raise ValueError("apply_to_all cannot be combined with unit_terms")
         return self
 
 

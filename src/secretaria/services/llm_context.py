@@ -25,6 +25,7 @@ from secretaria.services import flow_router as fr, flow_units
 from secretaria.services.attendee import ATTENDEE_SELF
 from secretaria.services.service_catalog import entry_service_id
 from secretaria.services.tenant_config import ClinicFeatures, PatientIdentityStatus
+from secretaria.services.unit_booking import weekday_list_pt
 
 _BOOKING = "do agendamento"
 _MANAGE = "da consulta já marcada"
@@ -140,6 +141,30 @@ def _service_names(services: list[dict]) -> str:
     return ", ".join(str(s.get("name")) for s in services if s.get("name"))
 
 
+def _with_blocked_days(name: str, blocked: frozenset[str]) -> str:
+    """ "Cirurgia (não às segundas e sextas)" - the days the service is NOT done on (TASK-087).
+
+    The bare name when nothing is blocked, so a clinic that does not use the feature reads
+    exactly what it read before. The days read like the patient's refusal sentence
+    (`unit_booking.weekday_list_pt`: "às sextas e aos sábados").
+    """
+    days = weekday_list_pt(blocked)
+    return f"{name} (não {days})" if days else name
+
+
+def _professional_service_names(professional, tenant) -> str:
+    """`_service_names` of one professional's services, each with its blocked days (no unit:
+    the base list - a doctor without a bookable unit has no per-unit exception to read)."""
+    entries = fr.professional_appointment_types(professional, tenant)
+    return ", ".join(
+        _with_blocked_days(
+            str(entry.get("name")), flow_units.blocked_weekdays_of(professional, entry, None)
+        )
+        for entry in entries
+        if entry.get("name")
+    )
+
+
 def _doctor_label(professional) -> str:
     """ "Dr. Fulano (Cardiologia)" - the specialty lets the model tell, and say, when no
     doctor of the clinic fits what the patient described (owner, 2026-10-07)."""
@@ -192,7 +217,8 @@ def _services_by_unit(professional, tenant) -> str | None:
         if not name:
             continue
         for unit in flow_units.units_for_service(professional, entry_service_id(entry)):
-            per_unit[unit.id].append(str(name))
+            blocked = flow_units.blocked_weekdays_of(professional, entry, unit.id)
+            per_unit[unit.id].append(_with_blocked_days(str(name), blocked))
     parts = [f"{unit.name}: {', '.join(per_unit[unit.id])}" for unit in units if per_unit[unit.id]]
     return " | ".join(parts) or _NO_OPEN_UNIT_SERVICE
 
@@ -210,7 +236,7 @@ def _topology_lines(tenant, professionals) -> list[str]:
             if by_unit is not None:
                 lines.append(f"  - {_doctor_label(professional)}: {by_unit}")
                 continue
-            names = _service_names(fr.professional_appointment_types(professional, tenant))
+            names = _professional_service_names(professional, tenant)
             lines.append(
                 f"  - {_doctor_label(professional)}: {names or 'sem serviços cadastrados'}"
             )
@@ -222,7 +248,7 @@ def _topology_lines(tenant, professionals) -> list[str]:
                 f"- A clínica atende com um só médico: {_doctor_label(roster[0])}. "
                 f"Unidades e serviços: {by_unit}."
             ]
-        names = _service_names(fr.professional_appointment_types(roster[0], tenant))
+        names = _professional_service_names(roster[0], tenant)
         return [
             f"- A clínica atende com um só médico: {_doctor_label(roster[0])}. "
             f"Serviços: {names or 'sem serviços cadastrados'}."

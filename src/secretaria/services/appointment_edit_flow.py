@@ -18,6 +18,7 @@ is what keeps the import graph acyclic.
 from __future__ import annotations
 
 from datetime import datetime, time, timedelta
+from types import SimpleNamespace
 from typing import Any
 from uuid import UUID
 from zoneinfo import ZoneInfo
@@ -51,6 +52,7 @@ from secretaria.services.attendee import (
     authorization_body,
     parse_attendee_name,
 )
+from secretaria.services.booking_dates import short_day_phrase
 from secretaria.services.booking_details import clinic_address_line
 from secretaria.services.calendar import (
     CalendarSlotTakenError,
@@ -72,7 +74,7 @@ from secretaria.services.payments.adjustment_suspension import SUSPENDED_VISIT_T
 from secretaria.services.payments.service_change_policy import MoneyTerms, money_fields_changed
 from secretaria.services.service_catalog import entry_service_id
 from secretaria.services.tenant_config import professional_appointment_types
-from secretaria.services.unit_booking import event_unit_fields
+from secretaria.services.unit_booking import blocked_on, event_unit_fields, service_calendar
 
 logger = get_logger(__name__)
 
@@ -134,16 +136,65 @@ def _doctor(professionals, draft: ae.EditDraft):
     return fr._find_professional_by_id(professionals, _uuid(draft.current["professional_id"]))
 
 
-def _calendar(ctx: ae.EditContext, draft: ae.EditDraft, professionals) -> Any | None:
+def _draft_entry(tenant, draft: ae.EditDraft, doctor) -> dict | None:
+    """`doctor`'s own catalog entry for the draft's service, or None when he does not offer it."""
+    return fr._match_service(_services_of(tenant, doctor), draft.current["service"])
+
+
+def _blocked_days(tenant, draft: ae.EditDraft, doctor) -> frozenset[str]:
+    """Weekdays on which patients cannot book the draft's service with `doctor` at the draft's
+    unit (TASK-087). Nothing when the doctor does not offer the service (R5: not known yet)."""
+    return flow_units.blocked_weekdays_of(
+        doctor, _draft_entry(tenant, draft, doctor), _uuid(draft.current.get("unit_id"))
+    )
+
+
+def _day_check(tenant, draft: ae.EditDraft, doctor) -> fr.DayRefusal | None:
+    """day -> the patient's refusal line when the draft's service is not done that weekday
+    (`flow_router._service_day_check`), over the same doctor, entry and unit as `_blocked_days`
+    - so exactly the days `_calendar` leaves out. None when nothing is blocked (review A1)."""
+    unit_id = _uuid(draft.current.get("unit_id"))
+    return fr._service_day_check(
+        doctor,
+        _draft_entry(tenant, draft, doctor),
+        SimpleNamespace(id=unit_id) if unit_id is not None else None,
+    )
+
+
+# R4 (TASK-087 spec §9): the service's weekdays are only checked against a draft that changes one
+# of these - never against the visit as it was booked (a convênio or patient change, or picking
+# the same service / doctor again, keeps a visit on a day blocked afterwards).
+_DAY_RULE_FIELDS = frozenset({"data", "horário", "serviço", "médico", "unidade"})
+
+
+def _rechecks_day(draft: ae.EditDraft) -> bool:
+    return bool(_DAY_RULE_FIELDS.intersection(draft.changed()))
+
+
+def _calendar(
+    ctx: ae.EditContext,
+    draft: ae.EditDraft,
+    professionals,
+    tenant,
+    *,
+    service_days: bool = True,
+) -> Any | None:
     """The draft's agenda as seen from its unit (TASK-083 final wave I1), like the manage
     flow's "Remarcar" (`flow_router._appointment_unit_calendar`): the booking's unit hours,
     else the doctor's only unit / the union of their units; the plain agenda for a doctor
-    without units. May raise `CalendarOriginUnresolved` exactly like `ctx.calendar_for`."""
-    return flow_units.appointment_calendar(
+    without units - and, TASK-087, without the weekdays the draft's service is not done on there
+    (every day list, time list and free check of this flow reads this one agenda).
+    `service_days=False` only for re-checking the visit AS BOOKED (R4). May raise
+    `CalendarOriginUnresolved` exactly like `ctx.calendar_for`."""
+    doctor = _doctor(professionals, draft)
+    agenda = flow_units.appointment_calendar(
         ctx.calendar_for(draft.calendar_professional_id),
         _uuid(draft.current.get("unit_id")),
-        _doctor(professionals, draft),
+        doctor,
     )
+    if not service_days:
+        return agenda
+    return service_calendar(agenda, _blocked_days(tenant, draft, doctor))
 
 
 def _draft_unit(draft: ae.EditDraft, doctor) -> Any | None:
@@ -615,7 +666,7 @@ async def _begin_date(conversation, tenant, draft, professionals, ctx) -> fr.Flo
     return await fr.enter_day_picker(
         _carrier(conversation, draft),
         tenant,
-        _calendar(ctx, draft, professionals),
+        _calendar(ctx, draft, professionals, tenant),
         duration_minutes=draft.duration_minutes,
         branch=fr.EDIT_DAY_BRANCH,
         anchor=draft.start,
@@ -630,7 +681,7 @@ async def _slots_for(
     return await fr._enter_slot_picker(
         _carrier(conversation, draft),
         tenant,
-        _calendar(ctx, draft, professionals),
+        _calendar(ctx, draft, professionals, tenant),
         datetime.combine(day.date(), time.min),
         duration_minutes=draft.duration_minutes,
         branch=fr.EDIT_DAY_BRANCH,
@@ -645,9 +696,10 @@ async def _after_slot_affecting_change(
 
     Free -> straight to the confirmation. Not free (or unknown) -> day, then time, for the
     NEW doctor/service, behind a one-line explanation (spec P1) - never a confirmation
-    for a slot that does not exist.
+    for a slot that does not exist. TASK-087 R4: when nothing slot-affecting changed (the same
+    doctor or unit picked again) the visit is checked as booked, without the service's weekdays.
     """
-    calendar = _calendar(ctx, draft, professionals)
+    calendar = _calendar(ctx, draft, professionals, tenant, service_days=_rechecks_day(draft))
     free = await _slot_free(
         calendar,
         draft.start,
@@ -690,7 +742,7 @@ async def _reslot_picker(conversation, tenant, draft, professionals, ctx) -> fr.
     picker = await fr.enter_day_picker(
         _carrier(conversation, reslot),
         tenant,
-        _calendar(ctx, reslot, professionals),
+        _calendar(ctx, reslot, professionals, tenant),
         duration_minutes=reslot.duration_minutes,
         branch=fr.EDIT_DAY_BRANCH,
         anchor=reslot.start,
@@ -701,12 +753,53 @@ async def _reslot_picker(conversation, tenant, draft, professionals, ctx) -> fr.
     return picker
 
 
+async def _refused_day_picker(
+    conversation, tenant, draft, professionals, ctx, refusal: str
+) -> fr.FlowRouterResult:
+    """A day the draft's service is not done on (TASK-087 review A1): its refusal line over the
+    day picker - which already leaves such days out - instead of "no free time" or a question
+    about the time. `draft` carries the stage the next answer is read in."""
+    logger.info(
+        "appointment_edit_day_blocked_for_service",
+        conversation_id=str(getattr(conversation, "id", None)),
+    )
+    return await fr.enter_day_picker(
+        _carrier(conversation, draft),
+        tenant,
+        _calendar(ctx, draft, professionals, tenant),
+        duration_minutes=draft.duration_minutes,
+        branch=fr.EDIT_DAY_BRANCH,
+        anchor=draft.start,
+        prefix=refusal,
+        professionals=professionals,
+    )
+
+
+async def _time_entry(conversation, tenant, draft, professionals, ctx) -> fr.FlowRouterResult:
+    """The "Horário" entry: the times of the visit's own day - unless the service is no longer
+    done on that weekday (R4: the time changes, so the rule applies): the reason, then a new day
+    first."""
+    day_check = _day_check(tenant, draft, _doctor(professionals, draft))
+    refusal = day_check(draft.start) if day_check is not None else None
+    if refusal:
+        return await _refused_day_picker(
+            conversation, tenant, draft.with_stage(mode="time"), professionals, ctx, refusal
+        )
+    return await _slots_for(conversation, tenant, draft, draft.start, professionals, ctx)
+
+
 async def _day_step(conversation, tenant, body, draft, appt, professionals, ctx):
-    calendar = _calendar(ctx, draft, professionals)
+    calendar = _calendar(ctx, draft, professionals, tenant)
+    day_check = _day_check(tenant, draft, _doctor(professionals, draft))
     if draft.stage.get("mode") == "date":
         target, _page = fr._day_from_body(body)
         if target is None and calendar is not None:
             target = fr._parse_day(body, datetime.now(calendar.tzinfo))
+        refusal = day_check(target) if target is not None and day_check is not None else None
+        if refusal:
+            return await _refused_day_picker(
+                conversation, tenant, draft.with_stage(mode="date"), professionals, ctx, refusal
+            )
         if target is not None:
             asked = draft.with_stage(mode="date", target_day=target.date().isoformat())
             return _result(
@@ -729,6 +822,7 @@ async def _day_step(conversation, tenant, body, draft, appt, professionals, ctx)
         services=[],
         back_target=None,
         professionals=professionals,
+        refuse_day=day_check,
     )
 
 
@@ -737,12 +831,22 @@ async def _time_too_step(conversation, tenant, body, draft, appt, professionals,
     if not raw:
         return _menu_result(draft.with_stage(), ctx)
     day = datetime.fromisoformat(raw)
+    answered = fr._label_match(body, ae.LABEL_TIME_TOO_YES) or fr._label_match(
+        body, ae.LABEL_TIME_TOO_NO
+    )
+    day_check = _day_check(tenant, draft, _doctor(professionals, draft)) if answered else None
+    refusal = day_check(day) if day_check is not None else None
+    if refusal:
+        # A day stored before the service stopped being done on that weekday (review A1).
+        return await _refused_day_picker(
+            conversation, tenant, draft.with_stage(mode="date"), professionals, ctx, refusal
+        )
     if fr._label_match(body, ae.LABEL_TIME_TOO_YES):
         return await _slots_for(conversation, tenant, draft, day, professionals, ctx)
     if fr._label_match(body, ae.LABEL_TIME_TOO_NO):
         start = datetime.combine(day.date(), draft.start.time())
         end = start + timedelta(minutes=draft.duration_minutes)
-        calendar = _calendar(ctx, draft, professionals)
+        calendar = _calendar(ctx, draft, professionals, tenant)
         if await _slot_free(
             calendar,
             start,
@@ -763,7 +867,7 @@ async def _slot_step(conversation, tenant, body, draft, appt, professionals, ctx
     control = await fr._handle_slot_controls(
         conversation,
         tenant,
-        _calendar(ctx, draft, professionals),
+        _calendar(ctx, draft, professionals, tenant),
         body,
         duration_minutes=draft.duration_minutes,
         branch=fr.EDIT_DAY_BRANCH,
@@ -1145,8 +1249,14 @@ async def _service_step(conversation, tenant, body, draft, appt, professionals, 
         return _service_unit_list(
             draft.with_stage(), tenant, professionals, ctx, str(service.get("name"))
         )
-    if after_doctor or minutes != draft.duration_minutes:
-        # A different length (or a new doctor) may not fit the current time: check first.
+    if (
+        after_doctor
+        or minutes != draft.duration_minutes
+        or (_rechecks_day(new) and blocked_on(new.start, _blocked_days(tenant, new, doctor)))
+    ):
+        # A different length (or a new doctor) may not fit the current time - nor may a service
+        # that is not done on the booked weekday (TASK-087; R4: only when something changed -
+        # the same service picked again keeps the visit as booked, review A2): check first.
         return await _after_slot_affecting_change(
             conversation, tenant, new, appt, professionals, ctx
         )
@@ -1253,7 +1363,8 @@ async def _doctor_list(
     WhatsApp pages (`page`) like the booking's doctor list (TASK-082 S4).
     """
     plan = fr._selected_plan(tenant, draft.current["insurance"])
-    when = draft.start.strftime("%d/%m %H:%M")
+    # Inside the line, the day reads "ter, 15/10" (TASK-087 D4, review P5).
+    when = f"{short_day_phrase(draft.start)} {draft.start.strftime('%H:%M')}"
     roster = list(professionals or [])
     shown, more = fr.professional_page(roster, page, fixed_rows=0, event="edit_doctor_list_paged")
     to_check = list(shown) + [p for p in roster[:OPTION_PAGE_SIZE] if p not in shown]
@@ -1271,10 +1382,17 @@ async def _doctor_list(
         candidate = _with_doctor(
             draft, professional, _service_id(tenant, professional, draft.current["service"])
         )
-        calendar = flow_units.appointment_calendar(
-            ctx.calendar_for(calendar_pid),
-            _uuid(candidate.current.get("unit_id")),
-            professional,
+        calendar = service_calendar(
+            flow_units.appointment_calendar(
+                ctx.calendar_for(calendar_pid),
+                _uuid(candidate.current.get("unit_id")),
+                professional,
+            ),
+            # TASK-087: a doctor who does not do this service on that day reads busy - except
+            # the visit's own doctor on the visit as booked (R4, review A3).
+            _blocked_days(tenant, candidate, professional)
+            if _rechecks_day(candidate)
+            else frozenset(),
         )
         free = await _availability(calendar, draft.start, draft.end, ignore, pid)
         if free is not None:
@@ -1641,7 +1759,7 @@ async def _apply_confirm(
         return _refuse(_undo_placement(draft, problem), ctx, problem)
     event_id = str(appt.get("google_event_id") or "")
     try:
-        new_cal = _calendar(ctx, draft, professionals)
+        new_cal = _calendar(ctx, draft, professionals, tenant)
     except CalendarOriginUnresolved:
         return _unavailable(draft)
     doctor_changed = "médico" in changed
@@ -1671,6 +1789,11 @@ async def _apply_confirm(
         or "unidade" in changed
         or draft.duration_minutes != original_minutes
     )
+    # TASK-087 (R4): only a changed day, time, service, doctor or unit is checked against the
+    # service's weekdays - a convênio-only edit never is (`_rechecks_day`). A service change at
+    # the same length leaves `window_changed` False, hence the explicit check.
+    if _rechecks_day(draft) and blocked_on(start, _blocked_days(tenant, draft, doctor)):
+        return await _reslot_picker(conversation, tenant, draft, professionals, ctx)
     if window_changed:
         try:
             free = await new_cal.is_slot_free(
@@ -1822,7 +1945,7 @@ async def edit_step(
         if match(body, ae.LABEL_EDIT_DATE) and not ctx.reschedule_blocked:
             return await _begin_date(conversation, tenant, draft, professionals, ctx)
         if match(body, ae.LABEL_EDIT_TIME) and not ctx.reschedule_blocked:
-            return await _slots_for(conversation, tenant, draft, draft.start, professionals, ctx)
+            return await _time_entry(conversation, tenant, draft, professionals, ctx)
         if match(body, ae.LABEL_EDIT_SERVICE):
             return _service_list(draft, tenant, professionals, ctx)
         if match(body, ae.LABEL_EDIT_DOCTOR):
@@ -1839,7 +1962,7 @@ async def edit_step(
         if match(body, ae.LABEL_EDIT_DATE) and not ctx.reschedule_blocked:
             return await _begin_date(conversation, tenant, draft, professionals, ctx)
         if match(body, ae.LABEL_EDIT_TIME) and not ctx.reschedule_blocked:
-            return await _slots_for(conversation, tenant, draft, draft.start, professionals, ctx)
+            return await _time_entry(conversation, tenant, draft, professionals, ctx)
         if match(body, ae.LABEL_EDIT_SERVICE):
             return _service_list(draft.with_stage(), tenant, professionals, ctx)
         if match(body, ae.LABEL_EDIT_DOCTOR):
@@ -1947,7 +2070,7 @@ async def redisplay_edit(conversation, tenant, appointments, professionals, ctx)
         result = await fr.enter_day_picker(
             _carrier(conversation, draft),
             tenant,
-            _calendar(ctx, draft, professionals),
+            _calendar(ctx, draft, professionals, tenant),
             duration_minutes=draft.duration_minutes,
             branch=fr.EDIT_DAY_BRANCH,
             anchor=draft.start,
@@ -2181,7 +2304,7 @@ async def apply_ai_edit(conversation, tenant, proposal, appointments, profession
         if start.replace(tzinfo=_tz(tenant)) <= datetime.now(_tz(tenant)):
             return await unchanged()
         if not await _slot_free(
-            _calendar(ctx, new, professionals),
+            _calendar(ctx, new, professionals, tenant),
             start,
             end,
             _ignore_event(new, appt, ctx),

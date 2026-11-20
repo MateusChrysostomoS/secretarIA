@@ -73,8 +73,11 @@ V2_TOOL_OUTPUTS: Mapping[str, OutputAllowlist] = {
                 "error",
             }
         ),
-        # `slot_minutes` per window only when the units' durations differ (TASK-085 T8 I1).
-        records={"windows": frozenset({"day", "start", "end", "unit", "slot_minutes"})},
+        # `slot_minutes` per window only when the units' durations differ (TASK-085 T8 I1);
+        # `weekday` on every window (TASK-087).
+        records={
+            "windows": frozenset({"day", "weekday", "start", "end", "unit", "slot_minutes"})
+        },
     ),
     "list_patient_appointments": OutputAllowlist(
         frozenset({"appointments", "count", "nota", "error"}),
