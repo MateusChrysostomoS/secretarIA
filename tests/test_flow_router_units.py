@@ -1238,7 +1238,7 @@ async def test_the_booking_writes_at_the_picked_unit_of_the_service():
 # --------------------------------------------------------------------------
 
 SUL_CONFIRM_BODY = (
-    "O serviço Consulta feito por Dra. Ana é feito apenas na unidade Zona Sul, em Av. B, 20. "
+    "O serviço Consulta feito por Dra. Ana é feito *apenas na unidade Zona Sul*, em Av. B, 20. "
     "Você confirma essa unidade?"
 )
 
@@ -1257,7 +1257,7 @@ def _confirm_bubble(result) -> fr.MenuBubble:
 
 async def test_confirm_message_exact_text_and_buttons():
     assert UNIT_CONFIRM_BODY == (
-        "O serviço {servico} feito por {medico} é feito apenas na unidade {unidade}, "
+        "O serviço {servico} feito por {medico} é feito *apenas na unidade {unidade}*, "
         "em {endereco}. Você confirma essa unidade?"
     )
     doctor, _sul = _confirm_doctor()
@@ -1284,9 +1284,27 @@ async def test_confirm_message_exact_text_and_buttons():
         _conversation(), _svc_tenant(), _Agenda(), fr.LABEL_BOOK_SERVICE, professionals=[no_address]
     )
     assert _confirm_bubble(plain).body == (
-        "O serviço Consulta feito por Dra. Ana é feito apenas na unidade Zona Sul. "
+        "O serviço Consulta feito por Dra. Ana é feito *apenas na unidade Zona Sul*. "
         "Você confirma essa unidade?"
     )
+
+
+def test_unit_confirm_body_highlights_only_unit():
+    """TASK-088 C: "apenas na unidade X" is WhatsApp bold; the closing question is untouched."""
+    from secretaria.services import flow_units
+
+    doctor, _sul = _confirm_doctor()
+    centro = UnitOption(
+        id=uuid4(), name="Unidade Centro", address="Rua A, 10.", business_hours=SUL_HOURS
+    )
+    bare = UnitOption(id=uuid4(), name="Unidade Centro", address=None, business_hours=SUL_HOURS)
+    with_address = flow_units.unit_confirm_body("Consulta", doctor, centro)
+    without_address = flow_units.unit_confirm_body("Consulta", doctor, bare)
+    assert "é feito *apenas na unidade Unidade Centro*, em Rua A, 10." in with_address
+    assert "é feito *apenas na unidade Unidade Centro*." in without_address
+    for body in (with_address, without_address):
+        assert body.count("*") == 2
+        assert body.endswith("Você confirma essa unidade?")
 
 
 async def test_yes_selects_unit_and_opens_day_picker():

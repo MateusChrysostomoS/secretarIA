@@ -796,7 +796,7 @@ async def test_the_ai_draft_asks_the_sim_nao_and_never_uses_a_unit_outside_the_f
     [bubble] = res.result.bubbles
     assert isinstance(bubble, fr.MenuBubble)
     assert bubble.body == (
-        "O serviço Consulta feito por Dra. Única é feito apenas na unidade Zona Sul, "
+        "O serviço Consulta feito por Dra. Única é feito *apenas na unidade Zona Sul*, "
         "em Av. B, 20. Você confirma essa unidade?"
     )
     assert bubble.labels == [fr.LABEL_YES, fr.LABEL_NO]

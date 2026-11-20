@@ -60,11 +60,11 @@ UNIT_GONE_NOTICE = "A unidade escolhida não está mais disponível."
 STEP_AWAITING_UNIT_CONFIRM = "awaiting_unit_confirm"
 # The owner's text, verbatim. A unit without an address drops ", em {endereco}" (never "None").
 UNIT_CONFIRM_BODY = (
-    "O serviço {servico} feito por {medico} é feito apenas na unidade {unidade}, em {endereco}. "
+    "O serviço {servico} feito por {medico} é feito *apenas na unidade {unidade}*, em {endereco}. "
     "Você confirma essa unidade?"
 )
 UNIT_CONFIRM_BODY_NO_ADDRESS = (
-    "O serviço {servico} feito por {medico} é feito apenas na unidade {unidade}. "
+    "O serviço {servico} feito por {medico} é feito *apenas na unidade {unidade}*. "
     "Você confirma essa unidade?"
 )
 # TASK-086 (inventory A5/R5): the same Sim/Não when it is the CONVÊNIO that leaves one unit
