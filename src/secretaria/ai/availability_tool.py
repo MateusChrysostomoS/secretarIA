@@ -356,7 +356,7 @@ async def _read_availability(
     # TASK-085 D7: each unit's windows are sized with the service's duration AT that unit.
     own_minutes = await _unit_minutes(tenant_id, target, units)
     scanned: set[int] = set()
-    labelled: list[tuple[Any, str | None]] = []
+    labelled: list[tuple[Any, str | None, int]] = []
     truncated = False
     for unit in units or [None]:
         minutes = own_minutes.get(unit.id, target.slot_minutes) if unit else target.slot_minutes
@@ -370,17 +370,25 @@ async def _read_availability(
         )
         truncated = truncated or unit_scan.truncated
         name = unit.name if unit is not None and len(units) > 1 else None
-        labelled.extend((window, name) for window in unit_scan.windows)
+        labelled.extend((window, name, minutes) for window in unit_scan.windows)
     labelled.sort(key=lambda item: (item[0].day, item[0].start))
     if len(labelled) > MAX_WINDOWS:
         labelled, truncated = labelled[:MAX_WINDOWS], True
-    scan = WindowScan(windows=[window for window, _ in labelled], truncated=truncated)
+    scan = WindowScan(windows=[window for window, _, _ in labelled], truncated=truncated)
+    # T8 I1: the units' durations differ - each window says its own, so the model offers (and
+    # books) a time of the right length at that unit. One duration everywhere: today's shape.
+    per_window = len(scanned) > 1
 
     clamped = [*span.clamped, *([CLAMP_MAX_WINDOWS] if scan.truncated else [])]
     last = scan.windows[-1].day if scan.truncated else span.last
     result: dict[str, Any] = {
         "windows": [
-            {**window.payload(), **({"unit": name} if name else {})} for window, name in labelled
+            {
+                **window.payload(),
+                **({"unit": name} if name else {}),
+                **({"slot_minutes": minutes} if per_window else {}),
+            }
+            for window, name, minutes in labelled
         ],
         "timezone": getattr(tz, "key", None) or str(tz),
         # One duration for every unit read (one unit, or the same everywhere): that one. Units
@@ -429,12 +437,12 @@ async def get_availability(
     e `time`) - elas só preparam o cartão de confirmação, e o fluxo confere e conduz.
 
     Cada janela é um trecho contínuo em que cabe uma consulta; `slot_minutes` é a duração
-    usada (se a duração muda entre as unidades do profissional, cada janela já usa a da sua
-    unidade). Mostra no máximo 14 dias e 30 janelas por chamada. Se a resposta trouxer
-    `clamped`, a lista NÃO cobre tudo o que foi pedido: diga isso ao paciente e peça um dia
-    ou período menor. `note` resume em uma frase o que a lista cobre: respeite-a. Sem
-    janelas, diga que não há horário livre nesse período - NUNCA invente um horário nem
-    prometa um que não esteja na lista.
+    usada (se a duração muda entre as unidades do profissional, cada janela traz o seu próprio
+    `slot_minutes`, o da sua unidade: use esse). Mostra no máximo 14 dias e 30 janelas por
+    chamada. Se a resposta trouxer `clamped`, a lista NÃO cobre tudo o que foi pedido: diga
+    isso ao paciente e peça um dia ou período menor. `note` resume em uma frase o que a
+    lista cobre: respeite-a. Sem janelas, diga que não há horário livre nesse período -
+    NUNCA invente um horário nem prometa um que não esteja na lista.
 
     Args:
         professional: Nome do profissional (ou vazio). Em clínica com vários profissionais,

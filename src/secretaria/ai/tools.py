@@ -14,7 +14,7 @@ import re
 from collections.abc import Sequence
 from contextvars import ContextVar
 from dataclasses import replace
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 from urllib.parse import quote
 from uuid import UUID
@@ -606,6 +606,64 @@ async def _service_unit_refusal(
             "agent_tool_service_unit_check_failed", tool=tool_name, error=type(exc).__name__
         )
         return {"error": UNIT_LOOKUP_FAILED_ERROR}
+
+
+async def _own_unit_minutes(
+    tool_name: str, professional: Any | None, unit: Any | None, canonical_type: str | None
+) -> tuple[int | None, dict | None]:
+    """`canonical_type`'s OWN duration at `unit` for `professional` (TASK-085 D7, T8 I1).
+
+    (minutes, None) when the unit has its own duration for the doctor's service; (None, None)
+    when it does not, or there is no unit, doctor or named service - the caller keeps today's
+    behaviour (the base). The v1 tools write the window the model sends, and the model only
+    knows the base duration, so a booking at such a unit is sized HERE, server-side. The entry
+    is the doctor's stored catalog (`owner_service_catalog`: the turn's effective one carries
+    no `service_id`) and every read is scoped to this turn's tenant. A failed read answers
+    (None, an error) - a WRITE refuses rather than book a unit with the wrong length; a READ
+    ignores the error and walks the base.
+    """
+    tenant_id = _tenant_id_ctx.get()
+    if tenant_id is None or professional is None or unit is None or not canonical_type:
+        return None, None
+    from secretaria.ai.unit_scope import owner_service_catalog
+    from secretaria.core.database import async_session_factory
+    from secretaria.services.service_terms import resolve_entry_at_unit
+
+    try:
+        entries = await owner_service_catalog(tenant_id, professional)
+        canonical = canonical_service_name(entries, canonical_type)
+        entry = next((e for e in entries if service_entry_name(e) == canonical), None)
+        if entry is None:
+            return None, None
+        async with async_session_factory() as session:
+            resolved = await resolve_entry_at_unit(
+                session, tenant_id, professional.id, entry, unit.id
+            )
+    except Exception as exc:  # noqa: BLE001 - see the docstring
+        logger.warning("agent_tool_unit_duration_failed", tool=tool_name, error=type(exc).__name__)
+        return None, {"error": UNIT_LOOKUP_FAILED_ERROR}
+    if resolved.own and resolved.duration_min:
+        return resolved.duration_min, None
+    return None, None
+
+
+def _sized_end(start: datetime, end: datetime, minutes: int | None) -> datetime:
+    """The event's end: `start + minutes` when the unit has its own duration, else as given."""
+    return start + timedelta(minutes=minutes) if minutes else end
+
+
+def _slot_service(
+    text: str, tool_name: str, catalog: list | None = None
+) -> tuple[str | None, dict | None]:
+    """The service a free-slot read is sized for: the one named, or the catalog's only one.
+
+    Nothing named on a catalog of several: (None, None) - the agenda's default length, as
+    before. A named service the catalog does not have is the usual tool error.
+    """
+    names = service_names(_effective_service_catalog() if catalog is None else catalog)
+    if not (text or "").strip() and len(names) != 1:
+        return None, None
+    return _canonical_appointment_type(text, tool_name, catalog)
 
 
 # TASK-086 A14 (W5): the convênio matrix refuses this (doctor, service, unit, plan) cell.
@@ -1323,7 +1381,7 @@ async def check_availability(start: str, end: str) -> dict:
 
 
 @tool
-async def list_free_slots(day: str, max_slots: int = 6) -> dict:
+async def list_free_slots(day: str, max_slots: int = 6, appointment_type: str = "") -> dict:
     """Lista até `max_slots` horários livres dentro do horário comercial da
     clínica para o dia especificado. Use quando o paciente pedir um dia inteiro
     (\"tem horário sexta?\") ou quando quiser oferecer alternativas. Renderize
@@ -1332,6 +1390,8 @@ async def list_free_slots(day: str, max_slots: int = 6) -> dict:
     Args:
         day: Dia no formato YYYY-MM-DD (ex: 2026-05-29).
         max_slots: Quantidade máxima de slots a retornar (default 6, máx 10).
+        appointment_type: Nome EXATO do serviço que o paciente quer (opcional): os horários
+            vêm do tamanho desse serviço. Se a clínica tiver só um serviço, pode deixar em branco.
     """
     blocked = _blocked_by_toolset_v2("list_free_slots")
     if blocked is not None:
@@ -1342,10 +1402,24 @@ async def list_free_slots(day: str, max_slots: int = 6) -> dict:
     unit, unit_error = await _sole_professional_unit("list_free_slots")
     if unit_error is not None:
         return unit_error
+    minutes: int | None = None
+    if unit is not None:
+        # TASK-085 D7 (T8 I1): at a unit with its own duration, the slots have that length.
+        canonical, service_error = _slot_service(appointment_type, "list_free_slots")
+        if service_error is not None:
+            return service_error
+        tenant_id = _tenant_id_ctx.get()
+        if canonical and tenant_id is not None:
+            from secretaria.ai.unit_scope import sole_professional_row
+
+            owner = await sole_professional_row(tenant_id, _sole_professional_id())
+            minutes, _ignored = await _own_unit_minutes("list_free_slots", owner, unit, canonical)
     target_day = date.fromisoformat(day)
     day_dt = datetime.combine(target_day, datetime.min.time())
     held = await held_busy_windows(_sole_professional_id())
     extra = {"extra_busy": held} if held else {}
+    if minutes:
+        extra["slot_minutes"] = minutes
     slots = await scoped_calendar(_get_calendar(), unit).list_free_slots(
         day=day_dt,
         max_slots=min(max(max_slots, 1), 10),
@@ -1437,6 +1511,7 @@ async def create_event(
     unit, unit_error = await _sole_professional_unit("create_event", fail_closed=True)
     if unit_error is not None:
         return unit_error
+    own_minutes: int | None = None
     if unit is not None:
         # The service must be one the doctor does at this unit (spec §6.1, §9.13).
         from secretaria.ai.unit_scope import sole_professional_row
@@ -1450,6 +1525,10 @@ async def create_event(
         refused = await _service_unit_refusal("create_event", unit, owner, None, canonical_type)
         if refused is not None:
             return refused
+        # TASK-085 D7 (T8 I1): the unit's own duration sizes the event, not the model's end.
+        own_minutes, refused = await _own_unit_minutes("create_event", owner, unit, canonical_type)
+        if refused is not None:
+            return refused
     # TASK-086 A14: the convênio must be accepted for this service at this unit (or, with no
     # unit link, in the "no unit" slice) - before any calendar call.
     refused = await _insurance_refusal(
@@ -1460,6 +1539,7 @@ async def create_event(
 
     cal = scoped_calendar(_get_calendar(), unit)
     fallback_start, fallback_end = _localize_window(start, end, cal)
+    fallback_end = _sized_end(fallback_start, fallback_end, own_minutes)
     if unit is not None:
         from secretaria.ai.unit_scope import outside_unit_hours
 

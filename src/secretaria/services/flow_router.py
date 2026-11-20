@@ -133,6 +133,7 @@ from secretaria.services.unit_booking import (
     confirmation_unit_lines,
     event_unit_fields,
     unit_fields,
+    unit_place_label,
 )
 
 if TYPE_CHECKING:
@@ -193,14 +194,17 @@ STEP_AWAITING_PLAN_REFUSED = "awaiting_plan_refused"
 LABEL_PLAN_OTHER_DOCTOR = "Outro médico"
 LABEL_PLAN_OTHER_SERVICE = "Outro serviço"
 LABEL_PLAN_CHANGE_INSURANCE = "Trocar convênio"
+PLAN_REFUSED_HOW_TO_GO_ON = "Como você prefere seguir?"
 PLAN_REFUSED_BODY = (
-    "{quem} não atende o convênio {convenio} em {servico}. Como você prefere seguir?"
+    "{quem} não atende o convênio {convenio} em {servico}. " + PLAN_REFUSED_HOW_TO_GO_ON
 )
 # The final guard (TASK-086 A7): the clinic changed the matrix while the patient was booking.
-PLAN_REFUSED_AT_CONFIRM = (
+# With the convênio step off (T9 review minor 6) the lead goes on the "não atende" menu instead.
+PLAN_REFUSED_AT_CONFIRM_LEAD = (
     "Desculpe, o convênio {convenio} não é mais aceito para {servico}{quem}{onde}. "
-    "Nada foi agendado. Escolha outro convênio ou Particular:"
+    "Nada foi agendado."
 )
+PLAN_REFUSED_AT_CONFIRM = PLAN_REFUSED_AT_CONFIRM_LEAD + " Escolha outro convênio ou Particular:"
 # Structured reasons for `insurance_step_skipped` (see _insurance_step_skip_reason).
 # Count-only observability: which CONFIGURATION silenced the step, never which
 # plan a patient picked.
@@ -3817,8 +3821,16 @@ async def _handle_service_help(
         outcome = await run_service_help(
             conversation_id=getattr(conversation, "id", None),
             # TASK-085 D3: the model reads the prices the service card would show - a price
-            # that differs between the doctor's units is not given to it before the unit.
-            services=[_priced_entry(service, professional) for service in services],
+            # that differs between the doctor's units is not given to it before the unit; once
+            # the unit is picked (and does the service), that unit's price (T8 review c).
+            services=[
+                _priced_entry(
+                    service,
+                    professional,
+                    _service_card_unit_id(conversation, professional, service),
+                )
+                for service in services
+            ],
             patient_message=body,
             final_round=final_round,
         )
@@ -5053,21 +5065,21 @@ def _service_entry_name(conversation: Any, entry: dict | None) -> str:
 
 
 # TASK-085 D3 (owner's example: "Consulta na Unidade Centro: R$ 250,00 · 30 min"). Without a
-# price at that unit the "{preco} · " part is dropped.
-UNIT_TERMS_LINE = "{servico} na {unidade}: {preco} · {duracao} min"
-UNIT_TERMS_LINE_NO_PRICE = "{servico} na {unidade}: {duracao} min"
-_UNIT_WORD = re.compile(r"unidade\b", re.IGNORECASE)
+# price at that unit the "{preco} · " part is dropped. A no-break space (U+00A0) binds "min" to
+# its number and "R$" to the value, so a narrow chat never breaks "R$ / 250,00" (T8 cosmetic).
+_NBSP = "\u00a0"
+UNIT_TERMS_LINE = "{servico} na {unidade}: {preco} · {duracao}" + _NBSP + "min"
+UNIT_TERMS_LINE_NO_PRICE = "{servico} na {unidade}: {duracao}" + _NBSP + "min"
 
 
 def _unit_terms_text(service_name: str, unit: Any, price: str | None, minutes: int) -> str:
     """The D3 confirmation line. A unit already named "Unidade ..." is not prefixed again
-    ("Consulta na Unidade Centro", never "na Unidade Unidade Centro")."""
-    name = str(getattr(unit, "name", None) or "").strip()
-    place = name if _UNIT_WORD.match(name) else f"Unidade {name}"
+    ("Consulta na Unidade Centro", never "na Unidade Unidade Centro": `unit_place_label`)."""
+    place = unit_place_label(getattr(unit, "name", None))
     values = {"servico": service_name.strip(), "unidade": place, "duracao": minutes}
     shown = price_text(price)
     if shown:
-        return UNIT_TERMS_LINE.format(preco=shown, **values)
+        return UNIT_TERMS_LINE.format(preco=shown.replace("R$ ", "R$" + _NBSP), **values)
     return UNIT_TERMS_LINE_NO_PRICE.format(**values)
 
 
@@ -5886,12 +5898,30 @@ def _booking_insurance_refusal(
     )
     name = str(getattr(owner, "name", "") or "").strip()
     unit_name = str(getattr(unit, "name", "") or "").strip() if unit is not None else ""
-    notice = PLAN_REFUSED_AT_CONFIRM.format(
-        convenio=str(insurance or "").strip(),
-        servico=str(conversation.flow_selected_type or "a consulta"),
-        quem=f" com {name}" if name else "",
-        onde=f" na unidade {unit_name}" if unit_name else "",
-    )
+    values = {
+        "convenio": str(insurance or "").strip(),
+        "servico": str(conversation.flow_selected_type or "a consulta"),
+        "quem": f" com {name}" if name else "",
+        "onde": f" na unidade {unit_name}" if unit_name else "",
+    }
+    if _insurance_step_skip_reason(tenant) is not None:
+        # TASK-086 T9 review (minor 6): the clinic no longer asks the convênio, so its list is
+        # never reopened - the "não atende este convênio" step instead (another doctor / another
+        # service; no "Trocar convênio" with the step off), with the same refusal sentence.
+        result = _enter_plan_refused(
+            conversation,
+            tenant,
+            professionals,
+            owner,
+            str(conversation.flow_selected_type or ""),
+            service_id,
+        )
+        menu = result.bubbles[0]
+        menu.body = (
+            f"{PLAN_REFUSED_AT_CONFIRM_LEAD.format(**values)} {PLAN_REFUSED_HOW_TO_GO_ON}"
+        )[:MAX_INTERACTIVE_BODY_CHARS]
+        return result
+    notice = PLAN_REFUSED_AT_CONFIRM.format(**values)
     result = _enter_insurance(tenant, conversation, professionals=professionals)
     result.bubbles.insert(0, TextBubble(body=notice))
     return result
@@ -7562,6 +7592,36 @@ def _rebooking_duration(tenant: Tenant, service_name: str | None) -> int:
     return tenant.appointment_duration_min
 
 
+def _rebooking_unit_and_duration(
+    tenant: Tenant,
+    owner: Any | None,
+    service_name: str | None,
+    cancelled_unit_id: UUID | None,
+) -> tuple[Any | None, int]:
+    """The unit the rebooked day list is read at, and its slot length (TASK-085 T8 (b)).
+
+    The cancelled consultation's unit when `owner` still offers it for the service, else the
+    owner's only unit for it; then `_service_duration_at` there (its own duration, else the
+    base) - the very value the next step's slot list reads (`_booking_duration`). No owner, no
+    unit link, no matching entry or a unit not decided (two or more, none on the booking):
+    (None, `_rebooking_duration`), exactly as before.
+    """
+    base = _rebooking_duration(tenant, service_name)
+    if owner is None or not flow_units.bookable_units(owner) or not service_name:
+        return None, base
+    entry = _match_service(professional_appointment_types(owner, tenant), service_name)
+    if entry is None:
+        return None, base
+    service_id = entry_service_id(entry)
+    unit = flow_units.find_unit(owner, cancelled_unit_id, service_id)
+    if unit is None:
+        choice = flow_units.unit_choice(owner, service_id)
+        unit = choice.units[0] if choice.kind == "implied" else None
+    if unit is None:
+        return None, base
+    return unit, _service_duration_at(entry, tenant, owner, unit.id)
+
+
 def rebooking_candidates(
     tenant: Tenant,
     professionals: list,
@@ -7608,6 +7668,7 @@ async def enter_rebooking(
     same_professional: bool,
     candidates: list | None = None,
     prefix: str | None = None,
+    cancelled_unit_id: UUID | None = None,
 ) -> FlowRouterResult:
     """Deterministic destination for both rebooking buttons.
 
@@ -7622,26 +7683,40 @@ async def enter_rebooking(
 
     The service rides along in EVERY branch, so the patient never re-picks it.
     Nothing here reaches the LLM.
-    """
-    duration = _rebooking_duration(tenant, service_name)
 
-    if same_professional:
+    TASK-085 T8 (b): when the day list opens for a known doctor, it is read at the cancelled
+    consultation's unit (`cancelled_unit_id`, when that doctor offers it) or the doctor's only
+    unit - its hours and its own duration - and that unit is kept for the slot step, so a day
+    shown free has times of the length the slot list offers.
+    """
+
+    async def _days_for(owner_id: UUID | None) -> FlowRouterResult:
+        owner = _find_professional_by_id(professionals, owner_id)
+        unit, duration = _rebooking_unit_and_duration(
+            tenant, owner, service_name, cancelled_unit_id
+        )
         result = await enter_day_picker(
             conversation,
             tenant,
-            calendar,
+            _unit_calendar(calendar, unit),
             duration_minutes=duration,
             branch=BOOKING_DAY_BRANCH,
             professionals=professionals,
             # TASK-052: "Remarcar" on a released PAID slot says what happens to the deposit.
             prefix=prefix,
+            back_target=None if same_professional else BACK_TARGET_SERVICE,
         )
         # enter_day_picker knows nothing about who or what is being booked, and
         # these fields are written unconditionally by the caller — so a result
         # that should keep them must carry them explicitly (FlowRouterResult).
-        result.flow_selected_professional_id = cancelled_professional_id
+        result.flow_selected_professional_id = owner_id
         result.flow_selected_type = service_name
+        if unit is not None and result.flow_state is FlowState.SERVICE_CATALOG:
+            result.flow_selected_unit_id = unit.id
         return result
+
+    if same_professional:
+        return await _days_for(cancelled_professional_id)
 
     pool = candidates or []
     if not pool:
@@ -7653,19 +7728,7 @@ async def enter_rebooking(
 
     if len(pool) == 1:
         # One candidate: a one-row list is ceremony, not a choice.
-        result = await enter_day_picker(
-            conversation,
-            tenant,
-            calendar,
-            duration_minutes=duration,
-            branch=BOOKING_DAY_BRANCH,
-            professionals=professionals,
-            prefix=prefix,
-            back_target=BACK_TARGET_SERVICE,
-        )
-        result.flow_selected_professional_id = pool[0].id
-        result.flow_selected_type = service_name
-        return result
+        return await _days_for(pool[0].id)
 
     result = _enter_professional_list(tenant, pool, pool=True)
     if prefix:

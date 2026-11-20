@@ -1109,12 +1109,8 @@ def unit_change_label(service: str, unit_name: str | None) -> str:
     """ "{serviço} na Unidade {unidade}" - the patient's name for a consultation that changes
     PLACE only (the same spelling as the booking's confirmation line, TASK-085 A7). A unit
     already called "Unidade ..." is not doubled; no unit is the service alone."""
-    name = (unit_name or "").strip()
-    if not name:
-        return service
-    if name.casefold().startswith("unidade"):
-        return f"{service} na {name}"
-    return f"{service} na Unidade {name}"
+    place = unit_booking.unit_place_label(unit_name)
+    return f"{service} na {place}" if place else service
 
 
 # `preview_service_change(insurance=...)` default: the convênio the appointment has.
@@ -4353,7 +4349,7 @@ def _unit_label(unit_id: str, unit_names: dict) -> str:
     name = unit_names.get(unit_id)
     if not name:
         return _OTHER_UNIT
-    return name if name.casefold().startswith("unidade") else f"Unidade {name}"
+    return unit_booking.unit_place_label(name)
 
 
 def _summary_when(value: str | None, tz) -> datetime | None:

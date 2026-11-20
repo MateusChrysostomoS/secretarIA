@@ -212,13 +212,22 @@ def _service_price(service: dict, professional: Any | None) -> Any:
     `professional` is the booking professional's router-shaped view (`_service_terms_view`).
     Without a per-unit value for the service: the entry's own price, as always. With one: the
     D3 rule - hidden when it differs between the units (a sentence, never a number), the unit's
-    own when the service is done at one unit only.
+    own when the service is done at one unit only. The unit the patient already picked
+    (`chosen_unit_id`, set by `_service_terms_view`), when it is one where the professional does
+    this service: that unit's price (TASK-085 T8 review c) - as the service card shows it.
     """
+    from secretaria.services import flow_units
+    from secretaria.services.service_catalog import entry_service_id
     from secretaria.services.tenant_config import entry_shown_terms
 
     shown = entry_shown_terms(professional, service)
     if shown is None:
         return service.get("price")
+    chosen = flow_units.find_unit(
+        professional, getattr(professional, "chosen_unit_id", None), entry_service_id(service)
+    )
+    if chosen is not None:
+        return flow_units.shown_terms(professional, service, chosen.id).price
     return PRICE_DEPENDS_ON_UNIT if shown.price_hidden else shown.price
 
 
@@ -421,4 +430,8 @@ async def _service_terms_view(conversation_id: UUID | None) -> Any | None:
             row = roster[0] if len(roster) == 1 else None
         if row is None:
             return None
-        return await professional_terms_view(session, tenant, row)
+        view = await professional_terms_view(session, tenant, row)
+    # The unit the patient already picked (T8 review c); `_service_price` uses it only when it
+    # is one of THIS professional's units doing the service.
+    view.chosen_unit_id = conversation.flow_selected_unit_id
+    return view
