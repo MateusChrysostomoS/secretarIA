@@ -221,6 +221,86 @@ async def shared_busy(
 
 
 # --------------------------------------------------------------------------
+# Consultation windows: what the buffer between consultations pads (TASK-088 §B)
+# --------------------------------------------------------------------------
+
+# `appointment_type` of the hub's clinic BLOCK (api/hub/calendar.py::create_block): an
+# appointment row with no patient, written so the block shows in the agenda.
+BLOCK_APPOINTMENT_TYPE = "Bloqueado"
+
+
+async def consultation_windows(
+    session: AsyncSession,
+    tenant_id: UUID,
+    professional_id: UUID | None,
+    start: datetime,
+    end: datetime,
+    *,
+    ignore_event_id: str | None = None,
+) -> list[tuple[datetime, datetime]]:
+    """Windows of the CONSULTATIONS of one agenda that overlap `[start, end)`; sorted, deduped.
+
+    A consultation is a LIVE appointment row (`LIVE_APPOINTMENT_STATUSES`, not suspended by a
+    pending change: `occupies_slot_clause`) WITH a patient and not a block. Whose: the
+    professional's own rows at `tenant_id` (`professional_id` None = the clinic's own rows,
+    those without a professional) plus every SIBLING's row on the same agenda, at any clinic
+    (`sibling_professional_ids`): the buffer belongs to the person, not to the clinic.
+
+    What is NOT a consultation, on purpose (designer decision 2: when the two cannot be told
+    apart, offer LESS padding): blocks (no patient / `BLOCK_APPOINTMENT_TYPE`), all-day and
+    transparent events, and any calendar event with no appointment row (typed straight into
+    Google, a local event nobody booked). `ignore_event_id` drops the row whose
+    `google_event_id` is it: the booking being moved never pads itself.
+
+    Only bare windows leave this function. `start`/`end` may be in any zone.
+    """
+    start, end = _utc(start), _utc(end)
+    own = Appointment.tenant_id == tenant_id
+    own = and_(
+        own,
+        Appointment.professional_id.is_(None)
+        if professional_id is None
+        else Appointment.professional_id == professional_id,
+    )
+    siblings = await sibling_professional_ids(session, professional_id)
+    owner = or_(own, Appointment.professional_id.in_(siblings)) if siblings else own
+    query = select(Appointment.start_at, Appointment.end_at).where(
+        owner,
+        Appointment.status.in_(LIVE_APPOINTMENT_STATUSES),
+        Appointment.patient_id.is_not(None),
+        or_(
+            Appointment.appointment_type.is_(None),
+            Appointment.appointment_type != BLOCK_APPOINTMENT_TYPE,
+        ),
+        Appointment.start_at.is_not(None),
+        Appointment.end_at.is_not(None),
+        Appointment.start_at < end,
+        Appointment.end_at > start,
+        occupies_slot_clause(),
+    )
+    if ignore_event_id:
+        query = query.where(Appointment.google_event_id != ignore_event_id)
+    rows = await session.execute(query)
+    return sorted({(_aware(s), _aware(e)) for s, e in rows.all()})
+
+
+async def read_consultation_windows(
+    tenant_id: UUID,
+    professional_id: UUID | None,
+    start: datetime,
+    end: datetime,
+    *,
+    ignore_event_id: str | None = None,
+) -> list[tuple[datetime, datetime]]:
+    """`consultation_windows` in its OWN short session (like `shared_busy_provider`): no lock,
+    no connection held past the call, never joins the caller's transaction."""
+    async with async_session_factory() as session:
+        return await consultation_windows(
+            session, tenant_id, professional_id, start, end, ignore_event_id=ignore_event_id
+        )
+
+
+# --------------------------------------------------------------------------
 # The read seam CalendarService consumes (spec §7 item 1)
 # --------------------------------------------------------------------------
 

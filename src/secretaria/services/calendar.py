@@ -577,6 +577,31 @@ class CalendarService:
         """The unit this agenda object was scoped to (`with_unit`), or None."""
         return getattr(self, "_unit_id", None)
 
+    async def consultation_windows(
+        self, start: datetime, end: datetime, *, ignore_event_id: str | None = None
+    ) -> list[tuple[datetime, datetime]]:
+        """The windows of this agenda's CONSULTATIONS overlapping [start, end) (TASK-088 §B).
+
+        The read seam of the buffer between consultations (services/availability.py): what a
+        consultation is - and what is not (blocks, all-day events, events with no appointment
+        row) - is defined by services/agenda.py::consultation_windows, siblings' included.
+        Bare aware windows only. `ignore_event_id` is the booking being moved. An agenda
+        that is not a clinic's (the bare env-token service, `_tenant_id` None) has none.
+        """
+        tenant_id = getattr(self, "_tenant_id", None)
+        if tenant_id is None:
+            return []
+        # Imported here: services/agenda.py pulls the models and booking_hold in.
+        from secretaria.services.agenda import read_consultation_windows
+
+        return await read_consultation_windows(
+            tenant_id,
+            getattr(self, "_owner_professional_id", None),
+            self._ensure_tz(start),
+            self._ensure_tz(end),
+            ignore_event_id=ignore_event_id,
+        )
+
     async def overlaps_shared_busy(self, start: datetime, end: datetime) -> bool:
         """Whether [start, end) overlaps the person's busy time at ANOTHER clinic.
 
