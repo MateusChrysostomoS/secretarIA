@@ -249,20 +249,6 @@ async def test_select_service_goes_straight_to_the_day_picker_without_a_card_or_
     assert "R$" not in " ".join(getattr(b, "body", "") or "" for b in res.bubbles)
 
 
-def test_service_detail_text_prefixes_a_bare_price_with_reais():
-    service = {"name": "Cirurgia de Coluna", "price": "20000"}
-    assert flow_router._service_detail_text(service, _tenant()) == (
-        "Cirurgia de Coluna R$20000\n\nDeseja agendar esse serviço?"
-    )
-
-
-def test_service_detail_text_does_not_double_prefix_an_already_priced_value():
-    service = {"name": "Primeira Consulta", "price": "R$ 250"}
-    text = flow_router._service_detail_text(service, _tenant())
-    assert "Primeira Consulta R$ 250" in text
-    assert "R$R$" not in text
-
-
 async def test_unmatched_service_delegates_preserving_state():
     conv = _conversation(flow_state=FlowState.SERVICE_CATALOG, flow_step=STEP_AWAITING_SERVICE)
     res = await route(conv, _tenant(), None, "blá blá")

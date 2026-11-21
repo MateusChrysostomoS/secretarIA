@@ -61,8 +61,8 @@ def _format_business_hours(hours: dict) -> str:
 
 
 # TASK-085 D3: what a text the model reads says in place of a price that differs between the
-# units of the professional - never a number, never a range ("de X a Y"). Shared with the
-# scoped-help options block (ai/scoped_help.py).
+# units of the professional - never a number, never a range ("de X a Y"). Used by the agent's
+# service list only: the scoped-help options block carries no money at all (TASK-088 R38).
 PRICE_DEPENDS_ON_UNIT = (
     "valor depende da unidade escolhida (só informe depois que o paciente escolher a unidade; "
     "nunca uma faixa)"

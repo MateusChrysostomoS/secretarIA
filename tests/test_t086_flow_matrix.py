@@ -236,9 +236,6 @@ def test_flow_units_without_kwargs_or_with_an_empty_matrix_is_todays():
                 doctor, service_id
             )
         assert base.by_plan is False
-    assert fu.unit_confirm_body("Consulta", doctor, sul) == fu.unit_confirm_body(
-        "Consulta", doctor, sul, convenio=None
-    )
 
 
 @pytest.mark.parametrize("mode", MODES)
@@ -299,20 +296,6 @@ def test_flow_units_effective_and_find_unit_drop_a_refused_pick():
     assert fu.effective_unit(conversation, doctor, ECO_ID, **plan) is None
     assert fu.find_unit(doctor, centro.id, ECO_ID, **plan) is None
     assert fu.find_unit(doctor, sul.id, ECO_ID, **plan).id == sul.id
-
-
-def test_flow_units_confirm_text_names_the_convenio():
-    _centro, sul, _norte = _units()
-    doctor = _doctor()
-    assert fu.unit_confirm_body("Ecocardiograma", doctor, sul, convenio="Unimed") == (
-        "Pelo convênio Unimed, o serviço Ecocardiograma com Dra. Ana é atendido apenas na "
-        "unidade Zona Sul, em Av. B, 20. Você confirma essa unidade?"
-    )
-    bare = UnitOption(id=sul.id, name="Zona Sul", address=None, business_hours=SUL_HOURS)
-    assert fu.unit_confirm_body("Ecocardiograma", doctor, bare, convenio="Unimed") == (
-        "Pelo convênio Unimed, o serviço Ecocardiograma com Dra. Ana é atendido apenas na "
-        "unidade Zona Sul. Você confirma essa unidade?"
-    )
 
 
 # --------------------------------------------------------------------------

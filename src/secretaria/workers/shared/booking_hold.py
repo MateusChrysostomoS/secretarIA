@@ -213,8 +213,10 @@ INSURANCE_REFUSED_AT_CONFIRM_LEAD = (
 INSURANCE_REFUSED_AT_CONFIRM_MESSAGE = (
     f"{INSURANCE_REFUSED_AT_CONFIRM_LEAD} Vamos escolher o convênio de novo."
 )
+# TASK-088: the lead WITHOUT "Vamos escolher o convênio de novo." - it would promise a question
+# that the next sentence ("Digite *menu*...") says will not come.
 _INSURANCE_REFUSED_NO_REOFFER_MESSAGE = (
-    f"{INSURANCE_REFUSED_AT_CONFIRM_MESSAGE}\n\nDigite *menu* para começar outro agendamento."
+    f"{INSURANCE_REFUSED_AT_CONFIRM_LEAD}\n\nDigite *menu* para começar outro agendamento."
 )
 
 # Said only when the conversation cannot be re-read to rebuild the slot list (it was
@@ -739,10 +741,10 @@ async def _insurance_refused_reoffer(
     """The convênio question again, for the doctor, service and attendee the hold carried.
 
     Built through the flow's public entry for "service already chosen"
-    (`flow_router.enter_guided_booking` with no convênio), which asks the convênio when the
-    clinic collects it - the same step and carries a booking with a known service gets. The
-    unit and the time are NOT kept: the unit list that follows is filtered by the new
-    convênio, and the day comes after it. The doctor rides along only when the roster would
+    (`flow_router.enter_guided_booking` with no convênio): the unit when the doctor has several,
+    then the convênio when the clinic collects it (the list of what is accepted at that unit, or
+    Particular with its line), then the day - the order of every booking since TASK-088. The
+    unit and the time are NOT kept. The doctor rides along only when the roster would
     not imply it (as `_slot_taken_reoffer`), and a "Marcar outra" marker is kept so the next
     booking still replaces the original. No conversation to rebuild from -> the plain line.
     """

@@ -16,6 +16,7 @@ os.environ.setdefault("META_APP_SECRET", "test-app-secret")
 os.environ.setdefault("META_VERIFY_TOKEN", "test-verify-token")
 os.environ.setdefault("META_ACCESS_TOKEN", "test-access-token")
 os.environ.setdefault("META_PHONE_NUMBER_ID", "1234567890")
+os.environ.setdefault("OPENAI_API_KEY", "test-openai-key")
 
 import datetime as dt  # noqa: E402
 from datetime import datetime, timedelta  # noqa: E402

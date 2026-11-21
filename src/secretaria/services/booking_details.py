@@ -11,7 +11,7 @@ clinic's address when the clinic has one stored (`Tenant.address`, read by
 workers/shared/draft_resolution.py::_load_draft_context).
 
 Pure: plain values in, one string out - no flow_router import (flow_router imports
-`price_text` from here), no database, no logging. The text names a third party and the
+`service_price_text` from here), no database, no logging. The text names a third party and the
 patient's convênio, so it is sent and never logged.
 
 Size: a text message caps at MAX_TEXT_MESSAGE_CHARS (core/whatsapp_limits.py), and a clinic
@@ -53,8 +53,9 @@ def _clean(value: Any) -> str | None:
 def price_text(price: Any) -> str | None:
     """The price as the patient reads it ("R$250", "R$ 250"), or None when there is none.
 
-    The ONE spelling the service card (`flow_router._service_detail_text`) and the booking
-    details share: a value without the "R$" prefix gets it, one that has it is kept.
+    The ONE spelling of a service price (the final confirmation's value line,
+    `flow_router.booking_price_line`, reads it through `service_price_text`): a value without
+    the "R$" prefix gets it, one that has it is kept.
     """
     if not price:
         return None

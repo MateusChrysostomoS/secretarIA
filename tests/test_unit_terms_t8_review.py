@@ -583,7 +583,7 @@ async def _router_help(monkeypatch, *, unit_id):
     conversation.flow_selected_professional_id = ana.id
     conversation.flow_selected_unit_id = unit_id
     await fr._handle_service_help(
-        conversation, _rb_tenant(), "quanto custa?", ana.appointment_types, ana
+        conversation, _rb_tenant(), "quanto custa?", ana.appointment_types
     )
     [service] = seen["services"]
     return service.get("price")
@@ -684,22 +684,19 @@ def test_m3_unit_place_label(name, place):
 def test_m3_the_three_texts_name_the_unit_alike(name):
     place = unit_place_label(name)
     assert service_change.unit_change_label("Consulta", name) == f"Consulta na {place}"
-    line = fr._unit_terms_text("Consulta", SimpleNamespace(name=name), None, 30)
+    line = fr._unit_terms_text("Consulta", SimpleNamespace(name=name), 30)
     assert line.startswith(f"Consulta na {place}:")
     assert service_change._unit_label("u1", {"u1": name}) == place
 
 
-# ========================== cosmetic: "R$" and "min" never broken from their number (NBSP)
+# ========================== cosmetic: "min" never broken from its number (NBSP)
 
 NBSP = "\u00a0"
 
 
-def test_terms_line_keeps_the_money_and_minutes_together():
+def test_terms_line_keeps_the_minutes_together_and_has_no_money():
     centro = SimpleNamespace(name="Centro")
-    assert fr._unit_terms_text("Consulta", centro, "R$ 250,00", 40) == (
-        f"Consulta na Unidade Centro: R${NBSP}250,00 · 40{NBSP}min"
-    )
-    assert fr._unit_terms_text("Consulta", centro, None, 40) == (
+    assert fr._unit_terms_text("Consulta", centro, 40) == (
         f"Consulta na Unidade Centro: 40{NBSP}min"
     )
 

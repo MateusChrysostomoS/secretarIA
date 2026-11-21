@@ -109,7 +109,7 @@ async def test_the_doctor_tap_asks_the_worker_to_resume():
     res = await fr.route(
         _at(fr.STEP_AWAITING_PROFESSIONAL, flow_selected_type="Primeira Consulta"),
         _tenant(),
-        None,
+        _FakeCalendar(),
         "Dr. Beto",
         professionals=[ANA, BETO],
     )
@@ -118,7 +118,10 @@ async def test_the_doctor_tap_asks_the_worker_to_resume():
 
 
 async def test_the_service_tap_asks_the_worker_to_resume():
-    res = await fr.route(_at(fr.STEP_AWAITING_SERVICE), _tenant(), None, "Primeira Consulta")
+    # TASK-088: the tap goes straight on to the days (no service card), so it needs an agenda.
+    res = await fr.route(
+        _at(fr.STEP_AWAITING_SERVICE), _tenant(), _FakeCalendar(), "Primeira Consulta"
+    )
     assert res.resume_draft is True
     assert res.flow_selected_type == "Primeira Consulta"
 

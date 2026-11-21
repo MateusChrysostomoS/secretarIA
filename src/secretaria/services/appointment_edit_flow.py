@@ -362,28 +362,6 @@ def _insurance_refused(draft: ae.EditDraft, tenant, doctor) -> bool:
     )
 
 
-def _units_taking_plan(tenant, doctor, units: list, service_id, insurance: str | None) -> list:
-    """A12: `units` (the service's units) where the matrix lets `doctor` take the convênio."""
-    plan_id = _plan_id(tenant, insurance)
-    return [u for u in units if _matrix_takes(tenant, doctor, service_id, u.id, plan_id)]
-
-
-def _doctor_units_taking_plan(tenant, doctor, units: list, insurance: str | None) -> list:
-    """A12: `units` where `doctor` takes the convênio for at least one service done there."""
-    plan_id = _plan_id(tenant, insurance)
-    if plan_id is None or not has_exceptions(snapshot_exceptions(tenant)):
-        return list(units)
-    entries = _services_of(tenant, doctor)
-    return [
-        unit
-        for unit in units
-        if any(
-            _matrix_takes(tenant, doctor, entry_service_id(entry), unit.id, plan_id)
-            for entry in flow_units.services_at_unit(doctor, entries, unit.id)
-        )
-    ]
-
-
 def _mark_refused_services(rows: list, services: list, refused: set[str]) -> list:
     """`rows` (2- or 3-tuples, `svc|<name>` ids) with "não atende este convênio" on the
     services in `refused`; every other row exactly as it was."""

@@ -67,17 +67,6 @@ UNIT_CONFIRM_BODY_NO_ADDRESS = (
     "O serviço {servico} feito por {medico} é feito *apenas na unidade {unidade}*. "
     "Você confirma essa unidade?"
 )
-# TASK-086 (inventory A5/R5): the same Sim/Não when it is the CONVÊNIO that leaves one unit
-# (the service itself is done at two or more) - never "o serviço é feito apenas", which would
-# blame the clinic's unit setup for a convênio rule.
-UNIT_CONFIRM_PLAN_BODY = (
-    "Pelo convênio {convenio}, o serviço {servico} com {medico} é atendido apenas na unidade "
-    "{unidade}, em {endereco}. Você confirma essa unidade?"
-)
-UNIT_CONFIRM_PLAN_BODY_NO_ADDRESS = (
-    "Pelo convênio {convenio}, o serviço {servico} com {medico} é atendido apenas na unidade "
-    "{unidade}. Você confirma essa unidade?"
-)
 UNIT_LIST_BUTTON = "Ver unidades"
 UNIT_LIST_SECTION = "Unidades"
 # `unit|<uuid>` is a payload row (schemas/webhook.py::_PAYLOAD_ROW_PREFIXES): the tap arrives
@@ -283,7 +272,9 @@ class UnitChoice:
     what it is - `none` because the convênio is refused at every unit doing the service (or, for
     a doctor without units, in the "no unit" slice), or `confirm`/`list` because the convênio
     narrowed the units the service itself is done at. A `by_plan` `none` must never alert the
-    clinic about a missing unit (inventory R4) and a `by_plan` `confirm` names the convênio (R5).
+    clinic about a missing unit (inventory R4). TASK-088: the booking flow never passes the
+    convênio here (the unit comes first); only `flow_router._no_unit_alternatives` still
+    narrows by it.
     """
 
     kind: Literal["free", "none", "implied", "confirm", "list"]
@@ -319,15 +310,13 @@ def unit_choice(
     return UnitChoice("implied", accepted)
 
 
-def unit_confirm_body(
-    service_name: str, professional: Any | None, unit: Any, *, convenio: str | None = None
-) -> str:
+def unit_confirm_body(service_name: str, professional: Any | None, unit: Any) -> str:
     """The Sim/Não question for `unit`, the only one of the doctor's units doing the service.
 
     The unit's address is the one the unit list shows; without one the sentence ends at the
     unit's name (`UNIT_CONFIRM_BODY_NO_ADDRESS`). A trailing period on the address is dropped so
-    the sentence never gets "..". `convenio` (TASK-086): the convênio is what leaves this one
-    unit, and the sentence says so (`UNIT_CONFIRM_PLAN_BODY`).
+    the sentence never gets "..". TASK-088: the convênio no longer narrows the units (it
+    comes after the unit), so there is no convênio variant of this sentence.
     """
     address = str(getattr(unit, "address", None) or "").strip().rstrip(".").strip()
     values = {
@@ -335,11 +324,6 @@ def unit_confirm_body(
         "medico": str(getattr(professional, "name", None) or "").strip(),
         "unidade": str(getattr(unit, "name", None) or "").strip(),
     }
-    plan = str(convenio or "").strip()
-    if plan:
-        if address:
-            return UNIT_CONFIRM_PLAN_BODY.format(convenio=plan, endereco=address, **values)
-        return UNIT_CONFIRM_PLAN_BODY_NO_ADDRESS.format(convenio=plan, **values)
     if address:
         return UNIT_CONFIRM_BODY.format(endereco=address, **values)
     return UNIT_CONFIRM_BODY_NO_ADDRESS.format(**values)
@@ -558,8 +542,6 @@ __all__ = [
     "STEP_AWAITING_UNIT_CONFIRM",
     "UNIT_CONFIRM_BODY",
     "UNIT_CONFIRM_BODY_NO_ADDRESS",
-    "UNIT_CONFIRM_PLAN_BODY",
-    "UNIT_CONFIRM_PLAN_BODY_NO_ADDRESS",
     "UNIT_LIST_BODY",
     "UnitChoice",
     "appointment_calendar",
