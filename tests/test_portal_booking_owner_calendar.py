@@ -245,14 +245,14 @@ async def _portal(tenant, text_, reply_id=None):
     )
 
 
-async def _book_via_portal_gate(db, tenant, dr_a, patient, conv):
+async def _book_via_portal_gate(db, tenant, dr_a, patient, conv, *, insurance=None):
     """The steps production ran: hold placed, code typed, hold promoted."""
     start_local = (datetime.now(TZ) + timedelta(days=2)).replace(
         hour=10, minute=0, second=0, microsecond=0
     )
     held = await holds.place_hold(
         tenant_id=tenant.id, conversation_id=conv.id, patient_id=patient.id,
-        professional_id=dr_a.id, appointment_type="Cirurgia de Catarata", insurance=None,
+        professional_id=dr_a.id, appointment_type="Cirurgia de Catarata", insurance=insurance,
         start_at=start_local.astimezone(UTC),
         end_at=(start_local + timedelta(minutes=30)).astimezone(UTC),
     )
@@ -282,6 +282,27 @@ async def test_portal_promotion_books_on_the_owning_doctors_calendar(db, google)
     assert appt.professional_id == dr_a.id
     # Never the clinic calendar: that is the double booking.
     assert google.ops == [("create", "cal-dr-a", appt.google_event_id)]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("automatic", [False, True])
+async def test_portal_promotion_clears_particular_for_the_next_booking(db, google, automatic):
+    tenant, dr_a, patient, conv = await _seed(db)
+    async with db() as session, session.begin():
+        conversation = await session.get(Conversation, conv.id)
+        conversation.flow_selected_insurance = "Particular"
+        conversation.flow_insurance_auto = automatic
+
+    appointment = await _book_via_portal_gate(
+        db, tenant, dr_a, patient, conv, insurance="Particular"
+    )
+
+    assert appointment.insurance == "Particular"
+    async with db() as session:
+        conversation = await session.get(Conversation, conv.id)
+        assert conversation.flow_state is FlowState.IDLE
+        assert conversation.flow_selected_insurance is None
+        assert conversation.flow_insurance_auto is None
 
 
 @pytest.mark.asyncio

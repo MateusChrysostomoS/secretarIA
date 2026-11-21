@@ -30,6 +30,7 @@ from secretaria.workers.shared.context import (
     _ReplyContext,
 )
 from secretaria.workers.shared.state_expiry import (
+    _end_pending_email_wait,
     _expire_stale_pending_identity_state,
     _pending_identity_reactivation_offer,
 )
@@ -73,6 +74,8 @@ async def run_identity_gate(
         answer = classify_yes_no(body, tenant)
         if answer in ("yes", "no"):
             conversation.reactivation_origin = None
+            if answer == "no":
+                _end_pending_email_wait(conversation)
             return _ReplyContext(
                 channel=channel,
                 conversation_id=conversation.id,
@@ -144,7 +147,7 @@ async def run_identity_gate(
             if action == IDENTITY_CHANGE_EMAIL_ACTION:
                 conversation.flow_state = FlowState.AWAITING_EMAIL
             elif action == IDENTITY_BACK_ACTION:
-                conversation.flow_state = FlowState.IDLE
+                _end_pending_email_wait(conversation)
             logger.info(
                 "pending_identity_card_tapped",
                 action=action,
@@ -225,7 +228,7 @@ async def run_identity_gate(
                 inbound_body=body or "",
                 pending_code_reprompt=held,
             )
-        conversation.flow_state = FlowState.IDLE
+        _end_pending_email_wait(conversation)
         # TASK-032 R3: leaving the code wait ends a "Marcar outra" booking too.
         conversation.flow_replaces_appointment_id = None
         conversation.flow_edit_draft = None

@@ -41,10 +41,17 @@ STATE_FIELDS = (
     "flow_selected_day",
     "flow_selected_slot",
     "flow_selected_professional_id",
+    "flow_selected_unit_id",
     "flow_selected_insurance",
     "flow_insurance_auto",
     "flow_managing_appointment_id",
     "flow_attendee_name",
+)
+
+UUID_STATE_FIELDS = (
+    "flow_selected_professional_id",
+    "flow_selected_unit_id",
+    "flow_managing_appointment_id",
 )
 
 
@@ -86,7 +93,7 @@ def initial_state() -> dict[str, Any]:
 def _conversation(state: dict[str, Any]) -> SimpleNamespace:
     data = dict(state)
     data["flow_state"] = FlowState(data.get("flow_state") or FlowState.IDLE.value)
-    for key in ("flow_selected_professional_id", "flow_managing_appointment_id"):
+    for key in UUID_STATE_FIELDS:
         if data.get(key):
             data[key] = UUID(str(data[key]))
     fields = {key: data.get(key) for key in STATE_FIELDS}
@@ -96,7 +103,7 @@ def _conversation(state: dict[str, Any]) -> SimpleNamespace:
 def _state_from(result) -> dict[str, Any]:
     state = {key: getattr(result, key, None) for key in STATE_FIELDS}
     state["flow_state"] = result.flow_state.value
-    for key in ("flow_selected_professional_id", "flow_managing_appointment_id"):
+    for key in UUID_STATE_FIELDS:
         if state.get(key) is not None:
             state[key] = str(state[key])
     return state

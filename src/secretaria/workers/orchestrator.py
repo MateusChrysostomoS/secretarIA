@@ -761,6 +761,7 @@ async def _send_bot_reply_inner(reply: _ReplyContext, redis=None) -> None:
             )
             return
         stands, _held = await _code_wait_booking(reply.conversation_id)
+        await _write_flow_state(reply.conversation_id, FlowState.IDLE)
         await _send_plain_reply(
             reply,
             tenant=tenant,

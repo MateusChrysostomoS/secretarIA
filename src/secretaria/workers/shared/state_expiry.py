@@ -34,6 +34,13 @@ from secretaria.workers.shared.text import (
 logger = get_logger(__name__)
 
 
+def _end_pending_email_wait(conversation: Conversation) -> None:
+    """End the booking's identity wait and discard the hold's coverage."""
+    conversation.flow_selected_insurance = None
+    conversation.flow_insurance_auto = None
+    conversation.flow_state = FlowState.IDLE
+
+
 def _expire_stale_pending_identity_state(
     conversation: Conversation,
     tenant: Tenant,
@@ -66,8 +73,9 @@ def _expire_stale_pending_identity_state(
         and comes back tomorrow to a prompt about a code that expired an hour
         into the silence.
 
-    No consent, appointment or history row is touched; only the transient
-    column moves. The caller owns the visible "quer continuar?" prompt. An
+    The transient state moves to idle. Coverage remains available if the
+    patient explicitly resumes the same hold.
+    The caller owns the visible "quer continuar?" prompt. An
     appointment made during the visit, when there is one, is NOT affected.
 
     Returns True when the state was expired (the caller logs it).
@@ -381,10 +389,9 @@ async def _write_flow_state(conversation_id: UUID | None, state: FlowState) -> N
     (see `_handle_calendar_unavailable`) and what `plugins/base.py` tells an
     `on_inbound` hook to do.
 
-    Writes ONLY `flow_state`. The other `flow_*` columns are the booking flow's
-    working memory and neither identity state has any business clearing them: a
-    patient can be asked for a code while a service selection is still parked,
-    and losing it would cost them the step they had already answered.
+    While entering or continuing an identity wait, preserve the booking's working
+    memory. A terminal email/code transition to IDLE also clears the coverage
+    kept for its hold, so a later booking can ask for its own coverage.
 
     A failure is logged and swallowed. The cost of not writing is bounded by
     `_expire_stale_pending_identity_state`, which drops whatever is there after
@@ -398,7 +405,10 @@ async def _write_flow_state(conversation_id: UUID | None, state: FlowState) -> N
                 conversation = await session.get(Conversation, conversation_id)
                 if conversation is None:
                     return
-                conversation.flow_state = state
+                if state is FlowState.IDLE:
+                    _end_pending_email_wait(conversation)
+                else:
+                    conversation.flow_state = state
     except Exception as exc:
         logger.warning(
             "pending_identity_flow_state_write_failed",

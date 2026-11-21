@@ -5,10 +5,12 @@ from uuid import uuid4
 
 import pytest
 
+from secretaria.api.hub.simulation import SimulationState
 from secretaria.models import Conversation, FlowState
 from secretaria.schemas.webhook import inbound_routing_text
 from secretaria.services import flow_router as fr, flow_units as fu
 from secretaria.services.booking_draft import BookingDraft
+from secretaria.workers.shared.flow_simulation import simulate_turn
 from tests.test_booking_draft_resume_questions import (
     DAY as RESUME_DAY,
     FULL_DRAFT,
@@ -172,6 +174,40 @@ async def test_simulator_carries_the_automatic_answer_then_clears_it_on_back():
     assert rewind.state["flow_step"] == fr.STEP_AWAITING_SERVICE
     assert rewind.state["flow_selected_insurance"] is None
     assert rewind.state["flow_insurance_auto"] is None
+
+
+async def test_simulator_keeps_the_unit_alongside_automatic_particular():
+    unit, _ = _units()
+    doctor = _doctor(units=[unit])
+    refused = _matrix(
+        "shared", doctor, *((ECO_ID, unit, plan) for plan in (UNIMED, BRADESCO, AMIL))
+    )
+    tenant = _tenant(refused=refused, doctors=[doctor])
+    calendars = _Calendars(tenant)
+    start = SimulationState(
+        flow_state=FlowState.SERVICE_CATALOG,
+        flow_step=fr.STEP_AWAITING_SERVICE,
+        flow_attendee_name=fr.ATTENDEE_SELF,
+    )
+    days = await simulate_turn(
+        tenant=tenant,
+        professionals=[doctor],
+        calendar_for=calendars,
+        state=start.model_dump(mode="json"),
+        tap={"id": "svc|Ecocardiograma", "title": "Ecocardiograma"},
+    )
+    assert days.state["flow_insurance_auto"] is True
+    day = next(opt for opt in days.bubbles[-1]["options"] if opt["id"].startswith("day|"))
+    state = SimulationState.model_validate(days.state)
+    slots = await simulate_turn(
+        tenant=tenant,
+        professionals=[doctor],
+        calendar_for=calendars,
+        state=state.model_dump(mode="json"),
+        tap=day,
+    )
+    assert slots.state["flow_step"] == fr.STEP_AWAITING_SLOT
+    assert slots.state["flow_selected_unit_id"] == str(unit.id)
 
 
 

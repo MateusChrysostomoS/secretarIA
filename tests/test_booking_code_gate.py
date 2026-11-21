@@ -949,6 +949,10 @@ async def test_without_a_reservation_free_text_still_ends_the_wait(db):
     _, conversation = await _seed_conversation(
         db, tenant, flow_state=FlowState.AWAITING_EMAIL_CODE
     )
+    async with db() as session, session.begin():
+        row = await session.get(Conversation, conversation.id)
+        row.flow_selected_insurance = "Particular"
+        row.flow_insurance_auto = True
 
     reply = await tasks._persist_brain_message_inbound(
         tenant_id=tenant.id,
@@ -960,10 +964,10 @@ async def test_without_a_reservation_free_text_still_ends_the_wait(db):
     assert reply.pending_code_reprompt is None
 
     async with db() as session:
-        state = await session.scalar(
-            select(Conversation.flow_state).where(Conversation.id == conversation.id)
-        )
-    assert state is FlowState.IDLE
+        row = await session.get(Conversation, conversation.id)
+        assert row.flow_state is FlowState.IDLE
+        assert row.flow_selected_insurance is None
+        assert row.flow_insurance_auto is None
 
 
 @pytest.mark.asyncio
@@ -1333,6 +1337,13 @@ async def test_resuming_a_code_wait_after_a_long_silence_renews_the_carried_choi
     await _place(db, tenant, conversation, HELD_START, patient=patient)
     await _expire(db, conversation)  # silent for longer than the lease
     assert await holds.live_hold(conversation.id) is None
+    async with db() as session, session.begin():
+        row = await session.get(Conversation, conversation.id)
+        row.flow_selected_insurance = "Particular"
+        row.flow_insurance_auto = True
+        assert tasks._expire_stale_pending_identity_state(
+            row, tenant, datetime.now(UTC) - timedelta(hours=3)
+        )
 
     reply = tasks._ReplyContext(
         channel=CHANNEL_BRAIN_MESSAGE,
@@ -1349,6 +1360,10 @@ async def test_resuming_a_code_wait_after_a_long_silence_renews_the_carried_choi
     assert calls.code_requests == [EXTERNAL_ID]
     held = await holds.live_hold(conversation.id)
     assert held is not None and held.start_at == HELD_START
+    async with db() as session:
+        row = await session.get(Conversation, conversation.id)
+        assert row.flow_selected_insurance == "Particular"
+        assert row.flow_insurance_auto is True
     card = (await _outbound(db, tenant))[-1]
     assert BOOKING_GATE_SENTENCE in card
     assert "05/01/2099 às 10:00" in card
