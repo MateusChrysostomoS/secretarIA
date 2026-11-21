@@ -166,6 +166,7 @@ _SCOPED_RULES = (
     "diagnóstico ou triagem. Não minimize: não afirme que é seguro esperar "
     "ou que não é urgente. Se houver sinais explícitos de emergência, "
     "use action=escalate para sair desta ajuda limitada.\n"
+    "- Nunca cite preço: não informe valores; o valor aparece na confirmação final.\n"
     "- Você SÓ pode indicar opções da lista acima. Nunca invente, sugira ou "
     "mencione qualquer opção fora dela.\n"
     "- Se a descrição do paciente já permite escolher com confiança, use "

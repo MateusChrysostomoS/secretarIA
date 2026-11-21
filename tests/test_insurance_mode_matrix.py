@@ -61,6 +61,7 @@ from secretaria.services.flow_router import (  # noqa: E402
     STEP_AWAITING_ATTENDEE_CHOICE,
     STEP_AWAITING_DAY,
     STEP_AWAITING_INSURANCE,
+    STEP_AWAITING_SERVICE,
     _insurance_step_skip_reason,
     enter_guided_booking,
     route,
@@ -223,7 +224,8 @@ async def test_mode_none_skips_regardless_of_catalog(db):
 
     snapshot = _flow_snapshot(tenant, [solo], insurance)
     after, _conv = await _book_to_insurance_or_professional(snapshot, [solo])
-    assert after.flow_step != STEP_AWAITING_INSURANCE
+    # No convênio question: a single doctor's own service list comes next.
+    assert after.flow_step == STEP_AWAITING_SERVICE
 
 
 async def test_mode_shared_lists_the_plan_for_every_active_professional_no_rows_needed(db):
@@ -366,7 +368,8 @@ async def test_enter_guided_booking_skips_when_mode_is_none(db):
         conversation_id=uuid4(),
         professionals=[solo],
     )
-    assert result.flow_step != STEP_AWAITING_INSURANCE
+    # Skipped: straight to the days.
+    assert result.flow_step == STEP_AWAITING_DAY
 
 
 # --------------------------------------------------------------------------

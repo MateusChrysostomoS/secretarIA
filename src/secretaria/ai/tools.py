@@ -28,10 +28,7 @@ from secretaria.core.logging import get_logger
 from secretaria.services.availability import (
     booking_buffer_minutes,
     buffer_taken_at_confirm,
-    offer_consultation_windows,
-    padded,
-    slot_scan_limit,
-    slot_start,
+    buffered_free_slots,
     slot_taken_at_confirm,
 )
 from secretaria.services.booking_dates import resolve_booking_day, time_has_passed_today
@@ -1077,11 +1074,16 @@ async def _hand_back_if_slot_taken(
 async def _slot_taken_hand_back(
     cal: CalendarService, start: datetime, appointment_type: str | None, professional_id
 ) -> "BookingDraftRequested":
-    """The hand-back both "taken" answers raise: the same service, doctor, convênio, DAY."""
+    """The hand-back both "taken" answers raise: the same service, doctor and DAY.
+
+    The convênio is NOT carried in the draft (R30): the draft's `insurance` reads as "the patient
+    named it this turn", and the machine's hand-back never did. With None the resolver falls back
+    to the conversation's own value as a STORED one (`named_now=False`), so an automatic
+    "Particular" does not survive a landing on another service / doctor / unit."""
     return BookingDraftRequested(
         appointment_type,
         professional_id,
-        await _conversation_insurance(),
+        None,
         day=start.astimezone(cal.tzinfo).date(),
         intro=SLOT_TAKEN_AT_CONFIRM_MESSAGE,
     )
@@ -1520,50 +1522,6 @@ async def _sole_buffer_minutes(owner: Any | None = None) -> int:
     except Exception as exc:  # noqa: BLE001 - a read tool: offered without the padding
         logger.warning("agent_tool_buffer_lookup_failed", error_type=type(exc).__name__)
         return 0
-
-
-async def buffered_free_slots(
-    cal: CalendarService,
-    *,
-    day: datetime,
-    max_slots: int,
-    held: list,
-    buffer_minutes: int,
-    slot_minutes: int | None = None,
-) -> list[dict]:
-    """`cal.list_free_slots` for the v1 AI slot lists, with the doctor's buffer (TASK-088 §B).
-
-    No buffer: the very call the tools always made (`extra_busy` = the held windows). With one,
-    the whole day is read, every slot closer than N minutes to a consultation or to a held
-    window is dropped (those reads are fail-open: `offer_consultation_windows`), and only then
-    is the list cut to `max_slots`, so it still fills.
-    """
-    extra: dict = {"extra_busy": held} if held else {}
-    if slot_minutes:
-        extra["slot_minutes"] = slot_minutes
-    if buffer_minutes <= 0:
-        return await cal.list_free_slots(day=day, max_slots=max_slots, **extra)
-    slots = await cal.list_free_slots(
-        day=day, max_slots=slot_scan_limit(slot_minutes or 30), **extra
-    )
-    tz = cal.tzinfo
-    first = day if day.tzinfo else day.replace(tzinfo=tz)
-    consultations = await offer_consultation_windows(
-        cal, first, first + timedelta(days=1), buffer_minutes=buffer_minutes
-    )
-    blockers = padded([*held, *consultations], buffer_minutes)
-    length = timedelta(minutes=slot_minutes or 30)
-    kept: list[dict] = []
-    for slot in slots:
-        start = slot_start(slot["start"], tz)
-        end = slot_start(slot["end"], tz) if slot.get("end") else start + length
-        if not any(_overlaps(start, end, b_start, b_end) for b_start, b_end in blockers):
-            kept.append(slot)
-    return kept[:max_slots]
-
-
-def _overlaps(a_start: datetime, a_end: datetime, b_start: datetime, b_end: datetime) -> bool:
-    return a_start < b_end and b_start < a_end
 
 
 async def _conversation_attendee_name() -> str | None:

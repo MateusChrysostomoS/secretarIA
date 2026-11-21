@@ -423,17 +423,22 @@ async def _handle_select_professional(
             waba_token=waba_token,
         )
         return
+    insurance = ctx.conversation.flow_selected_insurance
+    # R30: the doctor's service list is a list to choose from - a stored "Particular" does not
+    # ride into it (the convênio gate re-sets it, with its line, if nothing is accepted there).
+    if not particular_survives(ctx.tenant_snapshot, insurance, opens_choice=True):
+        insurance = None
     result = _enter_professional_services(
         professional,
         ctx.tenant_snapshot,
-        insurance=ctx.conversation.flow_selected_insurance,
+        insurance=insurance,
     )
     # Built here, not by route(), so `_carry_booking` never saw it: keep the authorized
     # attendee and the convênio answer of the booking this hand-back continues - FRESH.
-    # (An unanswered convênio is asked at "Sim, agendar".)
+    # (An unanswered convênio is asked later, once service, doctor and unit are known.)
     if result.flow_state == FlowState.SERVICE_CATALOG:
         result.flow_attendee_name = ctx.conversation.flow_attendee_name
-        result.flow_selected_insurance = ctx.conversation.flow_selected_insurance
+        result.flow_selected_insurance = insurance
     await _land_handback(
         reply,
         result,

@@ -536,3 +536,24 @@ async def test_booking_service_id_follows_the_doctors_linked_entry(db):
             )
             is None
         )
+
+
+async def test_refused_convenio_without_a_conversation_says_no_reoffer_and_promises_no_question(
+    monkeypatch,
+):
+    """With no conversation to rebuild from, the reply is the refusal lead and the way out
+    ("Digite *menu*"): it must NOT promise "Vamos escolher o convênio de novo", a question the
+    next sentence says will not come."""
+
+    async def no_context(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(worker_holds, "_load_draft_context", no_context)
+
+    text = await worker_holds._insurance_refused_reoffer(None, None, None, None)
+
+    assert text == (
+        f"{worker_holds.INSURANCE_REFUSED_AT_CONFIRM_LEAD}\n\n"
+        "Digite *menu* para começar outro agendamento."
+    )
+    assert "Vamos escolher" not in text

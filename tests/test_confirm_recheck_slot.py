@@ -791,6 +791,27 @@ async def test_ai_create_event_on_a_taken_slot_hands_back_to_that_days_times():
     assert agenda.reads == [(_at("08:00"), _at("08:30"))]
 
 
+async def test_ai_hand_back_never_re_says_the_stored_insurance_as_if_named_this_turn(
+    monkeypatch,
+):
+    """R30: a stored automatic "Particular" survives a landing only when the patient named
+    it this turn or the (service, doctor, unit) are the recorded ones. The hand-back is the
+    machine, not the patient: it carries NO convênio, so the resolver falls back to the
+    conversation's value with `named_now=False` and a different doctor/unit drops it."""
+
+    async def _stored() -> str:
+        return "Particular"
+
+    monkeypatch.setattr(ai_tools, "_conversation_insurance", _stored)
+    agenda = _Agenda([_event("someone-else", "08:00", "08:30")])
+
+    with _agent_turn(agenda), pytest.raises(ai_tools.BookingDraftRequested) as raised:
+        await ai_tools.create_event.ainvoke({**_WINDOW, "summary": "Consulta - Maria"})
+
+    assert raised.value.insurance is None
+    assert raised.value.draft.insurance is None
+
+
 async def test_ai_create_event_on_a_free_slot_books_as_before():
     agenda = _Agenda([_event("next-patient", "08:30", "09:00")])
 

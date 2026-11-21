@@ -10,9 +10,10 @@ the list would be computed on the clinic's hours and busy time - the wrong owner
 for the buffer.
 
 The fix is worker-side (the router stays pure): after `route()`, when the result selects another
-professional and lands on a step that consumed the calendar, the doctor's calendar is resolved
-exactly as the next turn would and `route()` runs again with the same snapshot / inbound / gate -
-only for a turn that cannot call an LLM. The simulator does the same with `calendar_for`.
+professional (`FlowRouterResult.agenda_owner_id`, since fix round 4 - not "lands on a calendar
+step"), the doctor's calendar is resolved exactly as the next turn would and `route()` runs again
+with the same snapshot / inbound / gate - only for a turn that cannot call an LLM. The simulator
+does the same with `calendar_for`.
 """
 
 import os
@@ -36,7 +37,7 @@ from secretaria.schemas.webhook import inbound_routing_text  # noqa: E402
 from secretaria.services import flow_router as fr  # noqa: E402
 from secretaria.services.attendee import ATTENDEE_SELF  # noqa: E402
 from secretaria.services.calendar import CalendarService  # noqa: E402
-from secretaria.workers.shared import flow_runner  # noqa: E402
+from secretaria.workers.shared import draft_resolution, flow_runner  # noqa: E402
 from secretaria.workers.shared.context import _ReplyContext  # noqa: E402
 from tests._patching import workers_ns  # noqa: E402
 from tests.payments_support import make_sessionmaker  # noqa: E402
@@ -65,8 +66,10 @@ class _BusyAwareAgenda(_Agenda):
     """`_Agenda` whose day list drops a day with no free time - what the real agenda does (the
     plain fake lists every open day)."""
 
-    async def list_available_days(self, start_day, days, slot_minutes=None):
-        listed = await super().list_available_days(start_day, days, slot_minutes)
+    async def list_available_days(self, start_day, days, slot_minutes=None, extra_busy=None):
+        listed = await super().list_available_days(
+            start_day, days, slot_minutes, extra_busy=extra_busy
+        )
         return [d for d in listed if await self.list_free_slots(d, slot_minutes)]
 
 
@@ -97,6 +100,9 @@ def _doctor_a_agenda(*, buffer_case=False) -> _Agenda:
 async def world(monkeypatch):
     engine, maker = await make_sessionmaker()
     monkeypatch.setattr(flow_runner, "async_session_factory", maker)
+    # The parked-draft fallback (`draft_resolution._load_draft_context`) opens its own session:
+    # keep it on THIS database, never on whatever the settings point to.
+    monkeypatch.setattr(draft_resolution, "async_session_factory", maker)
     tenant_id = uuid4()
     async with maker() as session:
         session.add(

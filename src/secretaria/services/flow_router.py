@@ -2774,21 +2774,15 @@ def _start_booking(
 ) -> FlowRouterResult:
     """The doctor-first way into a booking, kept for the callers that still hold one.
 
-    TASK-088: the button flow no longer starts here - `_booking_entry` opens the SERVICE (the
-    clinic catalog on a multi-doctor clinic) and calls this only for a clinic with one active
-    doctor, where it renders his own service list. What still reaches the multi-doctor branch
-    (the tappable doctor list) is the AI draft's legacy landing (`booking_draft`): a draft that
-    names no service.
+    TASK-088: only for a clinic with ONE active doctor, where it renders his own service list
+    (decision recorded in docs/CHECKPOINT_convenio_catalogo.md: "show every doctor" over a roster
+    of one is a list of one). Both callers - `_booking_entry` and the AI draft resolver
+    (`booking_draft`) - send a multi-doctor clinic to the clinic's service catalog
+    (`_enter_clinic_service_catalog`) instead, so this never lists the doctors.
 
     `insurance` is the patient's convênio answer, when it was already given: it only MARKS the
-    doctors who take that plan - every doctor is listed.
-
-    A clinic with ONE active professional skips the doctor list (decision recorded in
-    docs/CHECKPOINT_convenio_catalogo.md): "show every doctor" over a roster of one is a list
-    of one, and the extra tap would buy the patient nothing the service list does not show.
+    services the doctor does not take that plan for.
     """
-    if _is_multi_professional(professionals):
-        return _enter_professional_list(tenant, professionals or [], insurance=insurance)
     services = active_appointment_types(tenant)
     if not services:
         return FlowRouterResult(
@@ -4544,11 +4538,11 @@ async def _catalog_step(
         return _enter_unit_choice(conversation, booking_owner, unit_choice)
     if (
         step in UNIT_KEEP_STEPS
-        and (picked_gone or (unit_choice.kind == "none" and not unit_choice.by_plan))
+        and (picked_gone or unit_choice.kind == "none")
         and flow_units.bookable_units(booking_owner)
     ):
-        # (A `by_plan` "none" - the matrix changed after the unit was picked - is not a unit
-        # gone: the booking goes on and the final guard in `_handle_confirmation` refuses it.)
+        # (`unit_choice` above is asked without the convênio - the unit comes first since
+        # TASK-088 - so a "none" here is never `by_plan`: it really is a unit gone.)
         # Final wave M1: the picked unit is gone and ONE is left. Its day and time were chosen
         # within the gone unit's hours, so never carry them over silently: the days again,
         # within the unit left (`_ask_day` records it as the pick). No unit left for the
@@ -5321,11 +5315,12 @@ def _insurance_is_automatic(
     professional = _booking_professional(conversation, professionals)
     if professional is None:
         return False
-    service_id = _booking_service_id(conversation, tenant, services, professional)
-    unit = flow_units.effective_unit(conversation, professional, service_id)
-    return not plans_accepted_for(
-        tenant, _tenant_insurance_plans(tenant), professional, service_id, unit
+    entry = _booking_service_entry(conversation, tenant, services, professional)
+    unit = flow_units.effective_unit(
+        conversation, professional, entry_service_id(entry) if entry is not None else None
     )
+    # The same source as the gate and the back row: what the booking accepts here.
+    return not _accepted_plans(tenant, professional, entry, unit)
 
 
 def _day_back_result(
@@ -6136,7 +6131,9 @@ def _enter_no_unit_for_service(
     worker), and the booking goes on - never a dead end, never a loop:
 
     * other doctors really do the service -> the doctor list, only them, with the service kept
-      (a tap goes straight to its card with that doctor, like the service-first branch);
+      (a tap re-enters the booking with that doctor and the service kept -
+      `_handle_service_professional` - and the unit, the convênio and the days follow, in that
+      order, like the service-first branch);
     * nobody else (one doctor, or only this one does it, whatever was picked first) -> the
       service list of this doctor, the service still in it (§9.9: never hidden).
 
@@ -6311,7 +6308,8 @@ def _handle_plan_refused(
     body: str,
     professionals: list | None,
 ) -> FlowRouterResult:
-    """The answer to `_enter_plan_refused`'s card. Anything else: one model turn, same step."""
+    """The answer to `_enter_plan_refused`'s card (other doctor / other service). Anything else:
+    one model turn, same step. "Trocar convênio" is handled before this in `_catalog_step`."""
     owner = _booking_professional(conversation, professionals)
     service_name = str(conversation.flow_selected_type or "")
     if owner is not None and _label_match(body, LABEL_PLAN_OTHER_DOCTOR):
@@ -6338,11 +6336,9 @@ def _handle_plan_refused(
             flow_selected_professional_id=_selected_professional_id(conversation),
             flow_selected_insurance=_selected_insurance(conversation),
         )
-    if _label_match(body, LABEL_PLAN_CHANGE_INSURANCE):
-        # The convênio list with the service (and doctor) kept: only plans accepted for it.
-        # (TASK-088: through the unit and the gate - `_catalog_step` routes this label to
-        # `_ask_day`, so a list that would hold only Particular never reaches the patient.)
-        return _enter_insurance(tenant, conversation, professionals=professionals)
+    # "Trocar convênio" never gets here: `_catalog_step` routes that label to `_ask_day` first (the
+    # unit, then the convênio gate), so a list that would hold only Particular never reaches the
+    # patient.
     return _preserve(conversation, "delegate_llm")
 
 

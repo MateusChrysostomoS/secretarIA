@@ -1380,6 +1380,50 @@ async def test_select_professional_reads_the_attendee_fresh(
     assert conv.flow_attendee_name == stored
 
 
+@pytest.mark.parametrize(
+    "stored, kept",
+    [
+        # R30: the doctor's service list is a list to choose from - an automatic "Particular"
+        # does not ride into it (the gate re-sets it, with its line, if nothing is accepted).
+        ("Particular", None),
+        # A plan is kept (the gate re-judges it, as ever).
+        ("Plano A", "Plano A"),
+    ],
+)
+async def test_select_professional_opening_the_service_list_drops_a_stored_particular(
+    db, _captured_bubbles, log, stored, kept
+) -> None:
+    """AI draft v2 OFF (the production default): the doctor's service list is an R30 list."""
+    from secretaria.models import TenantInsurancePlan
+
+    tenant, ana, bruno, patient, conversation = await _seed(
+        db, attendee="Maria da Silva", insurance=stored
+    )
+    async with db() as session:
+        row = await session.get(Tenant, tenant.id)
+        row.collect_insurance = True
+        row.insurance_mode = "shared"
+        session.add(TenantInsurancePlan(tenant_id=tenant.id, custom_name="Plano A"))
+        await session.commit()
+        await session.refresh(row)
+        tenant = row
+
+    await tasks._handle_select_professional(
+        _reply_ctx(conversation),
+        f"{SELECT_PROFESSIONAL_SENTINEL_PREFIX}{ana.id}",
+        tenant,
+        None,
+        _snapshots([ana, bruno]),
+        patient.wa_id,
+    )
+
+    (event,) = _events(log)
+    assert event["landing_step"] == "awaiting_service"
+    async with db() as session:
+        conv = await session.get(Conversation, conversation.id)
+    assert conv.flow_selected_insurance == kept
+
+
 async def test_guided_booking_asks_pra_quem_first_when_unknown(
     db, _captured_bubbles, _stub_calendar, log
 ) -> None:

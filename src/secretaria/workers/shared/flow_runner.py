@@ -136,7 +136,7 @@ async def _picked_doctor_calendar(
     except Exception as exc:  # noqa: BLE001 - the next turn would degrade the same way
         logger.warning(
             "worker_professional_calendar_failed",
-            error=str(exc),
+            error_type=type(exc).__name__,
             professional_id=str(professional_id),
         )
         return None
