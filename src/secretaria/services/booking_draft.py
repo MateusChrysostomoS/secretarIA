@@ -765,11 +765,15 @@ async def _resolve(
     )
 
 
-# Steps the service-detail card has already been shown by the time a conversation sits on
-# them, in the button flow: "Sim" on that card is the only way past it. On clinics with the
-# AI draft v2 switch, every landing of the resolver past that card (day picker, slot list,
-# express card) carries the booking details message instead (`_land_day`), so reaching one
-# of these steps means the details were shown on BOTH paths.
+# Steps the booking details have already been shown by the time a conversation sits on them.
+# On clinics with the AI draft v2 switch, every landing of the resolver past the service
+# (day picker, slot list, express card) carries the booking details message (`_land_day`), so
+# reaching one of these steps means the details were shown there. TASK-088: the button flow no
+# longer shows a service card, so a chat that reached them by the buttons has not seen the
+# description - but it has never seen the requirements either (the card carried only the name,
+# price and description), and the details message is the AI landing's own: it is sent the first
+# time the AI lands and not repeated, as before. `STEP_AWAITING_SERVICE_CONFIRM` stays for the
+# chats parked on the retired card, which did see it.
 DETAILS_SEEN_STEPS = (
     fr.STEP_AWAITING_SERVICE_CONFIRM,
     fr.STEP_AWAITING_DAY,
@@ -819,8 +823,7 @@ def _booking_details(
     details. The address is the booking's UNIT when it has one (TASK-083 spec §8), else
     `tenant.clinic_address`, the line workers/shared/draft_resolution.py put on the snapshot
     (None when the clinic has none, or has units - then no unit means no address at all).
-    The price is `owner`'s at that unit (TASK-085); without a unit it follows the service
-    card's rule (D3: left out when it differs between the units, never a range).
+    No price (TASK-088 R23): the money is said only on the final confirmation card.
     """
     if not fr.ai_draft_v2_enabled(tenant) or checked.service is None:
         return None
@@ -831,7 +834,7 @@ def _booking_details(
     ):
         return None
     return booking_details_text(
-        service=fr._priced_entry(checked.service, owner, unit.id if unit is not None else None),
+        service=checked.service,
         professional=owner,
         insurance=state.flow_selected_insurance,
         attendee_name=state.flow_attendee_name,
@@ -1114,6 +1117,9 @@ async def _express_confirmation(
         start,
         professional=professional,
         unit=unit,
+        # TASK-088 R26: the same money line as the slot-tap card (a convênio: none); the sinal's
+        # lines are added by the worker seam, for both.
+        money_lines=fr._money_lines(fr.booking_price_line(state, service, professional, unit)),
     )
     return FlowRouterResult(
         action="reply",

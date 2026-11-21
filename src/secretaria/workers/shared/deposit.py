@@ -4,6 +4,7 @@ from datetime import UTC, datetime
 from types import SimpleNamespace
 from uuid import UUID
 
+from secretaria.ai.formatter import ButtonBubble
 from secretaria.core.database import async_session_factory
 from secretaria.core.logging import get_logger
 from secretaria.core.whatsapp_limits import MAX_INTERACTIVE_BODY_CHARS
@@ -15,6 +16,8 @@ from secretaria.models import (
 )
 from secretaria.services.flow_router import (
     LABEL_CONFIRM,
+    SINAL_LINE_PREFIX,
+    STEP_AWAITING_CONFIRMATION,
     STEP_EDIT_CONFIRM,
     STEP_MANAGE_CANCEL_CONFIRM,
     STEP_MANAGE_CONFIRM,
@@ -22,8 +25,10 @@ from secretaria.services.flow_router import (
     STEP_MANAGE_DAY_ESCAPE,
     STEP_MANAGE_DAY_RETRY,
     STEP_MANAGE_SLOT,
+    TOTAL_LINE_PREFIX,
     FlowRouterResult,
     MenuBubble,
+    with_money_lines,
 )
 from secretaria.services.insurance_catalog import resolve_booking_plan_ids
 from secretaria.services.payments import (
@@ -333,6 +338,70 @@ async def _with_service_difference(result: FlowRouterResult, tenant: Tenant) -> 
     return result
 
 
+async def _with_booking_money(result: FlowRouterResult, tenant: Tenant | None) -> FlowRouterResult:
+    """The confirmation card of a NEW booking says what the patient will pay (TASK-088 R24).
+
+    The router already put the service's value on the card for a Particular patient (a convênio:
+    nothing). When the clinic's sinal is ON and would be charged for THIS booking - whatever the
+    convênio (TASK-085 D-R12) - the card instead ends with the sinal and the consultation's full
+    value: "Sinal (Pix): R$ 60,00" / "Valor da consulta: R$ 200,00" (they replace the "Valor"
+    line, `with_money_lines`). Both timings: the amount is `deposit_lifecycle.booking_sinal_preview`
+    - the one arithmetic the `before` gate and the `after` hook share, never a second copy of
+    price x percent / the provider's minimum - and it says None when no charge can be created
+    (no usable account, under the minimum), so the card never promises a Pix that will not come.
+
+    Implemented HERE, not in the router: flow_router.py does no DB I/O of its own. Best-effort: any
+    failure sends the card as the router drew it (Particular line only, or none), with a warning
+    that carries ids and the error type, never a value. Reached by every new-booking confirmation
+    - the slot tap, the AI's express card, the resumed card - since they all pass
+    `_apply_flow_result`. An edit / reschedule card (`flow_managing_appointment_id`) is not this.
+    """
+    if (
+        result.action != "reply"
+        or tenant is None
+        or not tenant.pix_deposit_enabled
+        or result.flow_step != STEP_AWAITING_CONFIRMATION
+        or result.flow_managing_appointment_id is not None
+    ):
+        return result
+    card = next(
+        (
+            b
+            for b in result.bubbles
+            if isinstance(b, ButtonBubble) and b.confirm_label == LABEL_CONFIRM
+        ),
+        None,
+    )
+    if card is None:
+        return result
+    try:
+        async with async_session_factory() as session:
+            preview = await deposit_lifecycle.booking_sinal_preview(
+                session,
+                tenant=tenant,
+                appointment_type=result.flow_selected_type,
+                professional_id=result.flow_selected_professional_id,
+                unit_id=result.flow_selected_unit_id,
+            )
+    except Exception as exc:  # noqa: BLE001 - the card goes out as the router drew it
+        logger.warning(
+            "booking_confirm_sinal_preview_failed",
+            tenant_id=str(tenant.id),
+            error_type=type(exc).__name__,
+        )
+        return result
+    if preview is None:
+        return result
+    card.body = with_money_lines(
+        card.body,
+        [
+            f"{SINAL_LINE_PREFIX}{format_brl(preview.amount_cents)}",
+            f"{TOTAL_LINE_PREFIX}{format_brl(preview.price_cents)}",
+        ],
+    )
+    return result
+
+
 async def _apply_deposit_awareness(
     reply: _ReplyContext,
     result: FlowRouterResult,
@@ -374,7 +443,11 @@ async def _apply_deposit_awareness(
 
     Plus the edit flow's confirmation card (STEP_EDIT_CONFIRM) of a new service on a PAID
     sinal: `_with_service_difference` adds the difference line before Confirmar.
+
+    And (TASK-088) the confirmation card of a NEW booking: `_with_booking_money` adds the sinal
+    and the consultation's value when the sinal is charged.
     """
+    result = await _with_booking_money(result, tenant)
     if (
         result.action == "reply"
         and tenant is not None

@@ -117,6 +117,7 @@ from secretaria.services.patient_context import as_utc
 from secretaria.services.payments import payer_data
 from secretaria.services.payments.deposit_lifecycle import BEFORE_BLOCKED_TEXT
 from secretaria.services.payments.failure_reason import coerce as coerce_failure_reason
+from secretaria.services.payments.money import format_brl, parse_brl_to_cents
 from secretaria.services.pending_identity import BOOKING_SLOT_TAKEN_MESSAGE
 from secretaria.services.sensitive_claim_guard import unbacked_claim
 from secretaria.services.service_catalog import (
@@ -3214,14 +3215,53 @@ def _enter_service_professional_list(
     )
 
 
-def _handle_catalog_service(
-    conversation: Conversation, tenant: Tenant, body: str, professionals: list
+async def _continue_with_service(
+    conversation: Conversation,
+    tenant: Tenant,
+    calendar: CalendarService | None,
+    service: dict,
+    professionals: list | None,
+    *,
+    professional: Any | None = None,
+    services: list[dict] | None = None,
+) -> FlowRouterResult:
+    """The service was tapped: straight to the next step (TASK-088).
+
+    The "Deseja agendar esse serviço?" card (name, price, long description, Sim / Outro serviço)
+    is gone from the path - the price now waits for the final confirmation and the description
+    is not repeated. What is left to ask after a service is what `_ask_day` asks, in the owner's
+    order: the unit (when the doctor has several), then the convênio (when the clinic collects
+    it), then the days. The doctor, when the service was tapped from a list that does not carry
+    one (the clinic catalog with a single doctor offering it, the doctors of a service), is
+    `professional`; else the conversation's own - a single-doctor clinic never stores one.
+
+    The pick is in a throwaway `_DayPickerState`, not on the conversation yet - the same carrier
+    the unit pick uses - so `_ask_day` reads the NEW service (and drops nothing the card used to
+    drop: no unit, no day, the convênio the patient already gave rides along to be judged at the
+    combination). `calendar` is the agenda as the worker resolved it; `_ask_day` scopes it."""
+    state = _DayPickerState(
+        id=getattr(conversation, "id", None),
+        flow_selected_type=str(service.get("name", "")),
+        flow_selected_professional_id=(
+            professional.id if professional is not None else _selected_professional_id(conversation)
+        ),
+        flow_selected_insurance=_selected_insurance(conversation),
+        flow_attendee_name=_attendee_name(conversation),
+    )
+    return await _ask_day(state, tenant, calendar, services, professionals)
+
+
+async def _handle_catalog_service(
+    conversation: Conversation,
+    tenant: Tenant,
+    body: str,
+    professionals: list,
+    calendar: CalendarService | None = None,
 ) -> FlowRouterResult:
     """Resolve a clinic-catalog pick, then let the SERVICE narrow the doctors.
 
-    Exactly one professional offers it -> straight to that service's detail
-    card with the doctor already selected (the same card the doctor-first
-    branch reaches, so both branches converge one step later). Two or more ->
+    Exactly one professional offers it -> straight on (unit / convênio / days) with the doctor
+    already selected - TASK-088: no service card in between. Two or more ->
     the filtered doctor list. None -> the catalog changed under us mid-flow;
     a fixed reply plus the menu, never the LLM.
     """
@@ -3236,9 +3276,15 @@ def _handle_catalog_service(
     offering = _professionals_offering(tenant, professionals, service_name)
     if len(offering) == 1:
         professional = offering[0]
-        result = _enter_service_detail(service, conversation, tenant, professional)
-        result.flow_selected_professional_id = professional.id
-        return result
+        return await _continue_with_service(
+            conversation,
+            tenant,
+            calendar,
+            service,
+            professionals,
+            professional=professional,
+            services=professional_appointment_types(professional, tenant),
+        )
     if not offering:
         logger.warning("flow_catalog_service_without_professional")
         return FlowRouterResult(
@@ -3256,18 +3302,20 @@ def _handle_catalog_service(
     )
 
 
-def _handle_service_professional(
+async def _handle_service_professional(
     conversation: Conversation,
     tenant: Tenant,
     body: str,
     professionals: list,
+    calendar: CalendarService | None = None,
 ) -> FlowRouterResult:
-    """Doctor tap inside the service-first branch: straight to the detail card.
+    """Doctor tap inside the service-first branch: straight on (unit / convênio / days).
 
     The service was already chosen (`flow_selected_type`), so this must NOT
     re-render that doctor's whole service list the way
-    `_enter_professional_services` does — that would ask a question the
-    patient has already answered. A "Ver mais profissionais" tap pages the list
+    `_enter_professional_services` does - that would ask a question the
+    patient has already answered. TASK-088: nor does it draw the service card any more.
+    A "Ver mais profissionais" tap pages the list
     (TASK-082 S4); anything that names no doctor goes to the model, as before.
     """
     more = catalog_more_page(body, LABEL_MORE_PROFESSIONALS)
@@ -3285,18 +3333,23 @@ def _handle_service_professional(
     professional = _match_professional(professionals or [], body)
     if professional is None:
         return _preserve(conversation, "delegate_llm")
-    service = _match_service(
-        professional_appointment_types(professional, tenant), conversation.flow_selected_type
-    )
+    doctor_services = professional_appointment_types(professional, tenant)
+    service = _match_service(doctor_services, conversation.flow_selected_type)
     if service is None:
         # Deactivated between the two taps: fall back to that doctor's own
         # list rather than booking a service they no longer offer.
         return _enter_professional_services(
             professional, tenant, insurance=_selected_insurance(conversation)
         )
-    result = _enter_service_detail(service, conversation, tenant, professional)
-    result.flow_selected_professional_id = professional.id
-    return result
+    return await _continue_with_service(
+        conversation,
+        tenant,
+        calendar,
+        service,
+        professionals,
+        professional=professional,
+        services=doctor_services,
+    )
 
 
 def _professional_greeting_body(professional: Any) -> str:
@@ -4201,6 +4254,9 @@ async def _handle_service_help(
     body: str,
     services: list[dict],
     professional: Any | None = None,
+    *,
+    calendar: CalendarService | None = None,
+    professionals: list | None = None,
 ) -> FlowRouterResult:
     final_round = conversation.flow_step == STEP_SERVICE_HELP_FINAL
     # Same accounting as _handle_professional_help above.
@@ -4233,8 +4289,16 @@ async def _handle_service_help(
     if outcome.kind == "pick":
         service = _match_service(services, outcome.choice)
         if service is not None:
+            # TASK-088: the validated pick goes straight on - no service card.
             return _with_pick_message(
-                _enter_service_detail(service, conversation, tenant, professional),
+                await _continue_with_service(
+                    conversation,
+                    tenant,
+                    calendar,
+                    service,
+                    professionals,
+                    services=services,
+                ),
                 outcome.message,
             )
         logger.warning("flow_service_help_pick_unresolved")
@@ -4359,7 +4423,9 @@ async def _catalog_step(
             # before continuing to the selected service's detail card.
             return _resume_parked_draft(
                 conversation,
-                _handle_service_professional(conversation, tenant, body, roster),
+                await _handle_service_professional(
+                    conversation, tenant, body, roster, unscoped_calendar
+                ),
             )
         return _resume_parked_draft(
             conversation,
@@ -4391,13 +4457,17 @@ async def _catalog_step(
         # too - the answer resumes a parked draft like the service / doctor taps do.
         return _resume_parked_draft(
             conversation,
-            _handle_catalog_service(conversation, tenant, body, professionals or []),
+            await _handle_catalog_service(
+                conversation, tenant, body, professionals or [], unscoped_calendar
+            ),
         )
 
     if step == STEP_AWAITING_SERVICE_PROFESSIONAL:
         return _resume_parked_draft(
             conversation,
-            _handle_service_professional(conversation, tenant, body, professionals or []),
+            await _handle_service_professional(
+                conversation, tenant, body, professionals or [], unscoped_calendar
+            ),
         )
 
     if step in (STEP_PROFESSIONAL_HELP, STEP_PROFESSIONAL_HELP_FINAL):
@@ -4438,12 +4508,29 @@ async def _catalog_step(
                 str(service.get("name", "")),
                 refused_service_id,
             )
+        # TASK-088: no service card - the pick goes straight to the next step.
         return _resume_parked_draft(
-            conversation, _enter_service_detail(service, conversation, tenant, booking_owner)
+            conversation,
+            await _continue_with_service(
+                conversation,
+                tenant,
+                unscoped_calendar,
+                service,
+                professionals,
+                services=services,
+            ),
         )
 
     if step in (STEP_SERVICE_HELP, STEP_SERVICE_HELP_FINAL):
-        return await _handle_service_help(conversation, tenant, body, services, booking_owner)
+        return await _handle_service_help(
+            conversation,
+            tenant,
+            body,
+            services,
+            booking_owner,
+            calendar=unscoped_calendar,
+            professionals=professionals,
+        )
 
     if step == STEP_AWAITING_SERVICE_CONFIRM:
         if _norm(body) == _norm(LABEL_BOOK_SERVICE):
@@ -4514,6 +4601,9 @@ async def _catalog_step(
             body,
             professional=_recap_professional(conversation, tenant, professionals),
             unit=booking_unit,
+            money_lines=_money_lines(
+                booking_price_line(conversation, service_entry, booking_owner, booking_unit)
+            ),
         )
 
     if step == STEP_AWAITING_CONFIRMATION:
@@ -5758,38 +5848,35 @@ def _with_unit_terms_line(
     *,
     fresh: bool = False,
 ) -> FlowRouterResult:
-    """TASK-085 D3: the price the service card hid, said once the unit is known.
+    """TASK-085 D3 / TASK-088 R23: the unit's DURATION, said once the unit is known - no money.
 
-    When the day picker opens for `unit` and the card left the price out (it differs between
-    the units where the doctor does the service: `flow_units.shown_terms(...).price_hidden`),
-    ONE text bubble goes before the picker with that unit's price and duration - the same
-    duration the slots use (`_booking_duration`). Nothing at all when the price did not differ
-    (no exception, the same price everywhere, one unit: the card already showed it), under a
-    convênio (the card never shows the private price there, R14), or when `unit` is already the
-    conversation's chosen unit (a day picker drawn again for it - resume, re-entry - never
-    repeats the line). `conversation` is the conversation as it arrived, not the step's carrier.
-    `fresh` (TASK-088): the caller has JUST stored `unit` - the unit pick, or the convênio
-    answer that follows it - so the line is said once even though the conversation holds it.
+    When the day picker opens for `unit` and the service takes a different time there than its
+    base (`flow_units.terms_at` / `_booking_duration`: the length the slots use), ONE text bubble
+    goes before the picker: "Consulta na Unidade Centro: 45 min". The price that used to ride in
+    this line ("... R$ 250,00 · 30 min") left the middle of the flow with the service card: money
+    is said only on the final confirmation. Nothing at all when the unit takes the base time (no
+    exception, the same duration everywhere, one unit), or when `unit` is already the
+    conversation's chosen unit (a day picker drawn again for it - resume, re-entry - never repeats
+    the line); so it is the same under a convênio. `conversation` is the conversation as it
+    arrived, not the step's carrier. `fresh`: the caller has JUST stored `unit` - the unit pick,
+    or the convênio answer that follows it - so the line is said once even though the conversation
+    holds it.
     """
     if (
         unit is None
         or result.action != "reply"
         or result.flow_step not in _BOOKING_DAY_STEPS
         or (unit.id == flow_units.selected_unit_id(conversation) and not fresh)
-        or is_convenio(result.flow_selected_insurance or _selected_insurance(conversation))
     ):
         return result
     owner = _booking_professional(conversation, professionals)
     entry = _booking_service_entry(conversation, tenant, services, owner)
-    if entry is None or not flow_units.shown_terms(owner, entry).price_hidden:
+    if entry is None:
         return result
-    at_unit = flow_units.shown_terms(owner, entry, unit.id)
-    line = _unit_terms_text(
-        _service_entry_name(conversation, entry),
-        unit,
-        at_unit.price,
-        _booking_duration(conversation, tenant, services, professionals, unit=unit),
-    )
+    minutes = _booking_duration(conversation, tenant, services, professionals, unit=unit)
+    if minutes == _booking_duration(conversation, tenant, services, professionals, unit=None):
+        return result
+    line = _unit_terms_text(_service_entry_name(conversation, entry), unit, None, minutes)
     logger.info(
         "flow_unit_terms_line_shown", conversation_id=str(getattr(conversation, "id", None))
     )
@@ -6516,6 +6603,7 @@ def _handle_slot(
     *,
     professional: Any | None = None,
     unit: Any | None = None,
+    money_lines: list[str] | None = None,
 ) -> FlowRouterResult:
     start = _slot_iso_from_body(body)
     if start is None:
@@ -6523,7 +6611,11 @@ def _handle_slot(
     slot_iso = start.replace(tzinfo=None).isoformat(timespec="minutes")
     return FlowRouterResult(
         action="reply",
-        bubbles=[_confirmation_card(conversation, start, professional=professional, unit=unit)],
+        bubbles=[
+            _confirmation_card(
+                conversation, start, professional=professional, unit=unit, money_lines=money_lines
+            )
+        ],
         flow_state=FlowState.SERVICE_CATALOG,
         flow_step=STEP_AWAITING_CONFIRMATION,
         flow_selected_type=conversation.flow_selected_type,
@@ -8096,22 +8188,81 @@ def _recap_professional(
     return _booking_professional(conversation, professionals)
 
 
+# TASK-088 R24 (the owner): money is said ONLY on the final confirmation. The lines (their wording
+# is fixed here so the worker seam that adds the sinal's, `workers/shared/deposit.py`, finds and
+# replaces the router's own):
+#   - Particular (or a clinic that does not ask the convênio): "Valor: R$ 200,00";
+#   - a convênio: no line (the service's price is the Particular one);
+#   - a sinal charged for the booking (whatever the convênio): "Sinal (Pix): R$ 60,00" and
+#     "Valor da consulta: R$ 200,00" - they replace the "Valor" line.
+PRICE_LINE_PREFIX = "Valor: "
+SINAL_LINE_PREFIX = "Sinal (Pix): "
+TOTAL_LINE_PREFIX = "Valor da consulta: "
+_MONEY_LINE_PREFIXES = (PRICE_LINE_PREFIX, SINAL_LINE_PREFIX, TOTAL_LINE_PREFIX)
+
+
+def _money_lines(*lines: str | None) -> list[str]:
+    return [line for line in lines if line]
+
+
+def booking_price_line(
+    conversation: Any, entry: dict | None, professional: Any | None, unit: Any | None
+) -> str | None:
+    """The final confirmation's service value line, or None (TASK-088 R24).
+
+    The value the patient is shown is the price of `entry` for `professional` AT `unit` (TASK-085:
+    `_priced_entry`), under the Particular rule (`service_price_text`: a convênio -> None). Only a
+    readable, positive amount is a line ("a combinar" or 0 say nothing), spelled as the sinal's
+    lines are (`format_brl`)."""
+    if entry is None:
+        return None
+    shown = service_price_text(
+        _priced_entry(entry, professional, getattr(unit, "id", None)),
+        _selected_insurance(conversation),
+    )
+    cents = parse_brl_to_cents(shown)
+    if cents is None or cents <= 0:
+        return None
+    return f"{PRICE_LINE_PREFIX}{format_brl(cents)}"
+
+
+def with_money_lines(body: str, lines: list[str]) -> str:
+    """`body` (a confirmation recap) ending with the money `lines`, within the card's cap.
+
+    Any money lines already at the end are replaced (the worker replaces the router's "Valor"
+    with the sinal's two; a second pass changes nothing). The money wins over the recap: when the
+    whole does not fit `MAX_INTERACTIVE_BODY_CHARS`, the recap is the part that is cut."""
+    kept = body.split("\n")
+    while kept and kept[-1].startswith(_MONEY_LINE_PREFIXES):
+        kept.pop()
+    recap = "\n".join(kept)
+    if not lines:
+        return truncate_plain(recap, MAX_INTERACTIVE_BODY_CHARS)
+    block = "\n".join(lines)
+    room = MAX_INTERACTIVE_BODY_CHARS - len(block) - 1
+    return f"{truncate_plain(recap, room)}\n{block}"
+
+
 def _confirmation_card(
     conversation: Conversation,
     start: datetime,
     *,
     professional: Any | None = None,
     unit: Any | None = None,
+    money_lines: list[str] | None = None,
 ) -> ButtonBubble:
     """The Confirmar/Cancelar card - the ONE builder for the slot tap and the AI's express
     confirmation (services/booking_draft.py::_express_confirmation), so both read alike.
 
+    `money_lines` (TASK-088): the value line the router can say by itself (`booking_price_line`);
+    the sinal's lines are added later, by the worker seam, from the same functions the charge uses.
+
     "Confirmar" on it is routed by `_handle_confirmation`, whichever path drew it.
     """
     return ButtonBubble(
-        body=truncate_plain(
+        body=with_money_lines(
             _recap_text(conversation, start, professional=professional, unit=unit),
-            MAX_INTERACTIVE_BODY_CHARS,
+            money_lines or [],
         ),
         confirm_label=LABEL_CONFIRM,
         cancel_label=LABEL_CANCEL,
@@ -8273,22 +8424,8 @@ async def _resume_bubbles(
                 ],
                 step=STEP_AWAITING_SERVICE,
             )
-        return _preserve_reply(
-            conversation,
-            [
-                ButtonBubble(
-                    body=_service_detail_text(
-                        service,
-                        tenant,
-                        _selected_insurance(conversation),
-                        professional=booking_owner,
-                        unit_id=_service_card_unit_id(conversation, booking_owner, service),
-                    ),
-                    confirm_label=LABEL_BOOK_SERVICE,
-                    cancel_label=LABEL_OTHER_SERVICE,
-                )
-            ],
-        )
+        # TASK-088: the card is retired - a chat parked on it goes on to what comes after it.
+        return await _ask_day(conversation, tenant, calendar, services, professionals)
 
     if step in _BOOKING_DAY_STEPS:
         # Re-render the picker from scratch: availability moves, and a resumed
@@ -8300,17 +8437,31 @@ async def _resume_bubbles(
         return await _relist_stored_day(conversation, tenant, calendar, services, professionals)
 
     if step == STEP_AWAITING_CONFIRMATION:
+        unit = _booking_unit(conversation, tenant, services, booking_owner)
         recap = _confirmation_recap(
             conversation,
             professional=_recap_professional(conversation, tenant, professionals),
-            unit=_booking_unit(conversation, tenant, services, booking_owner),
+            unit=unit,
         )
         if recap is None:
             # Lost the slot somehow: re-ask the day.
             return await _ask_day(conversation, tenant, calendar, services, professionals)
+        # The same card the slot tap drew, money line included (TASK-088 R24).
+        price = booking_price_line(
+            conversation,
+            _booking_service_entry(conversation, tenant, services, booking_owner),
+            booking_owner,
+            unit,
+        )
         return _preserve_reply(
             conversation,
-            [ButtonBubble(body=recap, confirm_label=LABEL_CONFIRM, cancel_label=LABEL_CANCEL)],
+            [
+                ButtonBubble(
+                    body=with_money_lines(recap, _money_lines(price)),
+                    confirm_label=LABEL_CONFIRM,
+                    cancel_label=LABEL_CANCEL,
+                )
+            ],
         )
 
     if step == STEP_AWAITING_RETRY:

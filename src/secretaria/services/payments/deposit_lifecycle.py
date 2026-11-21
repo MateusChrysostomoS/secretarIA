@@ -636,17 +636,21 @@ PRICE_REQUOTE_OPENING_TEXT = (
 PRICE_REQUOTE_NO_SINAL_TEXT = "Com o novo valor, esta consulta não pede sinal."
 
 
-async def requote_amount_cents(session: AsyncSession, *, tenant: Tenant, appointment) -> int:
-    """The sinal a consultation shaped like `appointment` would carry NOW, in cents - the same
-    arithmetic and the same "no charge" guards as `maybe_create_deposit`: sinal switched off, no
-    readable price, a zero amount or an amount under the provider's minimum all mean 0 (the
-    convênio never does: D-R12). Price at the consultation's unit x the clinic's CURRENT
-    percentage (OQ-8). `appointment` may be the edited row or any object with the same
-    attributes (`appointment_type`, `professional_id`, `unit_id`, `insurance_plan_id`,
-    `insurance_professional_plan_id`; a missing one reads as None), so the confirmation cards
-    (S3a/S4) can preview the amount of an edit before writing it. Read-only; no provider call."""
+async def requote_quote(
+    session: AsyncSession, *, tenant: Tenant, appointment
+) -> tuple[int | None, int]:
+    """`(price_cents, amount_cents)` of the sinal a consultation shaped like `appointment` would
+    carry NOW - the same arithmetic and the same "no charge" guards as `maybe_create_deposit`:
+    sinal switched off, no readable price, a zero amount or an amount under the provider's
+    minimum all mean an amount of 0 (the convênio never does: D-R12). Price at the consultation's
+    unit x the clinic's CURRENT percentage (OQ-8). `price_cents` is the consultation's full value
+    behind that amount (None when it is not readable). `appointment` may be the edited row or any
+    object with the same attributes (`appointment_type`, `professional_id`, `unit_id`,
+    `insurance_plan_id`, `insurance_professional_plan_id`; a missing one reads as None), so the
+    confirmation cards (S3a/S4, and the booking's own since TASK-088) can preview the amount
+    before writing anything. Read-only; no provider call."""
     if not tenant.pix_deposit_enabled:
-        return 0
+        return None, 0
     probe = SimpleNamespace(
         id=getattr(appointment, "id", None),
         appointment_type=getattr(appointment, "appointment_type", None),
@@ -660,14 +664,66 @@ async def requote_amount_cents(session: AsyncSession, *, tenant: Tenant, appoint
     _name, price_text = await _resolve_service_and_price(session, tenant, probe)
     price_cents = parse_brl_to_cents(price_text)
     if price_cents is None:
-        return 0
+        return None, 0
     amount_cents = round(price_cents * tenant.pix_deposit_percent / 100)
     if amount_cents <= 0:
-        return 0
+        return price_cents, 0
     provider_name = tenant.payment_provider or PROVIDER_ASAAS
     if provider_name == PROVIDER_ASAAS and amount_cents < ASAAS_MIN_PIX_CENTS:
-        return 0
-    return amount_cents
+        return price_cents, 0
+    return price_cents, amount_cents
+
+
+async def requote_amount_cents(session: AsyncSession, *, tenant: Tenant, appointment) -> int:
+    """The sinal a consultation shaped like `appointment` would carry NOW, in cents (see
+    `requote_quote`): 0 when no sinal would be charged."""
+    return (await requote_quote(session, tenant=tenant, appointment=appointment))[1]
+
+
+@dataclass(frozen=True)
+class SinalPreview:
+    """What a NEW booking's confirmation card tells the patient he will pay (TASK-088)."""
+
+    price_cents: int  # the consultation's full value
+    amount_cents: int  # the sinal
+
+
+async def booking_sinal_preview(
+    session: AsyncSession,
+    *,
+    tenant: Tenant,
+    appointment_type: str | None,
+    professional_id: UUID | None,
+    unit_id: UUID | None = None,
+) -> SinalPreview | None:
+    """The sinal the booking being confirmed would be charged - or None when none would be.
+
+    The amount is `requote_quote`'s (the one arithmetic the `after` hook and the `before` gate
+    share: price at the unit x the clinic's percentage, nothing under the provider's minimum, the
+    convênio never exempting it - D-R12). On top of it, the guards that decide whether a charge
+    can be CREATED at all, for the clinic's timing: a known provider and a usable account
+    (`load_charge_account`, `before` = connected AND verified). Without them the real flow
+    charges nothing (`after`) or refuses the booking (`before`), so the card promises nothing.
+    The patient and the redis are not needed: this only describes the amount. Read-only."""
+    price_cents, amount_cents = await requote_quote(
+        session,
+        tenant=tenant,
+        appointment=SimpleNamespace(
+            appointment_type=appointment_type, professional_id=professional_id, unit_id=unit_id
+        ),
+    )
+    if price_cents is None or amount_cents <= 0:
+        return None
+    provider_name = tenant.payment_provider or PROVIDER_ASAAS
+    if registry.find_provider(provider_name) is None:
+        return None
+    before = (tenant.deposit_timing or DEPOSIT_TIMING_AFTER) == DEPOSIT_TIMING_BEFORE
+    account = await accounts.load_charge_account(
+        session, tenant_id=tenant.id, provider=provider_name, timing="before" if before else "after"
+    )
+    if account is None:
+        return None
+    return SinalPreview(price_cents=price_cents, amount_cents=amount_cents)
 
 
 async def requote_awaiting(
