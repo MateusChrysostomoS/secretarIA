@@ -267,7 +267,8 @@ def _marked_ids(result) -> set[str]:
 def _plan_rows(result) -> list[str]:
     """The titles of a convênio list's rows, in order."""
     assert result.flow_step == STEP_AWAITING_INSURANCE, result
-    return [row[1] for row in result.bubbles[0].rows]
+    # (the booking's back row - TASK-088 R18 - is not a plan row)
+    return [row[1] for row in result.bubbles[0].rows if not row[0].startswith("dayback|")]
 
 
 def _assert_full_list_with_marks(result, professionals, expected_marked):

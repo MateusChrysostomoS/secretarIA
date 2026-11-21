@@ -300,7 +300,9 @@ async def test_a_pure_reschedule_is_never_refused_even_if_the_original_cell_is_n
     assert confirmed.appointment_edit["service_id"] == SVC_C
 
 
-async def test_a_doctor_change_into_a_refused_cell_goes_back_to_the_appointments_doctor():
+async def test_a_doctor_change_into_a_refused_cell_reasks_the_convenio_and_keeps_the_new_doctor():
+    # TASK-088 R19 (was: back to the appointment's doctor behind a notice): the placement the
+    # patient chose stays; the convênio is asked again, from the plans the new cell accepts.
     a, b = _doctor("Dr. A", [CENTRO]), _doctor("Dra. B", [SUL])
     appt = _appt(a)
     draft = ae.EditDraft.from_appointment(appt, TZ).with_changes(
@@ -308,10 +310,12 @@ async def test_a_doctor_change_into_a_refused_cell_goes_back_to_the_appointments
     )
     result = aef._confirm_result(draft, _shared((SVC_C, SUL, P_UNIMED)), [a, b], _ctx([a, b]))
 
-    assert result.bubbles[0].body == ae.EDIT_INSURANCE_NOT_ACCEPTED
+    assert result.flow_step == fr.STEP_EDIT_INSURANCE
+    assert result.bubbles[0].body == fr.INSURANCE_REFUSED_LIST_UNIT
+    assert [row[0] for row in result.bubbles[0].rows] == ["ins|Amil", "ins|particular", "ins|outro"]
     kept = _draft(result)
-    assert kept.current["professional_id"] == str(a.id)
-    assert kept.current["unit_id"] == str(CENTRO.id)
+    assert kept.current["professional_id"] == str(b.id)
+    assert kept.current["unit_id"] == str(SUL.id)
 
 
 async def test_a_stale_card_is_refused_at_confirmar_when_the_matrix_changed_since():
@@ -380,30 +384,35 @@ async def test_service_list_marks_a_service_the_doctor_does_not_take_the_conveni
     assert items["svc|Retorno"] == REFUSED and items["svc|Consulta"] is None
 
 
-async def test_picking_a_service_refused_at_the_bookings_unit_offers_the_units_that_take_it():
+async def test_picking_a_service_refused_at_the_bookings_unit_reasks_the_convenio_there():
+    # TASK-088 R19 (was: the units that take the convênio): the booking's unit stays, the
+    # convênio is judged there and asked again from what that cell accepts.
     a = _doctor("Dr. A", [CENTRO, SUL])
     appt = _appt(a)
     snapshot = _shared((SVC_R, CENTRO, P_UNIMED))
     listed = await _step(snapshot, fr.STEP_EDIT_SERVICE, "Retorno", appt=appt, doctors=[a])
 
-    assert listed.flow_step == fr.STEP_EDIT_UNIT
-    assert [row[0] for row in listed.bubbles[0].rows] == [f"unit|{SUL.id}"]
+    assert listed.flow_step == fr.STEP_EDIT_INSURANCE
+    assert listed.bubbles[0].body == fr.INSURANCE_REFUSED_LIST_UNIT
+    assert [row[0] for row in listed.bubbles[0].rows] == ["ins|Amil", "ins|particular", "ins|outro"]
+    assert _draft(listed).current["service"] == "Retorno"
+    assert _draft(listed).current["unit_id"] == str(CENTRO.id)
 
     picked = await _step(
-        snapshot, fr.STEP_EDIT_UNIT, "Zona Sul", appt=appt, doctors=[a], draft=_draft(listed)
+        snapshot, fr.STEP_EDIT_INSURANCE, "Amil", appt=appt, doctors=[a], draft=_draft(listed)
     )
     assert picked.flow_step == fr.STEP_EDIT_CONFIRM
-    assert _draft(picked).current["unit_id"] == str(SUL.id)
+    assert _draft(picked).current["insurance"] == "Amil"
     assert _draft(picked).current["service"] == "Retorno"
 
-    # A typed unit the convênio is refused at never matches the filtered list.
+    # A refused plan typed anyway is asked again (with the line), never accepted.
     typed = await _step(
-        snapshot, fr.STEP_EDIT_UNIT, "Centro", appt=appt, doctors=[a], draft=_draft(listed)
+        snapshot, fr.STEP_EDIT_INSURANCE, "Unimed", appt=appt, doctors=[a], draft=_draft(listed)
     )
-    assert typed.flow_step != fr.STEP_EDIT_CONFIRM
+    assert typed.flow_step == fr.STEP_EDIT_INSURANCE
 
 
-async def test_a_service_refused_at_every_unit_keeps_the_draft_with_a_plain_notice():
+async def test_a_service_refused_at_every_unit_reasks_the_convenio_or_goes_particular():
     a = _doctor("Dr. A", [CENTRO, SUL])
     appt = _appt(a)
     result = await _step(
@@ -413,19 +422,33 @@ async def test_a_service_refused_at_every_unit_keeps_the_draft_with_a_plain_noti
         appt=appt,
         doctors=[a],
     )
-    assert result.flow_step == fr.STEP_EDIT_MENU
-    assert result.bubbles[0].body == ae.EDIT_INSURANCE_NOT_AT_UNITS
-    assert _draft(result).current["service"] == "Consulta"
+    # Amil is accepted: the list. The draft keeps the new service.
+    assert result.flow_step == fr.STEP_EDIT_INSURANCE
+    assert _draft(result).current["service"] == "Retorno"
+
+    # Nothing accepted at the booking's unit: Particular, and the card says so.
+    none = await _step(
+        _shared((SVC_R, CENTRO, P_UNIMED), (SVC_R, CENTRO, P_AMIL)),
+        fr.STEP_EDIT_SERVICE,
+        "Retorno",
+        appt=appt,
+        doctors=[a],
+    )
+    assert none.flow_step == fr.STEP_EDIT_CONFIRM
+    assert none.bubbles[0].body == fr.INSURANCE_REFUSED_PARTICULAR_UNIT
+    assert _draft(none).current["insurance"] == fr.LABEL_INSURANCE_PARTICULAR
 
 
-async def test_the_new_doctors_unit_list_only_shows_units_that_take_the_convenio():
+async def test_the_new_doctors_unit_list_shows_every_unit_of_the_doctor():
+    # TASK-088 R19 (was: only the units that take the convênio): the unit comes first and is
+    # never narrowed by the convênio - it is judged after the pick.
     a = _doctor("Dr. A", [CENTRO])
     b = _doctor("Dra. B", [SUL, NORTE])
     snapshot = _independent([a, b], [(b, [(SVC_C, NORTE, P_UNIMED), (SVC_R, NORTE, P_UNIMED)])])
     result = await _step(snapshot, fr.STEP_EDIT_DOCTOR, _tap(b), appt=_appt(a), doctors=[a, b])
 
     assert result.flow_step == fr.STEP_EDIT_UNIT
-    assert [row[0] for row in result.bubbles[0].rows] == [f"unit|{SUL.id}"]
+    assert [row[0] for row in result.bubbles[0].rows] == [f"unit|{SUL.id}", f"unit|{NORTE.id}"]
 
 
 async def test_services_at_a_unit_list_marks_the_refused_ones():
@@ -443,16 +466,17 @@ async def test_services_at_a_unit_list_marks_the_refused_ones():
     assert rows["svc|Consulta"] is None
 
 
-async def test_an_ai_proposed_service_refused_for_a_doctor_without_units_says_why():
-    """No unit at all: the "no unit" slice decides, and the words are the convênio's own."""
+async def test_an_ai_proposed_service_refused_for_a_doctor_without_units_reasks_the_convenio():
+    """No unit at all: the "no unit" slice decides, and the words are the booking's own."""
     a = _doctor("Dr. A", [])
     appt = _appt(a, unit=None)
     conv = conversation(ae.EditDraft.from_appointment(appt, TZ), fr.STEP_EDIT_MENU)
     result = await apply_ai_edit(
         conv, _shared((SVC_R, None, P_UNIMED)), {"service": "Retorno"}, [appt], [a], _ctx([a])
     )
-    assert result.bubbles[0].body == ae.EDIT_INSURANCE_NOT_ACCEPTED
-    assert _draft(result).current["service"] == "Consulta"
+    assert result.flow_step == fr.STEP_EDIT_INSURANCE
+    assert result.bubbles[0].body == fr.INSURANCE_REFUSED_LIST
+    assert _draft(result).current["service"] == "Retorno"
 
 
 # --- The card's scope carries what a re-resolution (list_options) needs ------------------

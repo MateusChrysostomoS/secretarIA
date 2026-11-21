@@ -242,6 +242,11 @@ def _ids(result) -> list[str]:
     return [row[0] for row in _list(result).rows]
 
 
+def _ins_ids(result) -> list[str]:
+    """The convenio list's rows without its back row (TASK-088 R18: it ends with one)."""
+    return [row_id for row_id in _ids(result) if not row_id.startswith(fr.ROW_DAY_BACK_PREFIX)]
+
+
 def _portal_matches(bubble: SlotsBubble, tenant, roster) -> None:
     """The Portal re-resolves the SAME rows from the stored scope (page 1 == the route)."""
     source = bubble.source
@@ -343,7 +348,9 @@ async def test_insurance_list_only_accepted_for_service_doctor_unit(mode):
     await at_sul.to_unit_list(ana)
     await at_sul.tap(f"unit|{sul.id}")
     assert at_sul.last.flow_step == fr.STEP_AWAITING_INSURANCE
-    assert _ids(at_sul.last) == ["ins|Unimed", "ins|Amil", "ins|particular", "ins|outro"]
+    assert _ins_ids(at_sul.last) == ["ins|Unimed", "ins|Amil", "ins|particular", "ins|outro"]
+    # The patient CHOSE the unit among two: the list's way back is the unit list.
+    assert _ids(at_sul.last)[-1] == f"{fr.ROW_DAY_BACK_PREFIX}{fr.BACK_TARGET_UNIT}"
     assert _list(at_sul.last).source.scope == {
         "service": "Ecocardiograma",
         "professional_id": str(ana.id),
@@ -356,7 +363,7 @@ async def test_insurance_list_only_accepted_for_service_doctor_unit(mode):
     at_centro = _Walk(tenant, doctors)
     await at_centro.to_unit_list(ana)
     await at_centro.tap(f"unit|{centro.id}")
-    assert _ids(at_centro.last) == [
+    assert _ins_ids(at_centro.last) == [
         "ins|Unimed",
         "ins|Bradesco",
         "ins|Amil",
@@ -370,7 +377,7 @@ async def test_insurance_list_only_accepted_for_service_doctor_unit(mode):
     await other.to_service_card("Consulta", doctor=ana)
     await other.say(fr.LABEL_BOOK_SERVICE)
     await other.tap(f"unit|{centro.id}")
-    assert _ids(other.last) == ["ins|Unimed", "ins|Bradesco", "ins|particular", "ins|outro"]
+    assert _ins_ids(other.last) == ["ins|Unimed", "ins|Bradesco", "ins|particular", "ins|outro"]
 
 
 async def test_a_plan_the_doctor_does_not_take_is_not_listed():
@@ -387,7 +394,7 @@ async def test_a_plan_the_doctor_does_not_take_is_not_listed():
     walk = _Walk(tenant, doctors)
     await walk.to_unit_list(ana)
     await walk.tap(f"unit|{sul.id}")
-    assert _ids(walk.last) == ["ins|Unimed", "ins|Amil", "ins|particular", "ins|outro"]
+    assert _ins_ids(walk.last) == ["ins|Unimed", "ins|Amil", "ins|particular", "ins|outro"]
     _portal_matches(_list(walk.last), tenant, doctors)
 
 
@@ -403,8 +410,8 @@ async def test_one_accepted_plan_lists_plan_particular_outro():
     await walk.tap(f"unit|{sul.id}")
     assert walk.last.flow_step == fr.STEP_AWAITING_INSURANCE
     # The one plan, then the two fixed rows ("Outro" stays: there IS something to be "other" to).
-    assert _ids(walk.last) == ["ins|Unimed", "ins|particular", "ins|outro"]
-    assert [row[1] for row in _list(walk.last).rows][-2:] == [
+    assert _ins_ids(walk.last) == ["ins|Unimed", "ins|particular", "ins|outro"]
+    assert [row[1] for row in _list(walk.last).rows][-3:-1] == [
         fr.LABEL_INSURANCE_PARTICULAR,
         fr.LABEL_INSURANCE_OTHER,
     ]
@@ -493,8 +500,9 @@ async def test_answering_the_list_goes_to_the_day_of_that_unit():
     assert walk.last.flow_selected_insurance == fr.LABEL_INSURANCE_PARTICULAR
     assert walk.last.flow_selected_unit_id == sul.id
     assert walk.agenda.log["days"] == 1
-    # Back from the days is the unit list (the patient did choose one).
-    assert _list(walk.last).rows[-1][1] == fu.LABEL_ANOTHER_UNIT
+    # Back from the days is the convenio list the patient was just asked (TASK-088 R18); from
+    # there, one more step back is the unit list.
+    assert _list(walk.last).rows[-1][1] == fr.LABEL_ANOTHER_INSURANCE
     # "Outro convênio" keeps asking on the same step and keeps the unit.
     again = _Walk(_tenant(doctors=doctors), doctors)
     await again.to_unit_list(ana)
@@ -612,7 +620,7 @@ async def test_a_known_refused_convenio_with_others_accepted_asks_again_with_a_n
     # Never Particular in silence: the refused answer is dropped and the patient chooses again.
     assert walk.last.flow_selected_insurance is None
     assert walk.last.flow_selected_unit_id == centro.id
-    assert _ids(walk.last) == ["ins|Bradesco", "ins|Amil", "ins|particular", "ins|outro"]
+    assert _ins_ids(walk.last) == ["ins|Bradesco", "ins|Amil", "ins|particular", "ins|outro"]
     # One unit, implied (the patient never saw or chose it): the unit is not named.
     assert _list(walk.last).body == (
         "O convênio que você informou não é aceito para esse serviço. Escolha uma opção:"
@@ -692,6 +700,7 @@ async def test_back_after_auto_particular_asks_the_convenio_at_an_accepting_unit
     await walk.tap(f"unit|{sul.id}")
     assert walk.last.flow_selected_insurance == fr.LABEL_INSURANCE_PARTICULAR  # automatic
     back = _list(walk.last).rows[-1]
+    # Nothing was accepted, so no question was asked: the days go back to the unit list.
     assert back[1] == fu.LABEL_ANOTHER_UNIT
     await walk.tap(back[0])
     assert walk.last.flow_step == fu.STEP_AWAITING_UNIT
@@ -699,7 +708,7 @@ async def test_back_after_auto_particular_asks_the_convenio_at_an_accepting_unit
     await walk.tap(f"unit|{centro.id}")
     # Centro accepts the plans: the question is asked, not skipped.
     assert walk.last.flow_step == fr.STEP_AWAITING_INSURANCE
-    assert _ids(walk.last) == [
+    assert _ins_ids(walk.last) == [
         "ins|Unimed",
         "ins|Bradesco",
         "ins|Amil",
@@ -708,8 +717,10 @@ async def test_back_after_auto_particular_asks_the_convenio_at_an_accepting_unit
     ]
 
 
-async def test_back_after_a_chosen_particular_keeps_it():
-    """A Particular the patient CHOSE (the list was shown) survives going back."""
+async def test_back_through_the_convenio_list_after_a_chosen_particular_asks_again():
+    """TASK-088 R18: the days go back to the convenio list the patient was asked, the list goes
+    back to the unit list - and the answer given before is not carried behind the question: it is
+    asked again at the unit picked next (never silently kept, never silently changed)."""
     centro, sul = _units()
     ana = _doctor(units=[centro, sul])
     doctors = [ana]
@@ -717,15 +728,17 @@ async def test_back_after_a_chosen_particular_keeps_it():
     await walk.to_unit_list(ana)
     await walk.tap(f"unit|{sul.id}")
     await walk.tap("ins|particular")
-    await walk.tap(_list(walk.last).rows[-1][0])  # back to the units
+    await walk.tap(_list(walk.last).rows[-1][0])  # back from the days: the convenio list
+    assert walk.last.flow_step == fr.STEP_AWAITING_INSURANCE
+    await walk.tap(_list(walk.last).rows[-1][0])  # back from the list: the unit list
     assert walk.last.flow_step == fu.STEP_AWAITING_UNIT
-    assert walk.last.flow_selected_insurance == fr.LABEL_INSURANCE_PARTICULAR
+    assert walk.last.flow_selected_insurance is None
     await walk.tap(f"unit|{centro.id}")
-    assert walk.last.flow_step == fr.STEP_AWAITING_DAY
-    assert walk.last.flow_selected_insurance == fr.LABEL_INSURANCE_PARTICULAR
+    assert walk.last.flow_step == fr.STEP_AWAITING_INSURANCE
+    assert walk.last.flow_selected_unit_id == centro.id
 
 
-async def test_back_after_a_chosen_plan_keeps_and_rejudges_it_at_the_new_unit():
+async def test_back_through_the_convenio_list_after_a_chosen_plan_judges_it_at_the_new_unit():
     centro, sul = _units()
     ana = _doctor(units=[centro, sul])
     doctors = [ana]
@@ -733,29 +746,19 @@ async def test_back_after_a_chosen_plan_keeps_and_rejudges_it_at_the_new_unit():
     refused = _matrix("shared", ana, (ECO_ID, sul, UNIMED))
     tenant = _tenant("shared", refused, doctors)
 
-    # Accepted at both units: kept, no second question.
-    keeps = _Walk(tenant, doctors)
-    await keeps.to_unit_list(ana)
-    await keeps.tap(f"unit|{centro.id}")
-    await keeps.tap("ins|Bradesco")
-    await keeps.tap(_list(keeps.last).rows[-1][0])
-    assert keeps.last.flow_selected_insurance == "Bradesco"
-    await keeps.tap(f"unit|{sul.id}")
-    assert keeps.last.flow_step == fr.STEP_AWAITING_DAY
-    assert keeps.last.flow_selected_insurance == "Bradesco"
-
-    # Refused at the new unit: never swapped in silence - the list again, with its line.
-    rejudged = _Walk(tenant, doctors)
-    await rejudged.to_unit_list(ana)
-    await rejudged.tap(f"unit|{centro.id}")
-    await rejudged.tap("ins|Unimed")
-    await rejudged.tap(_list(rejudged.last).rows[-1][0])
-    assert rejudged.last.flow_selected_insurance == "Unimed"
-    await rejudged.tap(f"unit|{sul.id}")
-    assert rejudged.last.flow_step == fr.STEP_AWAITING_INSURANCE
-    assert rejudged.last.flow_selected_insurance is None
-    assert "ins|Unimed" not in _ids(rejudged.last)
-    assert _list(rejudged.last).body == fr.INSURANCE_REFUSED_LIST_UNIT
+    walk = _Walk(tenant, doctors)
+    await walk.to_unit_list(ana)
+    await walk.tap(f"unit|{centro.id}")
+    await walk.tap("ins|Unimed")
+    assert walk.last.flow_step == fr.STEP_AWAITING_DAY
+    await walk.tap(_list(walk.last).rows[-1][0])  # the convenio list again
+    await walk.tap(_list(walk.last).rows[-1][0])  # the unit list
+    await walk.tap(f"unit|{sul.id}")
+    # Asked afresh at Zona Sul, with only what Zona Sul accepts: Unimed is not on it.
+    assert walk.last.flow_step == fr.STEP_AWAITING_INSURANCE
+    assert walk.last.flow_selected_insurance is None
+    assert "ins|Unimed" not in _ids(walk.last)
+    assert _list(walk.last).body == fr.INSURANCE_QUESTION
 
 
 async def test_back_to_the_service_after_an_automatic_particular_asks_again():

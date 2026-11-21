@@ -555,7 +555,9 @@ async def test_known_service_lists_only_plans_accepted_somewhere(mode):
     bubble = _list(result)
     ids = [r[0] for r in bubble.rows]
     assert "ins|Unimed" not in ids and "ins|Bradesco" in ids
-    assert ids[-2:] == ["ins|particular", "ins|outro"]
+    # The fixed rows, then (TASK-088 R18) the way back to the unit list the patient chose from.
+    back = f"{fr.ROW_DAY_BACK_PREFIX}{fr.BACK_TARGET_UNIT}"
+    assert ids[-3:] == ["ins|particular", "ins|outro", back]
     assert bubble.source.scope == {
         "service": "Ecocardiograma",
         "unit_marks": True,
@@ -856,7 +858,12 @@ async def test_the_final_guard_refuses_and_reopens_the_convenio(mode, armed):
     )
     # TASK-088: the reopened list is the one for THIS unit (Zona Sul), where Unimed is now
     # refused: only what Zona Sul accepts is offered (Ana still takes it at Centro).
-    assert [r[0] for r in _list(result).rows] == ["ins|Bradesco", "ins|particular", "ins|outro"]
+    assert [r[0] for r in _list(result).rows] == [
+        "ins|Bradesco",
+        "ins|particular",
+        "ins|outro",
+        f"{fr.ROW_DAY_BACK_PREFIX}{fr.BACK_TARGET_UNIT}",
+    ]
     [event] = [e for e in logs if e["event"] == "flow_booking_insurance_refused"]
     assert event["plan_id"] == UNIMED and event["unit_id"] == str(sul.id)
     assert "Unimed" not in str(event)

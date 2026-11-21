@@ -200,7 +200,8 @@ async def _book_to_the_convenio(snapshot, professionals, doctor=None, service="C
 def _plan_titles(result) -> list[str]:
     """The plans a convênio list offers (the two fixed rows left out)."""
     assert result.flow_step == STEP_AWAITING_INSURANCE, result.flow_step
-    return [row[1] for row in result.bubbles[0].rows[:-2]]
+    rows = [row for row in result.bubbles[0].rows if not row[0].startswith("dayback|")]
+    return [row[1] for row in rows[:-2]]
 
 
 # --------------------------------------------------------------------------

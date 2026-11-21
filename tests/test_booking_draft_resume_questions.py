@@ -46,8 +46,8 @@ from secretaria.services.flow_router import (  # noqa: E402
     STEP_AWAITING_CONFIRMATION,
     STEP_AWAITING_DAY,
     STEP_AWAITING_INSURANCE,
-    STEP_AWAITING_PROFESSIONAL,
     STEP_AWAITING_SERVICE,
+    STEP_AWAITING_SERVICE_PROFESSIONAL,
 )
 from secretaria.services.greeting_template import CONSENT_BUTTON_LABEL  # noqa: E402
 from secretaria.workers import tasks  # noqa: E402
@@ -298,7 +298,7 @@ async def test_the_doctor_answer_lands_the_parked_draft_with_that_doctor(wired) 
     )
     await _onboard(tenant)
     await _hand_back(db, tenant, FULL_DRAFT)
-    assert (await _conversation(db, tenant)).flow_step == STEP_AWAITING_PROFESSIONAL
+    assert (await _conversation(db, tenant)).flow_step == STEP_AWAITING_SERVICE_PROFESSIONAL
 
     await _wa_turn(tenant, "Dr. Beto")
 
@@ -335,7 +335,7 @@ async def test_a_doctor_who_does_not_offer_the_parked_service_keeps_the_day_wait
     assert conversation.flow_step == STEP_AWAITING_SERVICE  # Dr. Caio's own services
     assert conversation.flow_draft["d"] == DAY.isoformat()  # the day still waits
     (resumed,) = [fields for event, fields in log.events if event == "booking_draft_resumed"]
-    assert resumed["answered_step"] == STEP_AWAITING_PROFESSIONAL
+    assert resumed["answered_step"] == STEP_AWAITING_SERVICE_PROFESSIONAL
     assert resumed["dropped"] == {"service": "not_offered_by_professional"}
 
     await _wa_turn(tenant, "Retorno")

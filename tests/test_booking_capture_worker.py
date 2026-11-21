@@ -74,7 +74,7 @@ async def test_flag_off_worker_does_not_lose_the_day_while_asking_the_doctor(wir
         "t": "Primeira Consulta", "w": "self", "d": DAY.isoformat(), "h": "10:00",
     })
     current = await _conversation(wired, tenant)
-    assert current.flow_step == fr.STEP_AWAITING_PROFESSIONAL
+    assert current.flow_step == fr.STEP_AWAITING_SERVICE_PROFESSIONAL
     assert current.flow_draft["d"] == DAY.isoformat()
     await _wa_turn(tenant, "Dr. Beto")
     current = await _conversation(wired, tenant)
@@ -105,7 +105,7 @@ async def test_ambiguous_doctor_answer_preserves_preferences_until_an_explicit_c
         "p_unresolved": True,
     })
     current = await _conversation(wired, tenant)
-    assert current.flow_step == fr.STEP_AWAITING_PROFESSIONAL
+    assert current.flow_step == fr.STEP_AWAITING_SERVICE_PROFESSIONAL
     assert current.flow_draft["d"] == DAY.isoformat()
     assert current.flow_draft["h"] == "10:00"
     await _wa_turn(tenant, "Dr. Diogo Raposo")

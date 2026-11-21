@@ -20,7 +20,7 @@ from uuid import uuid4  # noqa: E402
 import pytest  # noqa: E402
 
 from secretaria.models import FlowState  # noqa: E402
-from secretaria.services import flow_router as fr  # noqa: E402
+from secretaria.services import flow_router as fr, flow_units as fu  # noqa: E402
 from secretaria.services.booking_draft import (  # noqa: E402
     BookingDraft,
     draft_from_record,
@@ -169,12 +169,17 @@ async def test_without_a_parked_draft_the_buttons_are_untouched(step, body, extr
     assert res.flow_draft is None
 
 
-def test_the_draft_wait_steps_are_pra_quem_plus_the_three_questions():
+def test_the_draft_wait_steps_are_pra_quem_plus_the_booking_questions():
+    # TASK-088: the service-first lists and the unit question are the resolver's questions too.
     assert fr.DRAFT_WAIT_STEPS == (
         *fr.ATTENDEE_STEPS,
         fr.STEP_AWAITING_INSURANCE,
         fr.STEP_AWAITING_PROFESSIONAL,
         fr.STEP_AWAITING_SERVICE,
+        fr.STEP_AWAITING_CATALOG_SERVICE,
+        fr.STEP_AWAITING_SERVICE_PROFESSIONAL,
+        fu.STEP_AWAITING_UNIT,
+        fu.STEP_AWAITING_UNIT_CONFIRM,
     )
 
 
@@ -230,7 +235,7 @@ async def test_a_doctor_question_parks_the_service_and_the_day():
         tenant=_switched_resolver_tenant(),
         pros=[ana, beto],
     )
-    assert res.landing_step == fr.STEP_AWAITING_PROFESSIONAL
+    assert res.landing_step == fr.STEP_AWAITING_SERVICE_PROFESSIONAL
     parked = draft_from_record(res.result.flow_draft, now=NOW)
     assert (parked.service, parked.day) == ("Consulta", DAY)
 

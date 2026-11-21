@@ -727,7 +727,8 @@ async def test_e2e_db_acceptance_decides_the_convenio_list(db):
             conv(card), snapshot, None, LABEL_BOOK_SERVICE, professionals=professionals
         )
         assert asked.flow_step == STEP_AWAITING_INSURANCE
-        return [row[1] for row in asked.bubbles[0].rows]
+        # (without the list's back row - TASK-088 R18)
+        return [row[1] for row in asked.bubbles[0].rows if not row[0].startswith("dayback|")]
 
     assert await plans_of(ana) == ["Unimed", "Particular", "Outro convênio"]
     assert await plans_of(bruno) == ["Amil", "Particular", "Outro convênio"]

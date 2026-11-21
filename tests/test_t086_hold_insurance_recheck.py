@@ -230,8 +230,15 @@ async def _seed(db, mode: str = "shared", *, phone_number_id: str = "1234567890"
                 "service_id": str(consulta.id),
             }
         ]
-        dr_a = Professional(tenant_id=tenant.id, name="Dr. A", google_calendar_id="cal-dr-a")
-        dr_b = Professional(tenant_id=tenant.id, name="Dr. B", google_calendar_id="cal-dr-b")
+        # TASK-088: the convênio question is the day step's own choke point (`_ask_day`), which
+        # first checks the doctor has hours - so the fixture doctors have some.
+        hours = {"monday": [{"start": "08:00", "end": "18:00"}]}
+        dr_a = Professional(
+            tenant_id=tenant.id, name="Dr. A", google_calendar_id="cal-dr-a", business_hours=hours
+        )
+        dr_b = Professional(
+            tenant_id=tenant.id, name="Dr. B", google_calendar_id="cal-dr-b", business_hours=hours
+        )
         s.add_all([dr_a, dr_b])
         await s.flush()
         if mode == "shared":
@@ -241,6 +248,15 @@ async def _seed(db, mode: str = "shared", *, phone_number_id: str = "1234567890"
                 tenant_id=tenant.id, professional_id=dr_a.id, custom_name="Plano A"
             )
         s.add(plan)
+        # TASK-088: a second plan the clinic never refuses, so the refused one is asked again from
+        # a list (with nothing else accepted the booking goes Particular instead, with a line).
+        s.add(
+            TenantInsurancePlan(tenant_id=tenant.id, custom_name="Plano B")
+            if mode == "shared"
+            else ProfessionalInsurancePlan(
+                tenant_id=tenant.id, professional_id=dr_a.id, custom_name="Plano B"
+            )
+        )
         patient = Patient(
             id=uuid4(),
             tenant_id=tenant.id,

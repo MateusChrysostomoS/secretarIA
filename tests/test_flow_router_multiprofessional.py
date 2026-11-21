@@ -600,7 +600,7 @@ async def test_service_confirm_enters_insurance_step_when_collected():
     assert res.flow_selected_professional_id == profs[0].id
     bubble = res.bubbles[0]
     assert isinstance(bubble, SlotsBubble)
-    titles = [row[1] for row in bubble.rows]
+    titles = [row[1] for row in bubble.rows if not row[0].startswith("dayback|")]
     assert titles == ["Unimed", "Amil", LABEL_INSURANCE_PARTICULAR, LABEL_INSURANCE_OTHER]
 
 
