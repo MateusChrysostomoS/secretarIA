@@ -81,9 +81,13 @@ from secretaria.services.attendee import (
 from secretaria.services.availability import (
     at_or_after,
     available_day_starts,
+    booking_buffer_minutes,
     booking_notice_floor,
     booking_notice_hours,
+    buffer_taken_at_confirm,
     held_slots,
+    offer_consultation_windows,
+    padded,
     slot_scan_limit,
     slot_taken_at_confirm,
     without_holds,
@@ -797,6 +801,126 @@ def booking_gate_scope(gate: BookingGate | None) -> Iterator[None]:
         yield
     finally:
         _ACTIVE_GATE.reset(token)
+
+
+# --------------------------------------------------------------------------
+# TASK-088 section B (Task 5): the doctor's buffer between consultations
+# --------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class BufferRule:
+    """The buffer the day and slot lists apply, and the booking they must not pad.
+
+    `minutes` is `booking_buffer_minutes` of the professional who OWNS the agenda being read;
+    None = derive it from the conversation's booking owner (`_booking_professional`).
+    `moved_event_id` is the `google_event_id` of the booking being moved (reschedule, "Alterar
+    dados"): its own old window never pads its new time. A new booking ignores nothing.
+    """
+
+    minutes: int | None = None
+    moved_event_id: str | None = None
+
+
+# The booking being moved, for the reschedule / edit pickers (the same reason as `_ACTIVE_GATE`:
+# the pickers sit under a dozen entry points that do not all hold the appointment). Set and
+# reset by the reschedule and "Alterar dados" entries, never by the first-booking branch.
+_MOVING: ContextVar[BufferRule | None] = ContextVar("flow_router_moving", default=None)
+
+
+@contextmanager
+def moving_booking_scope(rule: BufferRule | None) -> Iterator[None]:
+    """Publish `rule` (the booking being moved) for the pickers of the block; ALWAYS reset."""
+    token = _MOVING.set(rule)
+    try:
+        yield
+    finally:
+        _MOVING.reset(token)
+
+
+def moving_event_scope(event_id: str | None):
+    """`moving_booking_scope` for "Alterar dados": only the moved event is known up front (the
+    doctor - hence the buffer - follows the draft and is read off the carrier)."""
+    return moving_booking_scope(BufferRule(moved_event_id=event_id or None))
+
+
+def _booking_buffer(professional: Any | None) -> BufferRule:
+    """The rule of a NEW booking with `professional`: nothing moves."""
+    return BufferRule(minutes=booking_buffer_minutes(professional))
+
+
+def _appointment_owner(appt: dict | None, professionals: list | None) -> Any | None:
+    """The doctor (snapshot row) who owns `appt`, or None when it cannot be read."""
+    parsed = _appointment_owner_and_unit_id(appt, professionals) if appt else None
+    return parsed[0] if parsed is not None else None
+
+
+def _appointment_buffer(appt: dict | None, professionals: list | None) -> BufferRule:
+    """The rule of rescheduling `appt`: the buffer of the doctor who owns it, and its own event
+    never pads itself (R31, R32). No readable appointment: no rule from here (the conversation's
+    booking owner decides)."""
+    if not appt:
+        return BufferRule()
+    owner = _appointment_owner(appt, professionals)
+    return BufferRule(
+        minutes=booking_buffer_minutes(owner),
+        moved_event_id=str(appt.get("google_event_id") or "") or None,
+    )
+
+
+def _picker_buffer(
+    conversation: Any, professionals: list | None, branch: DayBranch, rule: BufferRule | None
+) -> tuple[int, str | None]:
+    """(buffer minutes, moved event id) a day / slot list of `branch` applies.
+
+    An explicit `rule` wins; the reschedule and edit branches read the booking being moved off
+    the scope their entry opened (`moving_booking_scope`); a rule without minutes - and the
+    first-booking branch - takes the buffer of `_booking_professional` (the doctor whose agenda
+    the picker reads). The clinic's own agenda (hub) never gets here.
+    """
+    if rule is None and branch is not BOOKING_DAY_BRANCH:
+        rule = _MOVING.get()
+    if rule is None:
+        rule = BufferRule()
+    minutes = rule.minutes
+    if minutes is None:
+        minutes = booking_buffer_minutes(_booking_professional(conversation, professionals))
+    return max(minutes, 0), rule.moved_event_id
+
+
+async def _inside_buffer(
+    calendar: CalendarService,
+    start: datetime,
+    end: datetime,
+    professional: Any | None,
+    *,
+    source: str,
+    conversation_id: object = None,
+    professional_id: UUID | None = None,
+    ignore_event_id: str | None = None,
+) -> bool:
+    """True when the chosen window is inside the buffer of `professional` (refused like a slot
+    taken between the list and the tap, R35). Asked right after `slot_taken_at_confirm`, on the
+    SAME agenda; `ignore_event_id` is the booking being moved; the holds passed on are OTHER
+    conversations' only (R33). No buffer: False, with no read at all."""
+    minutes = booking_buffer_minutes(professional)
+    if minutes <= 0:
+        return False
+    try:
+        holds = await _hold_windows(professional_id)
+    except Exception as exc:  # noqa: BLE001 - fail-open, like every confirm recheck
+        logger.warning("booking_buffer_holds_failed", error_type=type(exc).__name__)
+        holds = []
+    return await buffer_taken_at_confirm(
+        calendar,
+        start,
+        end,
+        buffer_minutes=minutes,
+        source=source,
+        ignore_event_id=ignore_event_id,
+        holds=holds,
+        conversation_id=conversation_id,
+    )
 
 
 @dataclass
@@ -4847,8 +4971,14 @@ async def enter_day_picker(
     professionals: list | None = None,
     anchor: datetime | None = None,
     calendar_view: bool = False,
+    buffer_rule: BufferRule | None = None,
 ) -> FlowRouterResult:
     """Render the tappable day list: only days that actually have a free slot.
+
+    The doctor's buffer between consultations (TASK-088 section B) applies on every branch: a
+    day whose only free times sit inside it is not offered. `buffer_rule` says whose buffer and
+    which booking is being moved when the caller knows better than the conversation
+    (`_picker_buffer`).
 
     `anchor` centres the scan on the current appointment, showing the nearest days.
 
@@ -4894,12 +5024,31 @@ async def enter_day_picker(
         if anchor is not None:
             anchor_aware = anchor if anchor.tzinfo else anchor.replace(tzinfo=calendar.tzinfo)
             start = max(start, anchor_aware - timedelta(days=DAY_PICKER_WINDOW_DAYS // 2))
+        window_days = DAY_CALENDAR_WINDOW_DAYS if calendar_view else DAY_PICKER_WINDOW_DAYS
+        buffer_minutes, moved_event_id = _picker_buffer(
+            conversation, professionals, branch, buffer_rule
+        )
+        # The booking being moved never pads itself: the consultation windows are read once for
+        # the whole window WITHOUT it. A new booking leaves the read to the availability layer.
+        consultations = (
+            await offer_consultation_windows(
+                calendar,
+                start,
+                start + timedelta(days=window_days),
+                buffer_minutes=buffer_minutes,
+                ignore_event_id=moved_event_id,
+            )
+            if buffer_minutes > 0 and moved_event_id
+            else None
+        )
         days = await available_day_starts(
             calendar,
             start=start,
-            window_days=DAY_CALENDAR_WINDOW_DAYS if calendar_view else DAY_PICKER_WINDOW_DAYS,
+            window_days=window_days,
             duration_minutes=duration_minutes,
             not_before=_booking_floor(conversation, professionals, branch, calendar.tzinfo),
+            buffer_minutes=buffer_minutes,
+            consultations=consultations,
         )
         if anchor is not None:
             # The days NEAREST the current one come first (ties: the earlier day), so
@@ -4923,6 +5072,7 @@ async def enter_day_picker(
             step=step,
             professionals=professionals,
             calendar_view=True,
+            buffer_rule=buffer_rule,
         )
 
     if not days:
@@ -4997,8 +5147,13 @@ async def _enter_slot_picker(
     page: int = 0,
     back_target: str | None = None,
     professionals: list | None = None,
+    buffer_rule: BufferRule | None = None,
 ) -> FlowRouterResult:
     """Step 2 of the branch: the free times on `target`, plus its two exits.
+
+    The doctor's buffer (TASK-088 section B, `_picker_buffer`) drops every time that sits closer
+    than N minutes to a consultation or to another conversation's held time; the booking being
+    moved never pads itself.
 
     A day that comes back empty was free when the picker was built and filled
     in between — so the deterministic answer is the picker again, refreshed
@@ -5008,24 +5163,45 @@ async def _enter_slot_picker(
         return _calendar_unavailable(conversation, branch, branch.day_step)
     reserved = await _hold_windows(_hold_owner(conversation, professionals))
     floor = _booking_floor(conversation, professionals, branch, calendar.tzinfo)
+    buffer_minutes, moved_event_id = _picker_buffer(
+        conversation, professionals, branch, buffer_rule
+    )
     try:
         slots = await calendar.list_free_slots(
             day=target,
             slot_minutes=duration_minutes,
             max_slots=(
                 slot_scan_limit(duration_minutes)
-                if reserved or floor is not None
+                if reserved or floor is not None or buffer_minutes > 0
                 else SLOT_PICKER_MAX_SLOTS
             ),
         )
     except CalendarUnavailableError:
         return _calendar_unavailable(conversation, branch, branch.day_step)
 
+    # The doctor's buffer around his consultations (the whole day was read, so the times
+    # after the padding still fill the page). Held times are padded below, after "held" labels.
+    if buffer_minutes > 0:
+        day_start = target if target.tzinfo else target.replace(tzinfo=calendar.tzinfo)
+        consultations = await offer_consultation_windows(
+            calendar,
+            day_start,
+            day_start + timedelta(days=1),
+            buffer_minutes=buffer_minutes,
+            ignore_event_id=moved_event_id,
+        )
+        slots = without_holds(
+            slots,
+            padded(consultations, buffer_minutes),
+            duration_minutes=duration_minutes,
+            tz=calendar.tzinfo,
+        )
+
     # The doctor's minimum notice: a slot starting too soon is not offered at all. The
     # whole day was read, so the times after the floor still fill the page.
     if floor is not None:
         slots = at_or_after(slots, floor, calendar.tzinfo)
-        if not reserved:
+        if not reserved and buffer_minutes <= 0:
             slots = slots[:SLOT_PICKER_MAX_SLOTS]
 
     # A slot another conversation is HOLDING is not free, even though Google
@@ -5047,7 +5223,18 @@ async def _enter_slot_picker(
                 hidden=before - len(slots),
                 conversation_id=str(getattr(conversation, "id", None)),
             )
+        if buffer_minutes > 0:
+            # A held time becomes a consultation: its neighbours are inside the buffer too (not
+            # "held" - they are simply not offered).
+            slots = without_holds(
+                slots,
+                padded(reserved, buffer_minutes),
+                duration_minutes=duration_minutes,
+                tz=calendar.tzinfo,
+            )
         # Reserve the final two rows for the day and service navigation controls.
+        slots = slots[:SLOT_PICKER_MAX_SLOTS]
+    elif buffer_minutes > 0:
         slots = slots[:SLOT_PICKER_MAX_SLOTS]
 
     held_labels = [str(s.get("label") or "") for s in held if s.get("label")]
@@ -5087,6 +5274,7 @@ async def _enter_slot_picker(
             back_target=back_target,
             prefix=DAY_NO_LONGER_FREE_PREFIX,
             professionals=professionals,
+            buffer_rule=buffer_rule,
         )
 
     # `s["label"]` is CalendarService's fixed "%H:%M" (5 chars), so the calendar
@@ -5556,6 +5744,7 @@ async def _ask_day(
         back_target=_day_back_target(tenant, professional, entry, unit, choice),
         professionals=professionals,
         prefix=prefix,
+        buffer_rule=_booking_buffer(professional),
     )
     if unit is not None and result.flow_state is FlowState.SERVICE_CATALOG:
         result.flow_selected_unit_id = unit.id
@@ -6492,16 +6681,29 @@ async def _slot_lost_since_confirm(
     end: datetime,
     professional_id: UUID | None,
     conversation_id: object,
+    *,
+    buffer_minutes: int = 0,
 ) -> bool:
     """The slot was free at "Confirmar"; is it still? Asked again after a deposit that failed
     (TASK-071 Plan 3): the agenda the event goes to, then the holds of OTHER conversations
-    (`busy_windows` already leaves this conversation's own out). Both reads fail open."""
+    (`busy_windows` already leaves this conversation's own out) - and, with a doctor's buffer
+    (TASK-088), the consultations and those holds padded by it. All reads fail open."""
     if await slot_taken_at_confirm(
         calendar, start, end, source="flow_confirm_deposit_waived", conversation_id=conversation_id
     ):
         return True
     windows = await gate.busy_windows(professional_id)
-    return any(other_start < end and start < other_end for other_start, other_end in windows)
+    if any(other_start < end and start < other_end for other_start, other_end in windows):
+        return True
+    return buffer_minutes > 0 and await buffer_taken_at_confirm(
+        calendar,
+        start,
+        end,
+        buffer_minutes=buffer_minutes,
+        source="flow_confirm_deposit_waived",
+        holds=windows,
+        conversation_id=conversation_id,
+    )
 
 
 async def _reoffer_taken_slot(
@@ -6875,12 +7077,22 @@ async def _handle_confirmation(
             professionals=professionals,
         )
 
+    # TASK-088 Task 5: and not inside the doctor's buffer of a consultation (or of another
+    # conversation's held time) - refused exactly like a slot taken meanwhile (R35).
     if await slot_taken_at_confirm(
         calendar,
         start,
         end,
         source="flow_confirm",
         conversation_id=getattr(conversation, "id", None),
+    ) or await _inside_buffer(
+        calendar,
+        start,
+        end,
+        booking_owner,
+        source="flow_confirm",
+        conversation_id=getattr(conversation, "id", None),
+        professional_id=professional_id,
     ):
         return await _reoffer_taken_slot(
             conversation,
@@ -7014,7 +7226,13 @@ async def _handle_confirmation(
             # reservation `begin_payment` made is gone and the provider call took time, so the
             # slot is asked about AGAIN (agenda + other conversations' holds) before the event.
             if await _slot_lost_since_confirm(
-                gate, calendar, start, end, professional_id, getattr(conversation, "id", None)
+                gate,
+                calendar,
+                start,
+                end,
+                professional_id,
+                getattr(conversation, "id", None),
+                buffer_minutes=booking_buffer_minutes(booking_owner),
             ):
                 return await _reoffer_taken_slot(
                     conversation,
@@ -7428,6 +7646,9 @@ async def _begin_reschedule(
         ),
         branch=MANAGE_DAY_BRANCH,
         professionals=professionals,
+        # TASK-088 Task 5 (R31, R32): the appointment's own doctor's buffer; its event is the
+        # booking being moved.
+        buffer_rule=_appointment_buffer(appt, professionals),
     )
 
 
@@ -7484,6 +7705,31 @@ def _appointment_unit_calendar(
 
 
 async def _manage_step(
+    conversation: Conversation,
+    tenant: Tenant,
+    calendar: CalendarService | None,
+    body: str,
+    appointments: list[dict],
+    professionals: list | None = None,
+    *,
+    patient_name: str | None = None,
+) -> FlowRouterResult:
+    # TASK-088 Task 5 (R31, R32): every picker and recheck of this turn belongs to the
+    # appointment being managed: its doctor's buffer, and its own event never pads itself.
+    managed_now = _find_appt_by_id(appointments, _managing_appt_id_str(conversation))
+    with moving_booking_scope(_appointment_buffer(managed_now, professionals)):
+        return await _manage_step_inner(
+            conversation,
+            tenant,
+            calendar,
+            body,
+            appointments,
+            professionals,
+            patient_name=patient_name,
+        )
+
+
+async def _manage_step_inner(
     conversation: Conversation,
     tenant: Tenant,
     calendar: CalendarService | None,
@@ -7766,6 +8012,8 @@ async def _manage_reschedule(
     # Same last read as the booking "Confirmar" (`_handle_confirmation`), on the
     # appointment's OWN agenda - the one the patch below goes to. The event
     # being moved is excluded: it never takes its own new time. Fail-open.
+    # TASK-088 Task 5: and the appointment's own doctor's buffer - the moved event is ignored.
+    owner = _appointment_owner(appt, professionals)
     if await slot_taken_at_confirm(
         calendar,
         start,
@@ -7773,6 +8021,15 @@ async def _manage_reschedule(
         source="flow_reschedule",
         ignore_event_id=event_id,
         conversation_id=getattr(conversation, "id", None),
+    ) or await _inside_buffer(
+        calendar,
+        start,
+        end,
+        owner,
+        source="flow_reschedule",
+        conversation_id=getattr(conversation, "id", None),
+        professional_id=getattr(owner, "id", None),
+        ignore_event_id=event_id,
     ):
         return await _reoffer_taken_slot(
             conversation,
@@ -8014,8 +8271,17 @@ async def _manage_rebook(
             professionals=professionals,
         )
 
+    owner = _appointment_owner(appt, professionals)
     if await slot_taken_at_confirm(
         calendar, start, end, source="flow_rebook", conversation_id=conversation_id
+    ) or await _inside_buffer(
+        calendar,
+        start,
+        end,
+        owner,
+        source="flow_rebook",
+        conversation_id=conversation_id,
+        professional_id=getattr(owner, "id", None),
     ):
         return await _reoffer()
     summary, description = _rebook_event_texts(appt, professionals, patient_name)
@@ -8654,6 +8920,8 @@ async def enter_rebooking(
             # TASK-052: "Remarcar" on a released PAID slot says what happens to the deposit.
             prefix=prefix,
             back_target=None if same_professional else BACK_TARGET_DOCTOR_SERVICES,
+            # TASK-088 Task 5 (R31): the doctor the list is read for, not the stale selection.
+            buffer_rule=_booking_buffer(owner),
         )
         # enter_day_picker knows nothing about who or what is being booked, and
         # these fields are written unconditionally by the caller — so a result

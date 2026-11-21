@@ -25,7 +25,15 @@ from pseudonymize_core import has_unresolved_tokens
 from secretaria.ai.formatter import whatsapp_markup
 from secretaria.config import get_settings
 from secretaria.core.logging import get_logger
-from secretaria.services.availability import slot_taken_at_confirm
+from secretaria.services.availability import (
+    booking_buffer_minutes,
+    buffer_taken_at_confirm,
+    offer_consultation_windows,
+    padded,
+    slot_scan_limit,
+    slot_start,
+    slot_taken_at_confirm,
+)
 from secretaria.services.booking_dates import resolve_booking_day, time_has_passed_today
 from secretaria.services.booking_draft import BookingDraft
 from secretaria.services.booking_scope import (
@@ -1022,8 +1030,13 @@ async def _hand_back_if_slot_taken(
     tool_name: str,
     appointment_type: str | None,
     professional_id: UUID | None = None,
+    buffer_minutes: int = 0,
 ) -> None:
     """Hand the booking back to the flow when [start, end) was taken since it was offered.
+
+    TASK-088 Task 5: `buffer_minutes` (`booking_buffer_minutes` of the professional who owns
+    `cal`) also refuses a window inside the buffer of a consultation or of another
+    conversation's held time, exactly like a taken slot; 0 asks nothing more.
 
     The v1 booking tools write straight to the agenda after the patient's "sim" in text,
     and the free time the model read may be minutes old. Asked on `cal` - the agenda the
@@ -1037,14 +1050,26 @@ async def _hand_back_if_slot_taken(
 
     Shared by the three create_event*-shaped tools, like `_localize_window`.
     """
-    if not await slot_taken_at_confirm(
+    taken = await slot_taken_at_confirm(
         cal,
         start,
         end,
         source=tool_name,
         conversation_id=_conversation_id_ctx.get(),
         tenant_id=_tenant_id_ctx.get(),
-    ):
+    )
+    if not taken and buffer_minutes > 0:
+        taken = await buffer_taken_at_confirm(
+            cal,
+            start,
+            end,
+            buffer_minutes=buffer_minutes,
+            source=tool_name,
+            holds=await held_busy_windows(professional_id or _sole_professional_id()),
+            conversation_id=_conversation_id_ctx.get(),
+            tenant_id=_tenant_id_ctx.get(),
+        )
+    if not taken:
         return
     raise await _slot_taken_hand_back(cal, start, appointment_type, professional_id)
 
@@ -1467,15 +1492,74 @@ async def list_free_slots(day: str, max_slots: int = 6, appointment_type: str = 
     target_day = date.fromisoformat(day)
     day_dt = datetime.combine(target_day, datetime.min.time())
     held = await held_busy_windows(_sole_professional_id())
-    extra = {"extra_busy": held} if held else {}
-    if minutes:
-        extra["slot_minutes"] = minutes
-    slots = await scoped_calendar(_get_calendar(), unit).list_free_slots(
+    slots = await buffered_free_slots(
+        scoped_calendar(_get_calendar(), unit),
         day=day_dt,
         max_slots=min(max(max_slots, 1), 10),
-        **extra,
+        held=held,
+        buffer_minutes=await _sole_buffer_minutes(),
+        slot_minutes=minutes,
     )
     return {"slots": slots}
+
+
+async def _sole_buffer_minutes() -> int:
+    """The buffer between consultations of this turn's single professional (0 = none, or not
+    readable: a READ tool then offers as before; the booking tools re-ask at the write)."""
+    tenant_id, professional_id = _tenant_id_ctx.get(), _sole_professional_id()
+    if tenant_id is None or professional_id is None:
+        return 0
+    from secretaria.ai.unit_scope import sole_professional_row
+
+    try:
+        return booking_buffer_minutes(await sole_professional_row(tenant_id, professional_id))
+    except Exception as exc:  # noqa: BLE001 - a read tool: offered without the padding
+        logger.warning("agent_tool_buffer_lookup_failed", error_type=type(exc).__name__)
+        return 0
+
+
+async def buffered_free_slots(
+    cal: CalendarService,
+    *,
+    day: datetime,
+    max_slots: int,
+    held: list,
+    buffer_minutes: int,
+    slot_minutes: int | None = None,
+) -> list[dict]:
+    """`cal.list_free_slots` for the v1 AI slot lists, with the doctor's buffer (TASK-088 §B).
+
+    No buffer: the very call the tools always made (`extra_busy` = the held windows). With one,
+    the whole day is read, every slot closer than N minutes to a consultation or to a held
+    window is dropped (those reads are fail-open: `offer_consultation_windows`), and only then
+    is the list cut to `max_slots`, so it still fills.
+    """
+    extra: dict = {"extra_busy": held} if held else {}
+    if slot_minutes:
+        extra["slot_minutes"] = slot_minutes
+    if buffer_minutes <= 0:
+        return await cal.list_free_slots(day=day, max_slots=max_slots, **extra)
+    slots = await cal.list_free_slots(
+        day=day, max_slots=slot_scan_limit(slot_minutes or 30), **extra
+    )
+    tz = cal.tzinfo
+    first = day if day.tzinfo else day.replace(tzinfo=tz)
+    consultations = await offer_consultation_windows(
+        cal, first, first + timedelta(days=1), buffer_minutes=buffer_minutes
+    )
+    blockers = padded([*held, *consultations], buffer_minutes)
+    length = timedelta(minutes=slot_minutes or 30)
+    kept: list[dict] = []
+    for slot in slots:
+        start = slot_start(slot["start"], tz)
+        end = slot_start(slot["end"], tz) if slot.get("end") else start + length
+        if not any(_overlaps(start, end, b_start, b_end) for b_start, b_end in blockers):
+            kept.append(slot)
+    return kept[:max_slots]
+
+
+def _overlaps(a_start: datetime, a_end: datetime, b_start: datetime, b_end: datetime) -> bool:
+    return a_start < b_end and b_start < a_end
 
 
 async def _conversation_attendee_name() -> str | None:
@@ -1638,7 +1722,12 @@ async def create_event(
     )
     description = _with_notes(auto_description, description)
     await _hand_back_if_slot_taken(
-        cal, fallback_start, fallback_end, tool_name="create_event", appointment_type=canonical_type
+        cal,
+        fallback_start,
+        fallback_end,
+        tool_name="create_event",
+        appointment_type=canonical_type,
+        buffer_minutes=booking_buffer_minutes(owner),
     )
     event = await _create_booking_event(
         cal,

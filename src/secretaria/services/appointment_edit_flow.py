@@ -477,22 +477,58 @@ async def _held(calendar, start, end, professional_id) -> bool:
     return any(a < end and b > start for a, b in holds)
 
 
+async def _inside_buffer(
+    calendar: Any,
+    start: datetime,
+    end: datetime,
+    ignore: str | None,
+    professional_id: str | None,
+    professionals: list | None,
+) -> bool:
+    """TASK-088 Task 5: is [start, end) inside the buffer of the consultations of the doctor who
+    owns `calendar` (the draft's, R31)? "Alterar dados" is the PATIENT's edit: the time he keeps
+    or picks is held to the same buffer as a new booking; `ignore` - the appointment's own event -
+    never pads itself (R32). Without `professionals` (or a buffer) nothing is read."""
+    if not professionals:
+        return False
+    owner_id = _uuid(professional_id)
+    doctor = (
+        fr._find_professional_by_id(professionals, owner_id)
+        if owner_id is not None
+        else (professionals[0] if len(professionals) == 1 else None)
+    )
+    return await fr._inside_buffer(
+        calendar,
+        start,
+        end,
+        doctor,
+        source="appointment_edit",
+        professional_id=owner_id,
+        ignore_event_id=ignore,
+    )
+
+
 async def _slot_free(
     calendar: Any,
     start: datetime,
     end: datetime,
     ignore: str | None,
     professional_id: str | None = None,
+    professionals: list | None = None,
 ) -> bool:
-    """Whether [start, end) is bookable on `calendar`; unknown (no agenda, outage) = not free."""
+    """Whether [start, end) is bookable on `calendar`; unknown (no agenda, outage) = not free.
+    Bookable = free on the agenda, not held, and outside the doctor's buffer (TASK-088)."""
     if calendar is None:
         return False
     if await _held(calendar, start, end, professional_id):
         return False
     try:
-        return bool(await calendar.is_slot_free(start, end, ignore_event_id=ignore))
+        free = bool(await calendar.is_slot_free(start, end, ignore_event_id=ignore))
     except CalendarUnavailableError:
         return False
+    return free and not await _inside_buffer(
+        calendar, start, end, ignore, professional_id, professionals
+    )
 
 
 def _ignore_event(draft: ae.EditDraft, appt: dict, ctx: ae.EditContext) -> str | None:
@@ -783,6 +819,7 @@ async def _after_slot_affecting_change(
         draft.end,
         _ignore_event(draft, appt, ctx),
         draft.current["professional_id"],
+        professionals,
     )
     if free:
         return _confirm_result(draft, tenant, professionals, ctx)
@@ -930,6 +967,7 @@ async def _time_too_step(conversation, tenant, body, draft, appt, professionals,
             end,
             _ignore_event(draft, appt, ctx),
             draft.current["professional_id"],
+            professionals,
         ):
             moved = draft.with_changes(start_at=_iso(start), end_at=_iso(end))
             return _confirm_result(moved, tenant, professionals, ctx)
@@ -1330,6 +1368,7 @@ async def _availability(
     end: datetime,
     ignore: str | None,
     professional_id: str | None = None,
+    professionals: list | None = None,
 ):
     """True / False, or None when the agenda is missing or unreachable (no mark then)."""
     if calendar is None:
@@ -1337,9 +1376,12 @@ async def _availability(
     if await _held(calendar, start, end, professional_id):
         return False
     try:
-        return bool(await calendar.is_slot_free(start, end, ignore_event_id=ignore))
+        free = bool(await calendar.is_slot_free(start, end, ignore_event_id=ignore))
     except CalendarUnavailableError:
         return None
+    return free and not await _inside_buffer(
+        calendar, start, end, ignore, professional_id, professionals
+    )
 
 
 def _edit_doctor_description(
@@ -1452,7 +1494,7 @@ async def _doctor_list(
             if _rechecks_day(candidate)
             else frozenset(),
         )
-        free = await _availability(calendar, draft.start, draft.end, ignore, pid)
+        free = await _availability(calendar, draft.start, draft.end, ignore, pid, professionals)
         if free is not None:
             availability[pid] = (
                 f"{ae.MARK_FREE if free else ae.MARK_BUSY} {'Livre' if free else 'Ocupado'} {when}"
@@ -1865,6 +1907,15 @@ async def _apply_confirm(
             return _unavailable(draft)
         if free and await _held(new_cal, start, end, draft.current["professional_id"]):
             free = False
+        if free and await _inside_buffer(
+            new_cal,
+            start,
+            end,
+            _ignore_event(draft, appt, ctx),
+            draft.current["professional_id"],
+            professionals,
+        ):
+            free = False
         if not free:
             return await _reslot_picker(conversation, tenant, draft, professionals, ctx)
 
@@ -1958,7 +2009,29 @@ async def _apply_confirm(
 # --- Dispatcher -----------------------------------------------------------------------
 
 
+def _moved_event_of(conversation, appointments) -> str | None:
+    """The `google_event_id` of the appointment being edited: it never pads its own new time."""
+    appt = fr._find_appt_by_id(appointments, fr._managing_appt_id_str(conversation))
+    return str((appt or {}).get("google_event_id") or "") or None
+
+
 async def edit_step(
+    conversation,
+    tenant,
+    body: str,
+    appointments: list[dict],
+    professionals: list | None,
+    ctx: ae.EditContext | None,
+    patient_name: str | None = None,
+) -> fr.FlowRouterResult:
+    # TASK-088 Task 5 (R32): every day / slot list of this turn ignores the booking being moved.
+    with fr.moving_event_scope(_moved_event_of(conversation, appointments)):
+        return await _edit_step_inner(
+            conversation, tenant, body, appointments, professionals, ctx, patient_name
+        )
+
+
+async def _edit_step_inner(
     conversation,
     tenant,
     body: str,
@@ -2080,6 +2153,11 @@ async def edit_step(
 
 async def redisplay_edit(conversation, tenant, appointments, professionals, ctx):
     """Redraw this stage without changing either draft snapshot (including staged values)."""
+    with fr.moving_event_scope(_moved_event_of(conversation, appointments)):
+        return await _redisplay_edit_inner(conversation, tenant, appointments, professionals, ctx)
+
+
+async def _redisplay_edit_inner(conversation, tenant, appointments, professionals, ctx):
     draft = ae.EditDraft.from_json(getattr(conversation, "flow_edit_draft", None))
     if draft is None:
         return fr._preserve(conversation, "reply")
@@ -2168,6 +2246,13 @@ async def redisplay_edit(conversation, tenant, appointments, professionals, ctx)
 
 async def apply_ai_edit(conversation, tenant, proposal, appointments, professionals, ctx):
     """Validate an AI proposal and land it in the same edit; NEVER apply/confirm it."""
+    with fr.moving_event_scope(_moved_event_of(conversation, appointments)):
+        return await _apply_ai_edit_inner(
+            conversation, tenant, proposal, appointments, professionals, ctx
+        )
+
+
+async def _apply_ai_edit_inner(conversation, tenant, proposal, appointments, professionals, ctx):
 
     async def unchanged():
         return await redisplay_edit(conversation, tenant, appointments, professionals, ctx)
@@ -2371,6 +2456,7 @@ async def apply_ai_edit(conversation, tenant, proposal, appointments, profession
             end,
             _ignore_event(new, appt, ctx),
             new.current["professional_id"],
+            professionals,
         ):
             # Keep the prior slot until a replacement is actually available and chosen.
             return await _reslot_picker(conversation, tenant, new, professionals, ctx)

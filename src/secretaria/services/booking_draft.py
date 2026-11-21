@@ -1014,9 +1014,16 @@ async def _land_day(
     # The doctor's minimum notice: a day (or time) the patient named that falls inside it
     # is never offered, and the patient is told why instead of "no free time".
     floor = booking_notice_floor(owner, now.astimezone(cal.tzinfo))
+    # TASK-088 Task 5 (R31): the booking owner's buffer between consultations.
+    buffer_rule = fr._booking_buffer(owner)
     try:
         free = await free_slots_for_day(
-            cal, day=draft.day, duration_minutes=duration, holds=holds, not_before=floor
+            cal,
+            day=draft.day,
+            duration_minutes=duration,
+            holds=holds,
+            not_before=floor,
+            buffer_minutes=buffer_rule.minutes or 0,
         )
     except CalendarUnavailableError:
         unavailable = fr._calendar_unavailable(state, fr.BOOKING_DAY_BRANCH, fr.STEP_AWAITING_DAY)
@@ -1066,6 +1073,7 @@ async def _land_day(
         branch=fr.BOOKING_DAY_BRANCH,
         back_target=fr._day_back_target(tenant, owner, entry, unit, choice),
         professionals=professionals,
+        buffer_rule=buffer_rule,
     )
     return land(result, *names)
 

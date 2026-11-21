@@ -30,7 +30,7 @@ from uuid import UUID
 
 from secretaria.models import FlowState
 from secretaria.services import flow_router as fr
-from secretaria.services.availability import free_slots_for_day
+from secretaria.services.availability import free_slots_for_day, offer_consultation_windows
 from secretaria.services.booking_draft import (
     DRAFT_DAY_OUT_OF_WINDOW_PREFIX,
     DRAFT_DAY_UNAVAILABLE_PREFIX,
@@ -458,6 +458,10 @@ async def _land_new_day(
     duration = fr._appt_duration_minutes(target, tenant)
     base = (FIELD_ACTION, FIELD_APPOINTMENT)
 
+    # TASK-088 Task 5 (R31, R32): the appointment's own doctor's buffer; its event is the booking
+    # being moved and never pads its new time.
+    buffer_rule = fr._appointment_buffer(target, professionals)
+
     async def day_picker(prefix: str) -> ManageResolution:
         result = await fr.enter_day_picker(
             state,
@@ -467,6 +471,7 @@ async def _land_new_day(
             branch=fr.MANAGE_DAY_BRANCH,
             prefix=prefix,
             professionals=professionals,
+            buffer_rule=buffer_rule,
         )
         return done(result, *base)
 
@@ -494,8 +499,28 @@ async def _land_new_day(
         return await day_picker(refusal)
     holds = await fr._hold_windows(fr._hold_owner(state, professionals))
     try:
+        minutes = buffer_rule.minutes or 0
+        first = dt.datetime(
+            request.day.year, request.day.month, request.day.day, tzinfo=calendar.tzinfo
+        )
         free = await free_slots_for_day(
-            calendar, day=request.day, duration_minutes=duration, holds=holds
+            calendar,
+            day=request.day,
+            duration_minutes=duration,
+            holds=holds,
+            buffer_minutes=minutes,
+            # The moved appointment is left out of the windows that pad: read here without it.
+            consultations=(
+                await offer_consultation_windows(
+                    calendar,
+                    first,
+                    first + dt.timedelta(days=1),
+                    buffer_minutes=minutes,
+                    ignore_event_id=buffer_rule.moved_event_id,
+                )
+                if minutes > 0 and buffer_rule.moved_event_id
+                else None
+            ),
         )
     except CalendarUnavailableError:
         return done(
@@ -525,5 +550,6 @@ async def _land_new_day(
         duration_minutes=duration,
         branch=fr.MANAGE_DAY_BRANCH,
         professionals=professionals,
+        buffer_rule=buffer_rule,
     )
     return done(result, *names)

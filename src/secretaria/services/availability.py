@@ -183,6 +183,38 @@ async def read_consultation_windows(
     return list(await seam(start - pad, end + pad, ignore_event_id=ignore_event_id))
 
 
+async def offer_consultation_windows(
+    calendar: CalendarService,
+    start: datetime,
+    end: datetime,
+    *,
+    buffer_minutes: int,
+    ignore_event_id: str | None = None,
+) -> list[Window]:
+    """`read_consultation_windows` for a path that OFFERS times (day list, slot list, the AI's
+    availability): FAIL-OPEN, like the confirm recheck (TASK-088 Task 5, R34).
+
+    A failing read (the database, anything raised) offers the times WITHOUT the padding and
+    logs a warning with the error type only: a flaky read must not stop a patient from booking,
+    the calendar's own busy check still prevents any overlap, and the confirm recheck asks again.
+    """
+    try:
+        return await read_consultation_windows(
+            calendar,
+            start,
+            end,
+            buffer_minutes=buffer_minutes,
+            ignore_event_id=ignore_event_id,
+        )
+    except Exception as exc:
+        logger.warning(
+            "booking_buffer_offer_read_failed",
+            error_type=type(exc).__name__,
+            buffer_minutes=buffer_minutes,
+        )
+        return []
+
+
 def _aware(value: datetime, tz: tzinfo | None) -> datetime:
     return value.replace(tzinfo=tz) if value.tzinfo is None else value
 
@@ -227,7 +259,7 @@ async def free_slots_for_day(
     if buffer_minutes > 0:
         if consultations is None:
             first = datetime(day.year, day.month, day.day, tzinfo=tz)
-            consultations = await read_consultation_windows(
+            consultations = await offer_consultation_windows(
                 calendar, first, first + timedelta(days=1), buffer_minutes=buffer_minutes
             )
         blockers = padded([*holds, *consultations], buffer_minutes)
@@ -281,7 +313,7 @@ async def available_day_starts(
     if buffer_minutes > 0:
         if consultations is None:
             first = _aware(start, tz)
-            consultations = await read_consultation_windows(
+            consultations = await offer_consultation_windows(
                 calendar, first, first + timedelta(days=window_days), buffer_minutes=buffer_minutes
             )
         blockers = padded([*holds, *consultations], buffer_minutes)

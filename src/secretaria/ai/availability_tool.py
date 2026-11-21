@@ -48,7 +48,11 @@ from secretaria.ai.tools import (
     _tenant_id_ctx,
 )
 from secretaria.core.logging import get_logger
-from secretaria.services.availability import booking_notice_floor, booking_notice_hours
+from secretaria.services.availability import (
+    booking_buffer_minutes,
+    booking_notice_floor,
+    booking_notice_hours,
+)
 from secretaria.services.availability_windows import (
     CLAMP_BOOKING_WINDOW,
     CLAMP_MAX_DAYS,
@@ -432,6 +436,8 @@ async def _read_availability(
             duration_minutes=minutes,
             holds=holds,
             not_before=floor,
+            # TASK-088 Task 5 (R31): the professional's buffer between consultations.
+            buffer_minutes=booking_buffer_minutes(target.professional),
         )
         truncated = truncated or unit_scan.truncated
         name = unit.name if unit is not None and len(units) > 1 else None

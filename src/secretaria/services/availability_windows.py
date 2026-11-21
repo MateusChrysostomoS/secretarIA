@@ -31,7 +31,7 @@ from secretaria.services.availability import (
     Window,
     days_with_free_slots,
     free_slots_for_day,
-    read_consultation_windows,
+    offer_consultation_windows,
 )
 from secretaria.services.booking_dates import WEEKDAY_SHORT
 
@@ -213,7 +213,7 @@ async def scan_free_windows(
     first = datetime(span.first.year, span.first.month, span.first.day, tzinfo=tz)
     consultations = None
     if buffer_minutes > 0:
-        consultations = await read_consultation_windows(
+        consultations = await offer_consultation_windows(
             calendar, first, first + timedelta(days=span.days), buffer_minutes=buffer_minutes
         )
     free_days = await days_with_free_slots(

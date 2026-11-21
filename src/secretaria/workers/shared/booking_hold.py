@@ -26,6 +26,7 @@ from secretaria.models import (
     Conversation,
     FlowState,
     Patient,
+    Professional,
     Tenant,
 )
 from secretaria.models.deposit_release_offer import CARRY_CHECK_REFUNDED, CARRY_CHECK_UNKNOWN
@@ -39,9 +40,14 @@ from secretaria.services.appointment_status import (
     SOURCE_FLOW,
 )
 from secretaria.services.attendee import ATTENDEE_SELF
-from secretaria.services.availability import slot_taken_at_confirm
+from secretaria.services.availability import (
+    booking_buffer_minutes,
+    buffer_taken_at_confirm,
+    slot_taken_at_confirm,
+)
 from secretaria.services.booking_hold import (
     HeldSlot,
+    held_windows,
     latest_hold_in,
     live_hold_overlaps,
     release_in as release_hold_in,
@@ -625,14 +631,62 @@ async def _held_slot_unavailable(
         return True
     if calendar is None:
         return False
-    return await slot_taken_at_confirm(
+    if await slot_taken_at_confirm(
         calendar,
         held.start_at,
         held.end_at,
         source="booking_hold_promotion",
         conversation_id=reply.conversation_id,
         tenant_id=tenant.id,
+    ):
+        return True
+    # TASK-088 Task 5: and not inside the doctor's buffer of a consultation or of another
+    # conversation's Pix hold (the patient's own hold is excluded: it never pads itself).
+    minutes, others = await _held_buffer_rule(reply, tenant, held)
+    if minutes <= 0:
+        return False
+    return await buffer_taken_at_confirm(
+        calendar,
+        held.start_at,
+        held.end_at,
+        buffer_minutes=minutes,
+        source="booking_hold_promotion",
+        holds=others,
+        conversation_id=reply.conversation_id,
+        tenant_id=tenant.id,
     )
+
+
+async def _held_buffer_rule(
+    reply: _ReplyContext, tenant: Tenant, held: HeldSlot
+) -> tuple[int, list[tuple[datetime, datetime]]]:
+    """(the held booking's doctor's buffer in minutes, OTHER conversations' held windows).
+
+    (0, []) without a buffer - and then nothing else is read - or when the doctor cannot be read:
+    fail-open, like every confirm recheck (logged with the error type only).
+    """
+    if held.professional_id is None:
+        return 0, []
+    try:
+        async with async_session_factory() as session:
+            professional = await session.get(Professional, held.professional_id)
+        if professional is None or professional.tenant_id != tenant.id:
+            return 0, []
+        minutes = booking_buffer_minutes(professional)
+        if minutes <= 0:
+            return 0, []
+        others = await held_windows(
+            tenant.id, held.professional_id, exclude_conversation=reply.conversation_id
+        )
+        return minutes, others
+    except Exception as exc:  # noqa: BLE001 - fail-open, like `slot_taken_at_confirm`
+        logger.warning(
+            "booking_hold_buffer_lookup_failed",
+            error_type=type(exc).__name__,
+            conversation_id=str(reply.conversation_id),
+            tenant_id=str(tenant.id),
+        )
+        return 0, []
 
 
 async def _held_insurance_refused(reply: _ReplyContext, tenant: Tenant, held: HeldSlot) -> bool:

@@ -1,7 +1,7 @@
 # Checkpoint: intervalo entre consultas do profissional (TASK-088 §B)
 
-Estado: regra do núcleo implementada (secretarIA, local, sem push/deploy). Os chamadores (fluxo guiado,
-ferramenta de disponibilidade da IA, reconferência na confirmação, remarcação) são ligados à parte.
+Estado: regra do núcleo e chamadores implementados (secretarIA, local, sem push/deploy). O campo na tela do
+portal é feito à parte.
 
 ## Regra
 
@@ -51,9 +51,34 @@ Com N = 0 nada muda e nenhuma leitura extra acontece. Com N > 0: as janelas de c
 para o período inteiro (lista de dias, varredura da IA) e só os dias que uma janela engordada toca são relidos
 horário a horário; nunca uma leitura por dia. Reconferência: uma leitura curta ao redor do horário.
 
-## Pendências (fora desta tarefa de núcleo)
+## Falha na leitura (ofertas)
 
-- ligar `buffer_minutes` do profissional nos chamadores (fluxo, `booking_draft`, ferramenta da IA,
-  confirmação e remarcação) e a tela do portal;
-- o evento que está sendo remarcado não se engorda a si mesmo: passar `ignore_event_id` (o
-  `google_event_id` da consulta) em `buffer_taken_at_confirm`.
+Se a leitura das consultas falhar num caminho que **oferece** horários (lista de dias, lista de horários,
+ferramenta de disponibilidade da IA, lista de horários das ferramentas v1), o horário é oferecido **sem a
+folga** e um aviso é registrado (`booking_buffer_offer_read_failed`, só o tipo do erro): fail-open, como a
+reconferência. A checagem de ocupação do próprio calendário continua impedindo sobreposição, e a
+reconferência na confirmação pergunta de novo (`services/availability.py::offer_consultation_windows`).
+
+## Caminhos ligados (TASK-088 Task 5)
+
+A folga é sempre a do profissional dono da agenda sendo lida/escrita (nunca a seleção velha da conversa) e o
+agendamento que está sendo movido nunca engorda a si mesmo. Recusa na confirmação = a mesma resposta de
+"horário ocupado entre a lista e o toque" (mesma mensagem, mesma re-oferta do dia).
+
+- Lista de dias e de horários do fluxo (`flow_router.enter_day_picker`, `_enter_slot_picker`, `_ask_day`),
+  nas três ramificações (agendar, remarcar, "Alterar dados") e no "Outro horário" (`_days_for`).
+- Rascunho da IA (`booking_draft._land_day`), remarcação pedida pela IA (`manage_request._land_new_day`).
+- Ferramenta de disponibilidade da IA (`ai/availability_tool.py`) e as ferramentas v1
+  (`list_free_slots`, `list_free_slots_for_professional`, e a reconferência de `create_event`,
+  `create_event_for_professional`, `create_event_at_unit`).
+- Reconferência na confirmação: agendar ("Confirmar" e a re-checagem após sinal dispensado), remarcar,
+  "Outro horário", promoção do código/Pix (`workers/shared/booking_hold.py::_held_slot_unavailable`),
+  "Alterar dados" (`appointment_edit_flow._slot_free`, `_availability`, `_apply_confirm`) e troca de serviço
+  paga (`service_change.sync_agenda_event(buffer_for_patient=True)`, só quando a troca é do paciente).
+- Nunca na agenda da clínica: `api/hub/*`, `services/staff_appointment_edit.py` e a troca de origem `hub`.
+
+## Pendências
+
+- campo na tela do portal;
+- `old_slot.place_new_event_after_payment` (evento criado depois do Pix da diferença) não reconfere a folga:
+  a janela foi validada e segurada por um hold de diferença no pedido.
