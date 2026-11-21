@@ -825,6 +825,10 @@ class FlowRouterResult:
     # worker (workers/shared/draft_resolution.py::_resume_booking_draft) re-runs the
     # resolver over the draft instead of showing this result's list. Never persisted.
     resume_draft: bool = False
+    # True when this result DELIBERATELY leaves `flow_selected_insurance` empty (TASK-088: the
+    # automatic Particular dropped on "back"), so `_carry_insurance` does not copy the old answer
+    # back onto it. Never persisted.
+    insurance_dropped: bool = False
     # On an action="calendar_unavailable" result of a booking whose deposit was DROPPED
     # (TASK-071 Plan 3 review fix, 2026-10-29): the worker keeps the clinic's calendar alert but
     # offers a person (Sim / Não) instead of handing over. Never persisted.
@@ -1672,6 +1676,7 @@ def _carry_insurance(conversation: Conversation, result: FlowRouterResult) -> Fl
     if (
         result.flow_selected_insurance is not None
         or result.flow_step == STEP_AWAITING_INSURANCE
+        or result.insurance_dropped
     ):
         return result
     if result.flow_state in (FlowState.SERVICE_CATALOG, FlowState.LLM):
@@ -3741,6 +3746,7 @@ def _insurance_gate(
     entry: dict | None,
     unit: Any | None,
     prefix: str | None = None,
+    unit_asked: bool = False,
 ) -> _InsuranceGate:
     """The convênio point of the booking: after the unit, before the days (TASK-088 R5/R8).
 
@@ -3779,7 +3785,9 @@ def _insurance_gate(
         if plan is None or any(str(each.get("id")) == str(plan["id"]) for each in accepted):
             return _InsuranceGate()
         refused_known = True
-    where_unit = unit is not None
+    # "Nessa unidade" only when the patient saw/chose the unit (a list or a Sim/Não); an
+    # implied one is never named.
+    where_unit = unit is not None and unit_asked
     if not accepted:
         logger.info(
             "insurance_step_particular_direct",
@@ -3884,7 +3892,10 @@ async def _handle_insurance(
         )
         result.flow_selected_type = conversation.flow_selected_type
     elif not conversation.flow_selected_type:
-        result = _start_booking(tenant, professionals, insurance=stored)
+        # A chat parked on the retired first question (no service yet): the answer is kept
+        # and judged later, at the day step; the booking itself takes the NEW order - the
+        # service first (SPEC A: "cai no fluxo novo na próxima escolha").
+        result = _booking_entry(None, tenant, professionals)
         if result.flow_state != FlowState.SERVICE_CATALOG:
             # The button flow never asks the convênio in front of a clinic with
             # no services (`_booking_continuation`), so a dead end here means a
@@ -4845,8 +4856,52 @@ def _handle_day_back(
     "service" re-renders the service list, "professional" the doctor list;
     anything else (or an unusable target) falls back to the menu. Whatever the
     destination, the service / doctor / convênio already chosen ride along —
-    going back must never silently erase them.
+    going back must never silently erase them. The one exception (TASK-088): the
+    AUTOMATIC Particular (nothing was accepted at the unit/service being left,
+    `_insurance_is_automatic`) is dropped, so the unit or service picked next is judged
+    afresh - a plan the patient chose himself still rides along and is re-judged there.
     """
+    automatic = _insurance_is_automatic(conversation, tenant, services, professionals)
+    result = _day_back_result(conversation, tenant, services, professionals, target)
+    if automatic and result.flow_state is FlowState.SERVICE_CATALOG:
+        result.flow_selected_insurance = None
+        result.insurance_dropped = True
+    return result
+
+
+def _insurance_is_automatic(
+    conversation: Conversation,
+    tenant: Tenant,
+    services: list[dict] | None,
+    professionals: list | None,
+) -> bool:
+    """Is the stored Particular the one `_insurance_gate` set by itself (nothing accepted)?
+
+    A Particular the patient CHOSE needs a list to choose from, so it can only have been
+    chosen where some plan was accepted; the gate sets it only where none was. Recomputed
+    for the unit/service the booking is leaving, with no column to mark it."""
+    if (
+        _insurance_step_skip_reason(tenant) is not None
+        or not _label_match(_selected_insurance(conversation), LABEL_INSURANCE_PARTICULAR)
+    ):
+        return False
+    professional = _booking_professional(conversation, professionals)
+    if professional is None:
+        return False
+    service_id = _booking_service_id(conversation, tenant, services, professional)
+    unit = flow_units.effective_unit(conversation, professional, service_id)
+    return not plans_accepted_for(
+        tenant, _tenant_insurance_plans(tenant), professional, service_id, unit
+    )
+
+
+def _day_back_result(
+    conversation: Conversation,
+    tenant: Tenant,
+    services: list[dict],
+    professionals: list | None,
+    target: str | None,
+) -> FlowRouterResult:
     if target == BACK_TARGET_UNIT:
         owner = _booking_professional(conversation, professionals)
         choice = _booking_unit_choice(conversation, tenant, services, owner)
@@ -5180,7 +5235,14 @@ async def _ask_day(
                 conversation, professional, choice, service_name=service_name, prefix=prefix
             )
     gate = _insurance_gate(
-        conversation, tenant, professionals, professional, entry, unit, prefix=prefix
+        conversation,
+        tenant,
+        professionals,
+        professional,
+        entry,
+        unit,
+        prefix=prefix,
+        unit_asked=choice.kind in ("list", "confirm"),
     )
     if gate.ask is not None:
         return gate.ask

@@ -59,6 +59,7 @@ from secretaria.services.flow_router import (  # noqa: E402
     INSURANCE_SKIP_NO_MODE,
     LABEL_BOOK,
     STEP_AWAITING_ATTENDEE_CHOICE,
+    STEP_AWAITING_DAY,
     STEP_AWAITING_INSURANCE,
     _insurance_step_skip_reason,
     enter_guided_booking,
@@ -286,7 +287,7 @@ async def test_mode_clinic_with_exceptions_inherit_all_default(db):
     assert _plan_titles(inherits) == ["Unimed"]
     # TASK-088: the doctor who accepts NONE is not asked at all - Particular direct.
     refuses, _conv = await _book_to_the_convenio(snapshot, professionals, doctor=explicitly_none)
-    assert refuses.flow_step != STEP_AWAITING_INSURANCE
+    assert refuses.flow_step == STEP_AWAITING_DAY
     assert refuses.flow_selected_insurance == "Particular"
     assert unimed_plan_id  # sanity: the plan row really exists
 
@@ -321,7 +322,7 @@ async def test_mode_independent_union_of_doctors_no_clinic_inheritance(db):
     asked, _conv = await _book_to_the_convenio(snapshot, professionals, doctor=ana)
     assert _plan_titles(asked) == ["Amil"]
     none, _conv = await _book_to_the_convenio(snapshot, professionals, doctor=bruno)
-    assert none.flow_step != STEP_AWAITING_INSURANCE
+    assert none.flow_step == STEP_AWAITING_DAY
     assert none.flow_selected_insurance == "Particular"
 
 

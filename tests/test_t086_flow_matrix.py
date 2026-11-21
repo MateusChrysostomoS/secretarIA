@@ -645,7 +645,8 @@ async def test_the_unit_list_offers_every_unit_of_the_service_whatever_the_conve
         f"Norte (unit|{norte.id})",
         professionals=[ana],
     )
-    assert tapped.action == "reply"
+    # Norte refuses the known Unimed: the list is asked again at that unit (Unimed dropped).
+    assert tapped.flow_step == fr.STEP_AWAITING_INSURANCE
     assert tapped.flow_selected_unit_id == norte.id
 
 

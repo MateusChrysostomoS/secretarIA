@@ -613,9 +613,9 @@ async def test_a_known_refused_convenio_with_others_accepted_asks_again_with_a_n
     assert walk.last.flow_selected_insurance is None
     assert walk.last.flow_selected_unit_id == centro.id
     assert _ids(walk.last) == ["ins|Bradesco", "ins|Amil", "ins|particular", "ins|outro"]
+    # One unit, implied (the patient never saw or chose it): the unit is not named.
     assert _list(walk.last).body == (
-        "Nessa unidade o convênio que você informou não é aceito para esse serviço. "
-        "Escolha uma opção:"
+        "O convênio que você informou não é aceito para esse serviço. Escolha uma opção:"
     )
 
 
@@ -630,7 +630,7 @@ async def test_a_known_refused_convenio_with_none_accepted_goes_particular_and_s
     assert walk.last.flow_step == fr.STEP_AWAITING_DAY
     assert walk.last.flow_selected_insurance == fr.LABEL_INSURANCE_PARTICULAR
     assert _list(walk.last).body == (
-        "Nessa unidade esse convênio não é aceito para o serviço; seguimos como Particular. "
+        "Esse convênio não é aceito para o serviço; seguimos como Particular. "
         + fr.DAY_PICKER_BODY
     )
 
@@ -649,8 +649,9 @@ async def test_a_known_particular_or_typed_plan_is_never_second_guessed():
         assert _list(walk.last).body == fr.DAY_PICKER_BODY
 
 
-async def test_a_chat_parked_on_the_old_first_question_still_works():
-    """`awaiting_insurance` with no service yet (the retired order): the answer opens doctors."""
+async def test_a_chat_parked_on_the_old_first_question_takes_the_new_order():
+    """`awaiting_insurance` with no service yet (the retired order): the answer is kept and the
+    booking goes on service-first (SPEC A: "cai no fluxo novo na próxima escolha")."""
     centro, _sul = _units()
     ana = _doctor(units=[centro])
     bruno = _doctor("Dr. Bruno", units=[centro])
@@ -664,5 +665,115 @@ async def test_a_chat_parked_on_the_old_first_question_still_works():
         flow_attendee_name=fr.ATTENDEE_SELF,
     )
     await walk.say("Unimed")
-    assert walk.last.flow_step == fr.STEP_AWAITING_PROFESSIONAL
+    assert walk.last.flow_step == fr.STEP_AWAITING_CATALOG_SERVICE
     assert walk.last.flow_selected_insurance == "Unimed"
+    # ...and the kept answer is judged at the day step like any other.
+    await walk.tap("svc|Ecocardiograma")
+    await walk.tap(f"prof|{ana.id}")
+    await walk.say(fr.LABEL_BOOK_SERVICE)
+    assert walk.last.flow_step == fr.STEP_AWAITING_DAY
+    assert walk.last.flow_selected_insurance == "Unimed"
+
+
+# --------------------------------------------------------------------------
+# 6. Back from the days: the AUTOMATIC Particular is dropped, a chosen plan is re-judged
+# --------------------------------------------------------------------------
+
+
+async def test_back_after_auto_particular_asks_the_convenio_at_an_accepting_unit():
+    centro, sul = _units()
+    ana = _doctor(units=[centro, sul])
+    doctors = [ana]
+    refused = _matrix(
+        "shared", ana, (ECO_ID, sul, UNIMED), (ECO_ID, sul, BRADESCO), (ECO_ID, sul, AMIL)
+    )
+    walk = _Walk(_tenant("shared", refused, doctors), doctors)
+    await walk.to_unit_list(ana)
+    await walk.tap(f"unit|{sul.id}")
+    assert walk.last.flow_selected_insurance == fr.LABEL_INSURANCE_PARTICULAR  # automatic
+    back = _list(walk.last).rows[-1]
+    assert back[1] == fu.LABEL_ANOTHER_UNIT
+    await walk.tap(back[0])
+    assert walk.last.flow_step == fu.STEP_AWAITING_UNIT
+    assert walk.last.flow_selected_insurance is None  # the automatic answer is gone
+    await walk.tap(f"unit|{centro.id}")
+    # Centro accepts the plans: the question is asked, not skipped.
+    assert walk.last.flow_step == fr.STEP_AWAITING_INSURANCE
+    assert _ids(walk.last) == [
+        "ins|Unimed",
+        "ins|Bradesco",
+        "ins|Amil",
+        "ins|particular",
+        "ins|outro",
+    ]
+
+
+async def test_back_after_a_chosen_particular_keeps_it():
+    """A Particular the patient CHOSE (the list was shown) survives going back."""
+    centro, sul = _units()
+    ana = _doctor(units=[centro, sul])
+    doctors = [ana]
+    walk = _Walk(_tenant(doctors=doctors), doctors)
+    await walk.to_unit_list(ana)
+    await walk.tap(f"unit|{sul.id}")
+    await walk.tap("ins|particular")
+    await walk.tap(_list(walk.last).rows[-1][0])  # back to the units
+    assert walk.last.flow_step == fu.STEP_AWAITING_UNIT
+    assert walk.last.flow_selected_insurance == fr.LABEL_INSURANCE_PARTICULAR
+    await walk.tap(f"unit|{centro.id}")
+    assert walk.last.flow_step == fr.STEP_AWAITING_DAY
+    assert walk.last.flow_selected_insurance == fr.LABEL_INSURANCE_PARTICULAR
+
+
+async def test_back_after_a_chosen_plan_keeps_and_rejudges_it_at_the_new_unit():
+    centro, sul = _units()
+    ana = _doctor(units=[centro, sul])
+    doctors = [ana]
+    # Unimed is refused at Zona Sul only (Bradesco/Amil still accepted there).
+    refused = _matrix("shared", ana, (ECO_ID, sul, UNIMED))
+    tenant = _tenant("shared", refused, doctors)
+
+    # Accepted at both units: kept, no second question.
+    keeps = _Walk(tenant, doctors)
+    await keeps.to_unit_list(ana)
+    await keeps.tap(f"unit|{centro.id}")
+    await keeps.tap("ins|Bradesco")
+    await keeps.tap(_list(keeps.last).rows[-1][0])
+    assert keeps.last.flow_selected_insurance == "Bradesco"
+    await keeps.tap(f"unit|{sul.id}")
+    assert keeps.last.flow_step == fr.STEP_AWAITING_DAY
+    assert keeps.last.flow_selected_insurance == "Bradesco"
+
+    # Refused at the new unit: never swapped in silence - the list again, with its line.
+    rejudged = _Walk(tenant, doctors)
+    await rejudged.to_unit_list(ana)
+    await rejudged.tap(f"unit|{centro.id}")
+    await rejudged.tap("ins|Unimed")
+    await rejudged.tap(_list(rejudged.last).rows[-1][0])
+    assert rejudged.last.flow_selected_insurance == "Unimed"
+    await rejudged.tap(f"unit|{sul.id}")
+    assert rejudged.last.flow_step == fr.STEP_AWAITING_INSURANCE
+    assert rejudged.last.flow_selected_insurance is None
+    assert "ins|Unimed" not in _ids(rejudged.last)
+    assert _list(rejudged.last).body == fr.INSURANCE_REFUSED_LIST_UNIT
+
+
+async def test_back_to_the_service_after_an_automatic_particular_asks_again():
+    """One unit (no unit list): back goes to the service list; the next service is judged afresh."""
+    centro, _sul = _units()
+    ana = _doctor(units=[centro])
+    doctors = [ana]
+    # Nothing accepted for the echo, everything for the consulta.
+    refused = _matrix(
+        "shared", ana, (ECO_ID, centro, UNIMED), (ECO_ID, centro, BRADESCO), (ECO_ID, centro, AMIL)
+    )
+    walk = _Walk(_tenant("shared", refused, doctors), doctors)
+    await walk.to_service_card("Ecocardiograma", doctor=ana)
+    await walk.say(fr.LABEL_BOOK_SERVICE)
+    assert walk.last.flow_selected_insurance == fr.LABEL_INSURANCE_PARTICULAR  # automatic
+    await walk.tap(_list(walk.last).rows[-1][0])  # back (one unit: the service list)
+    assert walk.last.flow_step == fr.STEP_AWAITING_SERVICE
+    assert walk.last.flow_selected_insurance is None
+    await walk.tap("svc|Consulta")
+    await walk.say(fr.LABEL_BOOK_SERVICE)
+    assert walk.last.flow_step == fr.STEP_AWAITING_INSURANCE
