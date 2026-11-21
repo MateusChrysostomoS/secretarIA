@@ -25,6 +25,7 @@ from secretaria.services.booking_scope import (
     sole_active_professional,
 )
 from secretaria.services.flow_router import (
+    BTN_CHOOSE_PROFESSIONAL,
     LABEL_BOOK,
     LABEL_CANCEL_APPT,
     LABEL_OTHER,
@@ -80,10 +81,15 @@ def _menu_vocabulary(tenant: Tenant) -> list[str]:
     Both menus (single- and multi-doctor) and the manage label, because the name
     question can be answered after either was seen, and a clinic may rename all
     of them in `initial_flows`.
+
+    TASK-088: "Escolher médico" left the multi-doctor menu (`menu_buttons_for`), but an older
+    card on a patient's screen may still show it and the router still answers it, so it stays
+    here: a tap or typed label must never be read as the patient's name.
     """
     return [
         *menu_buttons_for(tenant, False),
         *menu_buttons_for(tenant, True),
+        BTN_CHOOSE_PROFESSIONAL,
         manage_label(tenant),
     ]
 

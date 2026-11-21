@@ -299,10 +299,17 @@ def _resolve_named(
         else:
             service = scope.get("service")
             if isinstance(service, str):
-                # TASK-086 (A3): the convênio list of a known service lists only the plans
-                # accepted for it somewhere - re-filtered now, like the router's page 1.
-                plans = fr.insurance_plans_for_service(
-                    tenant, plans, roster, service, _uuid(scope.get("professional_id"))
+                # TASK-088: the convênio list of a known booking lists only the plans accepted
+                # for (service, doctor, unit) - re-filtered now with the router's own function,
+                # so page 1 and every later page agree. Without a doctor in the scope it is the
+                # older TASK-086 (A3) filter: accepted somewhere for the service.
+                plans = fr.insurance_plans_for_booking(
+                    tenant,
+                    plans,
+                    roster,
+                    service,
+                    _uuid(scope.get("professional_id")),
+                    _uuid(scope.get("unit_id")),
                 )
             rows = fr.portal_insurance_rows(plans)
         return [(row, str(plan["name"])) for row, plan in zip(rows, plans, strict=True)]
