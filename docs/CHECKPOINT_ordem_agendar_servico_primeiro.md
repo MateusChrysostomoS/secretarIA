@@ -276,6 +276,24 @@ Textos históricos que ainda citam nomes removidos (`CHECKPOINT_day_picker_entry
 `CHECKPOINT_gicovate_feedback_2026-11-09.md`, `CHECKPOINT_trio_gerenciar_scoped_help.md`, `docs/superpowers/`) são registro
 datado e **não** foram reescritos.
 
+## Revisão C e integração (2026-11-21)
+
+Mesclado LOCAL em `feature/multi-unidades-integrada` (merges `7f45465` e `ef339d2`). Correções da revisão independente:
+
+- **Toque velho na lista de convênios** (`_stale_unit_control` em `_handle_insurance`, `7df52eb`): "Seguir particular",
+  "Unidades c/ convênio", "Ver mais unidades" ou uma linha de unidade tocados quando o paciente já está na lista de convênios
+  nunca viram convênio digitado. "Seguir particular" com a unidade em que ele está = Particular escolhido; qualquer outro
+  reabre a lista atual.
+- **Convênio digitado sem nenhum aceito e sem pergunta de unidade** (`_insurance_gate`): vira Particular automático com o
+  aviso `INSURANCE_REFUSED_PARTICULAR` (antes ficava "Golden Cross" sem aviso e sem valor).
+- **Clínica de um médico só**: o toque no serviço não abre mais o cartão "não atende o convênio" no meio; segue para unidade e
+  portão como nas clínicas de vários médicos. O passo `awaiting_plan_refused` continua respondendo conversas já paradas nele.
+- "ver mais" digitado na lista de unidades com convênio (`typed_more.py`).
+- Intervalo: ver [CHECKPOINT_intervalo_profissional.md](CHECKPOINT_intervalo_profissional.md) (Pix segurado em outro
+  consultório, consulta da recepção sem cadastro de paciente, "Marcar outra").
+
+Prova no navegador (pilha local sintética, código integrado): `C:\TECH\BRAIN\tasks\TASK-088\results\C-fechamento-e2e.md`.
+
 ## Deploy (NÃO autorizado)
 
 1. Aplicar as migrações **antes** do código. A cabeça **`f9a1d7c4e2b6`** adiciona `conversations.flow_insurance_auto` e
@@ -284,7 +302,8 @@ datado e **não** foram reescritos.
    são dois serviços de deploy separados — só a API não move o worker.
 3. Brain-Message-Frontend (campo do intervalo, Contexto) segue o registro do próprio repo; a ordem nova do fluxo em si não
    exige front novo (o Portal usa o mesmo roteador e `list_options`).
-4. Provas no navegador/WhatsApp real ficam para antes do merge (clínica de teste Chrysostomo For Eyes).
+4. A prova no navegador foi feita na pilha local sintética (o código ainda não está publicado). Depois do deploy, conferir na
+   clínica de teste Chrysostomo For Eyes; WhatsApp real não foi exercitado.
 
 ## Limites conhecidos
 
