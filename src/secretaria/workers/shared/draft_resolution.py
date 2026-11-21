@@ -41,12 +41,15 @@ from secretaria.services.booking_scope import BOOKING_TOPOLOGY_MULTI, booking_to
 from secretaria.services.calendar import CalendarService
 from secretaria.services.flow_router import (
     ATTENDEE_STEPS,
+    STEP_AWAITING_CATALOG_SERVICE,
     STEP_AWAITING_INSURANCE,
     STEP_AWAITING_PROFESSIONAL,
     STEP_AWAITING_SERVICE,
+    STEP_AWAITING_SERVICE_PROFESSIONAL,
     FlowRouterResult,
     booking_gate_scope,
 )
+from secretaria.services.flow_units import STEP_AWAITING_UNIT, STEP_AWAITING_UNIT_CONFIRM
 from secretaria.services.insurance_catalog import load_tenant_insurance
 from secretaria.services.service_catalog import load_service_catalog
 from secretaria.services.tenant_config import list_active_professionals
@@ -230,6 +233,11 @@ def _fold_answer(
     new doctor does not offer is dropped and asked again from its own step. Convênio: the
     answer is recorded on the conversation exactly as given (a typed "Outro convênio"
     included) and the draft's own convênio text gives way to it.
+
+    TASK-088: the service-first questions fold the same way - the clinic catalog's pick is the
+    service (and the doctor, when only one does it), the doctors-of-a-service pick is the
+    doctor. The unit questions fold nothing here: the unit lives on the conversation
+    (`_resume_booking_draft` copies it from the answer).
     """
     if answered_step in ATTENDEE_STEPS:
         answered_other = real_attendee_name(result.flow_attendee_name) is not None
@@ -238,7 +246,16 @@ def _fold_answer(
         )
     if answered_step == STEP_AWAITING_INSURANCE:
         return replace(draft, insurance=None)
-    if answered_step == STEP_AWAITING_PROFESSIONAL and result.flow_selected_professional_id:
+    if answered_step == STEP_AWAITING_CATALOG_SERVICE and result.flow_selected_type:
+        return replace(
+            draft,
+            service=result.flow_selected_type,
+            professional_id=result.flow_selected_professional_id or draft.professional_id,
+        )
+    if (
+        answered_step in (STEP_AWAITING_PROFESSIONAL, STEP_AWAITING_SERVICE_PROFESSIONAL)
+        and result.flow_selected_professional_id
+    ):
         return replace(
             draft, professional_id=result.flow_selected_professional_id,
             professional_unresolved=False,
@@ -289,7 +306,14 @@ async def _resume_booking_draft(
             ctx.conversation.flow_state = result.flow_state
             ctx.conversation.flow_step = result.flow_step
             ctx.conversation.flow_attendee_name = result.flow_attendee_name
-        if result.flow_selected_insurance is not None:
+        if answered_step in (STEP_AWAITING_UNIT, STEP_AWAITING_UNIT_CONFIRM):
+            # The unit the patient just picked, as the question the answer opened carried it
+            # (the convênio list or the day picker): the resolver reads it off the conversation.
+            # The convênio the answer's own result may carry (Particular, set because nothing
+            # is accepted there) is NOT copied: the resolver decides it again, with its line.
+            if result.flow_selected_unit_id is not None:
+                ctx.conversation.flow_selected_unit_id = result.flow_selected_unit_id
+        elif result.flow_selected_insurance is not None:
             ctx.conversation.flow_selected_insurance = result.flow_selected_insurance
         resolution = await _resolve_draft(reply, tenant, draft, ctx, gate=gate)
     except Exception as exc:

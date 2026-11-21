@@ -625,6 +625,78 @@ def _unit_problem(draft: ae.EditDraft, tenant, doctor) -> str | None:
     return None
 
 
+# The stage mark of the convênio list drawn ONLY with the plans the draft's combination accepts
+# (a redisplay and the list's pages keep it).
+STAGE_INSURANCE_ONLY_ACCEPTED = "insurance_only_accepted"
+
+
+def _draft_combination(tenant, draft: ae.EditDraft, doctor) -> tuple[dict | None, Any | None]:
+    """(the doctor's catalog entry for the draft's service, the draft's unit) - what the convênio
+    is judged at. No unit on the draft (a doctor without units): None, the "no unit" slice."""
+    return _draft_entry(tenant, draft, doctor), _draft_unit(draft, doctor)
+
+
+def _reask_insurance(
+    draft: ae.EditDraft, tenant, professionals, ctx: ae.EditContext, doctor
+) -> fr.FlowRouterResult:
+    """TASK-088 R19 (SPEC, designer decisions 1 and 4): the new doctor / service / unit refuses
+    the appointment's convênio.
+
+    The placement the patient chose STAYS; the convênio is the open question, asked through the
+    booking's own decision (`flow_router._accepted_plans`, the one function the booking's gate
+    uses): some plans accepted -> the list of ONLY those, with a line on top; none -> the
+    appointment becomes Particular and the card says so - never silently, never a dead end.
+    Logged with ids and booleans only."""
+    entry, unit = _draft_combination(tenant, draft, doctor)
+    accepted = fr._accepted_plans(tenant, doctor, entry, unit)
+    logger.info(
+        "appointment_edit_insurance_reasked",
+        professional_id=str(getattr(doctor, "id", None)),
+        unit_id=str(unit.id) if unit is not None else None,
+        accepted_count=len(accepted),
+    )
+    if not accepted:
+        line = fr.INSURANCE_REFUSED_PARTICULAR_UNIT if unit else fr.INSURANCE_REFUSED_PARTICULAR
+        card = _confirm_result(
+            draft.with_changes(insurance=fr.LABEL_INSURANCE_PARTICULAR).with_stage(),
+            tenant,
+            professionals,
+            ctx,
+        )
+        card.bubbles.insert(0, TextBubble(body=line))
+        return card
+    line = fr.INSURANCE_REFUSED_LIST_UNIT if unit else fr.INSURANCE_REFUSED_LIST
+    return _filtered_insurance_list(draft, tenant, professionals, doctor, unit, notice=line)
+
+
+def _filtered_insurance_list(
+    draft: ae.EditDraft, tenant, professionals, doctor, unit, *, page: int = 0, notice=None
+) -> fr.FlowRouterResult:
+    """The booking's convênio list (`flow_router._enter_insurance`: only the accepted plans,
+    Particular always, "Outro" only with at least one plan) as a step of the edit. Its Portal
+    card resolves later pages with the booking's own scope, which `list_options` already
+    re-filters - so page 1 and every later page agree. No back row: the edit has none."""
+    carrier = fr._DayPickerState(
+        flow_selected_type=draft.current["service"],
+        flow_selected_professional_id=getattr(doctor, "id", None),
+        flow_selected_unit_id=getattr(unit, "id", None),
+    )
+    listed = fr._enter_insurance(
+        tenant,
+        carrier,
+        page=page,
+        professionals=professionals,
+        unit_id=getattr(unit, "id", None),
+        notice=notice,
+        with_back=False,
+    )
+    return _result(
+        draft.with_stage(**{STAGE_INSURANCE_ONLY_ACCEPTED: "1"}),
+        listed.bubbles,
+        fr.STEP_EDIT_INSURANCE,
+    )
+
+
 def _confirm_result(
     draft: ae.EditDraft, tenant, professionals, ctx: ae.EditContext, *, check: bool = True
 ) -> fr.FlowRouterResult:
@@ -638,6 +710,11 @@ def _confirm_result(
     if problem is not None:
         if problem == ae.EDIT_INSURANCE_NOT_ACCEPTED:
             logger.info("appointment_edit_insurance_not_accepted", stage="card")
+            if draft.current["insurance"] == draft.original["insurance"]:
+                # TASK-088 R19: the patient changed the doctor, service or unit and kept the
+                # appointment's convênio, which the new combination refuses: never reverted and
+                # never swapped for Particular in silence - see `_reask_insurance`.
+                return _reask_insurance(draft, tenant, professionals, ctx, doctor)
         return _refuse(_undo_placement(draft, problem), ctx, problem)
     unit, address = _recap_place(draft, doctor, tenant)
     text = ae.build_edit_recap(
@@ -1070,12 +1147,8 @@ def _service_unit_list(
     )
     if not units:
         return _refuse(refuse_from or draft, ctx, notice)
-    # TASK-086 A12: only the units where the doctor takes the booking's convênio for it.
-    units = _units_taking_plan(
-        tenant, doctor, units, entry_service_id(service), draft.current["insurance"]
-    )
-    if not units:
-        return _refuse(refuse_from or draft, ctx, ae.EDIT_INSURANCE_NOT_AT_UNITS)
+    # TASK-088 R19: every unit of the service is offered - the convênio is judged AFTER the pick
+    # (`_reask_insurance`), as the booking does since the unit comes before the convênio.
     name = str(service.get("name"))
     return _unit_list(
         draft,
@@ -1107,10 +1180,7 @@ def _doctor_unit_list(
     if not units:
         # Follow-up final review: never back to the menu without saying why.
         return _refuse(draft, ctx, ae.EDIT_DOCTOR_SERVICE_NO_UNIT)
-    # TASK-086 A12: only units where the doctor takes the booking's convênio for something.
-    units = _doctor_units_taking_plan(tenant, doctor, units, draft.current["insurance"])
-    if not units:
-        return _refuse(draft, ctx, ae.EDIT_INSURANCE_NOT_AT_UNITS)
+    # TASK-088 R19: no filter by the convênio here either - judged after the pick.
     return _unit_list(
         draft,
         units,
@@ -1149,12 +1219,6 @@ async def _unit_step(conversation, tenant, body, draft, appt, professionals, ctx
         units = flow_units.units_for_service(doctor, entry_service_id(service))
         if not units:
             return _refuse(draft, ctx, ae.EDIT_SERVICE_NOT_AT_UNIT)
-        # TASK-086 A12: the same units the list showed (a typed refused unit never matches).
-        units = _units_taking_plan(
-            tenant, doctor, units, entry_service_id(service), draft.current["insurance"]
-        )
-        if not units:
-            return _refuse(draft, ctx, ae.EDIT_INSURANCE_NOT_AT_UNITS)
         unit = flow_units.match_unit(units, body)
         if unit is None:
             return fr._preserve(conversation, "delegate_llm")
@@ -1174,9 +1238,6 @@ async def _unit_step(conversation, tenant, body, draft, appt, professionals, ctx
     units = _doctor_units(tenant, doctor)
     if not units:
         return _refuse(draft, ctx, ae.EDIT_DOCTOR_SERVICE_NO_UNIT)
-    units = _doctor_units_taking_plan(tenant, doctor, units, draft.current["insurance"])
-    if not units:
-        return _refuse(draft, ctx, ae.EDIT_INSURANCE_NOT_AT_UNITS)
     unit = flow_units.match_unit(units, body)
     if unit is None:
         return fr._preserve(conversation, "delegate_llm")
@@ -1243,12 +1304,9 @@ async def _service_step(conversation, tenant, body, draft, appt, professionals, 
         return _service_unit_list(
             draft.with_stage(), tenant, professionals, ctx, str(service.get("name"))
         )
-    if not after_doctor and new.current.get("unit_id") and _insurance_refused(new, tenant, doctor):
-        # TASK-086 A12: not with this convênio at the booking's unit -> the units where the
-        # doctor does take it for this service (or, at none, the plain notice; draft kept).
-        return _service_unit_list(
-            draft.with_stage(), tenant, professionals, ctx, str(service.get("name"))
-        )
+    # (TASK-088 R19: a service the booking's convênio is refused for at the booking's unit goes
+    # on like any other change - the card then re-asks the convênio, `_reask_insurance`; it no
+    # longer detours through the units that take it.)
     if (
         after_doctor
         or minutes != draft.duration_minutes
@@ -1542,9 +1600,13 @@ def _insurance_list(
 ) -> fr.FlowRouterResult:
     """The clinic's plans, each marked by whether the CURRENT doctor takes it; never filtered.
 
-    Paged like the booking's list (`fr.insurance_page`): no plan is ever cut.
+    Paged like the booking's list (`fr.insurance_page`): no plan is ever cut. A list drawn after
+    a refusal (`_reask_insurance`) stays the filtered one - redisplays and later pages too.
     """
     doctor = _doctor(professionals, draft)
+    if draft.stage.get(STAGE_INSURANCE_ONLY_ACCEPTED):
+        _entry, unit = _draft_combination(tenant, draft, doctor)
+        return _filtered_insurance_list(draft, tenant, professionals, doctor, unit, page=page)
     plans = fr._tenant_insurance_plans(tenant)
     shown, next_page = fr.insurance_page(plans, page)
     # TASK-086 A10: the mark is for the draft's service at the draft's unit.
