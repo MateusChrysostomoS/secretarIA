@@ -1381,25 +1381,26 @@ async def test_select_professional_reads_the_attendee_fresh(
 
 
 @pytest.mark.parametrize(
-    "stored, kept",
+    "stored, automatic, kept, kept_automatic",
     [
-        # R30: the doctor's service list is a list to choose from - an automatic "Particular"
-        # does not ride into it (the gate re-sets it, with its line, if nothing is accepted).
-        ("Particular", None),
-        # A plan is kept (the gate re-judges it, as ever).
-        ("Plano A", "Plano A"),
+        ("Particular", True, None, None),
+        ("Particular", False, "Particular", False),
+        ("Particular", None, "Particular", None),
+        ("Plano A", False, "Plano A", False),
     ],
 )
-async def test_select_professional_opening_the_service_list_drops_a_stored_particular(
-    db, _captured_bubbles, log, stored, kept
+async def test_select_professional_opening_the_service_list_keeps_patient_coverage(
+    db, _captured_bubbles, log, stored, automatic, kept, kept_automatic
 ) -> None:
-    """AI draft v2 OFF (the production default): the doctor's service list is an R30 list."""
+    """The legacy hand-back keeps the patient's choice and rechecks automatic Particular."""
     from secretaria.models import TenantInsurancePlan
 
     tenant, ana, bruno, patient, conversation = await _seed(
         db, attendee="Maria da Silva", insurance=stored
     )
     async with db() as session:
+        conv = await session.get(Conversation, conversation.id)
+        conv.flow_insurance_auto = automatic
         row = await session.get(Tenant, tenant.id)
         row.collect_insurance = True
         row.insurance_mode = "shared"
@@ -1422,6 +1423,7 @@ async def test_select_professional_opening_the_service_list_drops_a_stored_parti
     async with db() as session:
         conv = await session.get(Conversation, conversation.id)
     assert conv.flow_selected_insurance == kept
+    assert conv.flow_insurance_auto == kept_automatic
 
 
 async def test_guided_booking_asks_pra_quem_first_when_unknown(
