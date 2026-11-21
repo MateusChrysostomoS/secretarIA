@@ -50,56 +50,60 @@ ordem antiga (abordagem 1 da SPEC).
 - um convênio vale na combinação quando o médico o aceita no modo da clínica (`_accepts_plan`, `insurance_mode`) **e** a
   matriz TASK-086 não recusa a célula (`is_accepted`);
 - unidade ainda desconhecida: "aceito em alguma unidade" (`refuses_everywhere`); médico sem vínculo com unidade: a fatia
-  "sem unidade"; sem serviço, só a lista do próprio médico julga; convênio sem id (nome legado) é mantido;
-- **Particular sempre aparece**; **"Outro convênio" só aparece quando há ao menos um convênio aceito** (com nenhum aceito, a
-  regra é Particular direto, e "Outro" reabriria a dúvida); o Portal também tira "Outro" das linhas fixas;
+  "sem unidade"; sem serviço, só a lista do próprio médico julga;
+- A lista de convênios inclui **Particular** e **"Outro convênio"** quando há pelo menos um plano aceito.
+  Com zero planos aceitos, o fluxo decide entre oferecer outras unidades e seguir como Particular com aviso.
 - escopo para o Portal: `{service, professional_id}` + `unit_id`, e `unit_marks` só quando a clínica tem alguma célula
   recusada (clínica sem exceções = escopo de sempre).
 
 O convênio **não estreita mais as unidades** no fluxo de agendar: a unidade vem antes, e o convênio é julgado **naquela**
 unidade.
 
-## Nenhum aceito → Particular, com aviso (`_insurance_gate`)
+## Unidade sem convênios aceitos
 
-Sem pergunta e sem lista. O convênio gravado passa a ser "Particular". Uma linha antes de "Para quando você gostaria?
-Escolha um dia:":
+Quando a unidade escolhida aceita zero planos, `_insurance_gate` confere as demais unidades disponíveis para o mesmo
+serviço com o mesmo médico. Se alguma aceita convênio, o passo `awaiting_no_plan_at_unit` informa a situação e mostra
+"Unidades c/ convênio" e "Seguir particular".
 
-- "Para esse serviço nessa unidade, o atendimento é particular." (`INSURANCE_NONE_ACCEPTED_UNIT`); sem unidade escolhida
-  pelo paciente: "Para esse serviço, o atendimento é particular." (`INSURANCE_NONE_ACCEPTED`). "Nessa unidade" só quando o
-  paciente viu/escolheu a unidade (lista ou Sim/Não); unidade implícita usa a frase sem unidade.
+- "Unidades c/ convênio" mostra as unidades elegíveis e os planos aceitos em cada uma. A lista tem páginas quando
+  necessário e o resumo dos planos recebe reticências se ultrapassar o limite de 72 caracteres do WhatsApp. O paciente
+  que escolhe outra unidade recebe a lista de convênios filtrada por ela.
+- "Seguir particular" abre os dias na unidade original e grava uma escolha explícita. A opção também aparece na
+  lista de unidades com convênio.
+- Quando nenhuma outra unidade é elegível, o agendamento abre os dias com Particular automático após o aviso
+  "Para esse serviço nessa unidade, o atendimento é particular." Se a unidade for implícita, o aviso é
+  "Para esse serviço, o atendimento é particular."
 
-## Convênio que já chegou antes da pergunta (decisões 1 e 4 do desenhista)
+## Convênio que já chegou antes da pergunta
 
 Rascunho da IA, remarcação, conversa parada no desenho antigo, hand-back. O convênio é conferido na combinação; **nunca
 vira Particular em silêncio**:
 
-- Particular, plano digitado ("Outro") e plano que a combinação aceita: **mantidos**, os dias abrem;
+- Particular escolhido e plano aceito são mantidos. Plano digitado fora do catálogo também é mantido onde há uma
+  aceitação cadastrada ou onde o paciente não escolheu unidade. Se a unidade escolhida tem zero planos, o aviso
+  genérico descreve a situação sem afirmar que aquele plano digitado foi recusado individualmente.
 - plano que a combinação **recusa** e há outros aceitos: a lista já filtrada, com a linha "Nessa unidade o convênio que você
   informou não é aceito para esse serviço. Escolha uma opção:" (`INSURANCE_REFUSED_LIST_UNIT`; sem unidade:
   `INSURANCE_REFUSED_LIST`) — a resposta recusada é descartada;
-- plano recusado e **nenhum outro aceito**: segue como Particular dizendo isso: "Nessa unidade esse convênio não é aceito
-  para o serviço; seguimos como Particular." (`INSURANCE_REFUSED_PARTICULAR_UNIT`; sem unidade:
-  `INSURANCE_REFUSED_PARTICULAR`).
+- plano recusado e **nenhum outro aceito naquela unidade**: "Nessa unidade esse convênio não é aceito para o serviço."
+  Quando houver outra unidade elegível, segue o cartão de escolha acima. Quando não houver, segue como Particular
+  automático com o aviso correspondente (`INSURANCE_REFUSED_PARTICULAR_UNIT` ou `INSURANCE_REFUSED_PARTICULAR`).
 - A pergunta em si não mudou: "Você vai usar convênio? Escolha uma opção:". Log só com contagens/booleanos
   (`insurance_step_presented`, `insurance_step_particular_direct`), nunca o nome do convênio.
 
-## Particular automático × escolhido (R30) e o custo aceito
+## Particular escolhido e automático
 
-Não há coluna que marque se o "Particular" guardado foi **automático** (nada era aceito na combinação) ou **escolhido** pelo
-paciente. O código **infere**: `_insurance_is_automatic` recalcula, para a unidade/serviço que a conversa está deixando, se
-`plans_accepted_for` dava vazio (um Particular escolhido exige lista, logo só nasce onde havia aceito; o automático só onde
-não havia).
+A decisão do dono de 2026-11-21 substitui R30. A conversa guarda `flow_insurance_auto` junto com a resposta. Atribuição
+automática grava `True` e resposta do paciente grava `False`. Uma conversa anterior à migração com a marca vazia mantém
+o Particular registrado.
 
-- Ao **voltar** (`_handle_day_back`) para unidade ou serviço, o Particular automático é descartado (o resultado leva o flag
-  não persistido `FlowRouterResult.insurance_dropped`, respeitado por `_carry_insurance`) e o gate decide de novo na nova
-  combinação; um plano ou Particular escolhido é mantido e **julgado de novo** na nova combinação.
-- Em **pousos** (rascunho da IA, hand-back, pouso legado) a decisão é **uma só**, `particular_survives`: um Particular
-  guardado sobrevive só se (a) foi dito **neste** turno (`named_now`) ou (b) o (serviço, médico, unidade) do pouso é
-  **igual** ao trio gravado na conversa. Qualquer pouso que abre uma lista de escolha (catálogo, médicos do serviço, serviços
-  do médico, lista de unidades) o descarta; plano, sem resposta e clínica que não coleta ficam como estão.
-- **Custo aceito:** quem escolheu Particular de verdade e muda de combinação responde a lista de convênios **uma vez de novo**.
-  Resíduo menor: um Particular escolhido, levado a uma unidade que não aceita nada e depois "voltado" de um seletor de
-  horário, pode ser descartado uma vez (a inferência não distingue).
+- Particular escolhido acompanha o paciente durante o agendamento quando ele volta ou troca serviço, médico ou unidade.
+  A linha "Trocar convênio" abre a lista a pedido do paciente e mantém a escolha até ele indicar outra resposta.
+- Particular automático vale para a combinação que o originou. Ao voltar ou mudar a combinação, `particular_survives`
+  e o roteador permitem conferir de novo os convênios. A inclusão ou remoção de uma unidade também pode mudar a combinação.
+- O simulador, as retomadas do rascunho e as esperas pelo código e pelo Pix carregam a marca da conversa.
+  Uma pausa no código permite retomar a mesma reserva. Ao concluir ou encerrar essa espera, a próxima marcação pode
+  perguntar seu próprio convênio.
 
 ## Linhas de voltar (R18)
 
@@ -114,7 +118,7 @@ não havia).
   sem a seta, com o botão do cartão de "convênio não aceito" (`LABEL_PLAN_CHANGE_INSURANCE`); os dois nunca aparecem no
   mesmo passo e ambos significam "perguntar o convênio de novo".
 - Tocar na linha de voltar da lista chama `_handle_day_back` e **não** retoma rascunho da IA (voltaria à mesma pergunta).
-  Voltar pela lista descarta a resposta guardada: a lista pergunta de novo na próxima unidade.
+  A escolha explícita de Particular acompanha a volta. As demais respostas seguem as regras de aceitação e retomada.
 - Numa clínica de vários médicos, "⬅️ Outro serviço" do agendamento reabre o **catálogo da clínica** (médico e serviço
   limpos); a re-marcação após cancelamento da clínica tem o próprio alvo (`BACK_TARGET_DOCTOR_SERVICES`, "doctorservice",
   mesmo rótulo), que reabre a lista de serviços do médico candidato como sempre foi.
@@ -129,9 +133,9 @@ e para na primeira pergunta aberta: `pra quem → serviço → médico → unida
 - Serviço: multi-médico = a lista do médico que a IA nomeou, senão o catálogo; médico único = a lista de serviços dele.
 - Médico: só quando há mais de um, ou quando a IA nomeou um médico que não resolveu
   (`_enter_service_professional_list`, só quem faz o serviço); nunca implícito depois de um médico descartado.
-- `_land_day`: unidade indefinida → a pergunta da unidade, rascunho estacionado; depois o gate do convênio (lista com o
-  rascunho estacionado, ou Particular + linha — a linha vai no corpo do seletor de dia, ou numa bolha de texto antes da lista
-  de horários/cartão expresso); depois dia / horário / cartão expresso. **Dia ou horário nunca pulam unidade nem convênio.**
+- `_land_day` estaciona o rascunho ao perguntar a unidade, mostrar a lista de convênios ou oferecer a troca de unidade
+  por falta de cobertura. Se a combinação só permitir Particular, explica a escolha automática antes de continuar.
+  A resolução de data e horário vem depois dessas etapas.
 - **Estacionamento:** `DRAFT_WAIT_STEPS` ganhou `awaiting_catalog_service`, `awaiting_service_professional`, `awaiting_unit`
   e `awaiting_unit_confirm`. Ganchos de retomada em `_catalog_step`: resposta do catálogo, do médico-do-serviço, escolha da
   unidade (e o "Sim") e resposta do convênio; `_resume_parked_draft` também não retoma quando o resultado fica no mesmo passo
@@ -220,6 +224,9 @@ dinheiro; a descrição pode ter 2000. O caminho da IA segue mandando a mensagem
 - Limite conhecido: a ajuda "Não sei" gera uma frase livre do modelo; sem preço nos dados, ela não tem número para citar, e as
   regras dela (`ai/scoped_help.py::_SCOPED_RULES`) dizem "não informe valores; o valor aparece na confirmação final" — mas um
   texto do modelo não é garantia formal.
+- A conversa livre pode informar o preço cadastrado quando o paciente pergunta. Os dois prompts orientam a IA a informar
+  que a clínica confirma a cobertura, a coparticipação e a cobrança conforme o convênio. A IA pode repetir condições
+  já informadas pela clínica e deve evitar prometer cobertura ou valor.
 
 ## Conversas paradas no deploy (compatibilidade)
 
@@ -271,8 +278,8 @@ datado e **não** foram reescritos.
 
 ## Deploy (NÃO autorizado)
 
-1. **Migração `d4b7a9c2e6f1`** (`professionals.buffer_minutes`, do intervalo entre consultas; uma única cabeça) **antes** do
-   código — padrão da casa.
+1. Aplicar as migrações **antes** do código. A cabeça **`f9a1d7c4e2b6`** adiciona `conversations.flow_insurance_auto` e
+   sucede `d4b7a9c2e6f1` (`professionals.buffer_minutes`).
 2. **API e worker da secretarIA juntos:** `flow_router.py` e o caminho de confirmação (`workers/shared/deposit.py`) mudaram, e
    são dois serviços de deploy separados — só a API não move o worker.
 3. Brain-Message-Frontend (campo do intervalo, Contexto) segue o registro do próprio repo; a ordem nova do fluxo em si não
@@ -281,13 +288,13 @@ datado e **não** foram reescritos.
 
 ## Limites conhecidos
 
+- A oferta de unidades com convênio faz parte do agendamento inicial. Na recuperação de uma reserva cujo convênio
+  deixou de ser aceito durante a verificação por código, o Portal reabre a escolha de unidade antes de conferir o convênio.
 - **P5 (re-marcação após cancelamento da clínica):** o alvo de voltar é recalculado a cada turno em `_catalog_step`; depois de
   um toque de dia, a lista de horários mostra `dayback|service` / `dayback|insurance` em vez de `dayback|doctorservice`.
   Corrigir pede um marcador gravado na conversa (não há coluna).
-- **Particular automático ainda inferido, não marcado** (ver acima): um caso raro descarta o Particular escolhido uma vez.
 - **`carry_over_pending`** é lido depois da prévia do sinal; repasse pendente deixa o cartão só com a linha "Valor".
-- **Dia do deploy:** conversa parada com Particular guardado que muda de combinação pode responder a lista de convênios uma
-  vez de novo (custo aceito, R30). Descrição longa do serviço não aparece mais nos botões (R25).
+- Descrição longa do serviço não aparece mais nos botões (R25).
 - O intervalo entre consultas tem os próprios limites em [CHECKPOINT_intervalo_profissional.md](CHECKPOINT_intervalo_profissional.md).
 - A extração da IA do Contexto continua sem preencher unidades, horários de funcionamento nem o intervalo (SPEC, "Extração
   da IA").
@@ -297,7 +304,9 @@ datado e **não** foram reescritos.
 Arquivos novos: `tests/test_booking_order_service_first.py` (ordem, filtro, Particular direto, convênio conhecido, voltar),
 `tests/test_booking_order_compat.py` (rascunho da IA, hand-back, legado, remarcação, conversas paradas, `particular_survives`),
 `tests/test_service_no_detail_card_price_at_end.py` (sem cartão, valor no fim, sinal, ajuda sem preço, paridade com o portão de
-sinal). Rodar sempre com `BOT_ALLOWLIST_WA_IDS=""` e `uv run python -m pytest ... -q -p no:cacheprovider`; o `Settings` é
+  sinal). A2 acrescenta `tests/test_particular_choice_sticks.py`, `tests/test_migration_conversation_insurance_auto.py` e
+  `tests/test_units_with_insurance.py`. Rodar com `BOT_ALLOWLIST_WA_IDS=""` e
+  `uv run python -m pytest ... -q -p no:cacheprovider`. O `Settings` é
 congelado no primeiro import (`core/database.py`); um arquivo coletado primeiro **sem** `OPENAI_API_KEY` no bloco de ambiente
 do topo o congela sem provedor de IA e faz testes de IA coletados depois falharem com "ANTHROPIC_API_KEY missing" — por isso
 `test_booking_buffer.py` e `test_booking_buffer_paths.py` fazem `os.environ.setdefault("OPENAI_API_KEY", ...)` como os demais.

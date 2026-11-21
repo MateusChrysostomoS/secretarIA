@@ -72,10 +72,12 @@ pula direto pro pedido de código). Ver `docs/CHECKPOINT_abertura_pergunta_nome.
    em uma delas, a secretarIA avisa "feito **apenas na unidade X**" (com o "apenas na unidade X" em negrito) e pede um sim/não.
 4. Se a clínica pergunta convênio, aí vem o **convênio**: a lista mostra **só os planos aceitos**
    para aquele serviço, com aquele profissional, naquela unidade (mais "Particular"; "Outro
-   convênio" só aparece quando há ao menos um plano aceito). Se **nenhum** plano é aceito, não há
-   pergunta: a secretarIA diz em uma frase que o atendimento é particular e segue. Quem já tinha
-   dito um convênio que não vale ali nunca é passado para Particular em silêncio: recebe a lista já
-   filtrada com um aviso, ou, se nada é aceito, o aviso de que seguirá como Particular.
+   convênio" só aparece quando há ao menos um plano aceito). Se a unidade escolhida não aceita
+   convênio para esse atendimento, a secretarIA avisa. Quando outra unidade oferece o mesmo serviço
+   com aquele profissional e aceita convênio, o paciente pode usar **"Unidades c/ convênio"** para
+   ver as opções e os planos, ou **"Seguir particular"** na unidade que escolheu. Se nenhuma unidade
+   alternativa aceitar convênio, a secretarIA explica que o atendimento será particular e mostra os
+   dias. Quem já escolheu Particular mantém a escolha ao voltar ou trocar serviço, profissional ou unidade.
 5. Escolhe a data. **No WhatsApp**, por causa do limite de botões do WhatsApp, é em duas telas:
    primeiro o mês, depois o dia daquele mês. **No Portal, hoje**, é a mesma lógica — não existe
    ainda um calendário visual no Portal; a ideia de um calendário de verdade (ver seção 8) é só
@@ -107,6 +109,9 @@ outra pessoa: ela devolve ao menu para passar por essa pergunta.
 
 ### “Outro” e “Não sei” (construído, não no ar — MVP Portal, 2026-09-30)
 Ao tocar “Outro” ou não saber qual profissional/serviço escolher, a conversa livre recebe o contexto e preserva as escolhas já feitas. Orienta dentro dos serviços reais e devolve escolhas ao agendamento, que continua conferindo cada etapa. O toque em “Outro” no menu responde sempre a mesma pergunta fixa, “O que te traz à clínica?”, sem usar a IA; a conversa livre começa na resposta da pessoa (construído 2026-10-06, TASK-037, não no ar — ver `docs/CHECKPOINT_outro_pergunta_fixa.md`); perguntas comuns não pedem transferência automaticamente. Desde a TASK-038 (construído 2026-10-07, não no ar — `docs/CHECKPOINT_ia_atende_como_pessoa.md`): uma pergunta feita no meio de uma etapa (convênio, escolha do dia) é respondida e a lista continua valendo; quando a IA leva a pessoa de volta aos botões, a explicação dela aparece junto; o “Não sei” abre com uma pergunta simples (primeira consulta, retorno…); e chamar alguém da equipe é sempre o último recurso — quando a secretária não consegue ajudar, ela pergunta “Quer que eu chame nosso atendente humano? (Pode demorar alguns minutos)” com os botões Sim/Não, e só chama a equipe se a pessoa tocar Sim; se tocar Não, a conversa continua com a secretária, sem perder o que já foi escolhido. Pedido explícito de pessoa permite atendimento humano com aviso à clínica. O add-on de atendimento humano do WhatsApp mantém seu comportamento existente.
+
+A secretarIA pode informar o preço cadastrado quando o paciente pergunta na conversa livre. Para quem usa convênio,
+ela explica que a clínica confirma cobertura, coparticipação e eventual cobrança.
 
 ### Evento e confirmação no Portal (construído, não no ar — 2026-09-30)
 A consulta cria evento com serviço, convênio e, quando autorizado, quem será atendido. A agenda da clínica recebe lembretes; no Portal, paciente com e-mail disponível recebe confirmação e convite para sua própria agenda. Falha de envio ou convite não cancela a consulta. Confirmação operacional à clínica identifica o agendamento sem expor dados pessoais do paciente.
