@@ -316,7 +316,7 @@ async def test_a_failed_calendar_resolution_degrades_like_the_next_turn(world, m
     monkeypatch.setattr(flow_runner, "resolve_professional_calendar", _boom)
     result = await _catalog_tap(world, [ana, bruno])
     # No agenda for Ana: the router answers "calendar unavailable", never the clinic's list.
-    assert result.action != "reply" or not _day_ids(result)
+    assert result.action == "calendar_unavailable"
 
 
 async def test_a_help_node_turn_is_never_run_twice(world, monkeypatch):
@@ -335,10 +335,19 @@ async def test_a_help_node_turn_is_never_run_twice(world, monkeypatch):
         )
 
     monkeypatch.setattr(fr, "run_professional_help", _help)
+    routed = []
+    real_route = flow_runner.route
+
+    async def _counting(*args, **kwargs):
+        routed.append(args[2])
+        return await real_route(*args, **kwargs)
+
+    monkeypatch.setattr(flow_runner, "route", _counting)
     tenant = _router_tenant([ana, bruno])
     conv = _conv(fr.STEP_PROFESSIONAL_HELP)
     result = await _turn(world, conv, tenant, [ana, bruno], "quero a Dra. Ana")
-    assert calls == ["quero a Dra. Ana"]  # one LLM call, one route()
+    assert calls == ["quero a Dra. Ana"]  # one LLM call...
+    assert len(routed) == 1  # ...and one route()
     assert result.flow_step == fr.STEP_AWAITING_SERVICE  # a LIST: no calendar consumed
     assert world.resolved == []
 
@@ -405,3 +414,126 @@ async def test_the_simulator_lists_the_picked_doctors_days_too():
     ]
     assert days == [D3.isoformat()]
     assert str(ana.id) in [str(p) for p in asked]
+
+
+# --------------------------------------------------------------------------
+# Fix round 4: the result is judged by WHOSE agenda it was drawn on, not by what it turned out to be
+# --------------------------------------------------------------------------
+
+
+async def test_the_clinic_agenda_with_no_day_at_all_does_not_hide_the_doctors_days(world):
+    # TASK-087: the service is blocked on every weekday the clinic opens; Ana does it on her own
+    # days. On the clinic's agenda the picker would say "no free time" and go back to the menu
+    # (no step, no doctor on that result) - the patient must see Ana's days instead.
+    ana = _doctor_a()
+    bruno = _doctor("Dr. Bruno", services=[s for s in _services() if s["name"] != CONSULTA])
+    await _seed_doctors(world, ana, bruno)
+    world.agendas[ana.id] = _doctor_a_agenda()
+    world.clinic.open_days = []
+    result = await _catalog_tap(world, [ana, bruno])
+    assert result.flow_step == fr.STEP_AWAITING_DAY
+    assert _day_ids(result) == [D3.isoformat()]
+    assert world.resolved == [ana.id]
+
+
+async def test_the_simulator_too_when_the_clinic_agenda_has_no_day():
+    from secretaria.workers.shared.flow_simulation import (  # noqa: PLC0415
+        initial_state,
+        simulate_turn,
+    )
+
+    ana = _doctor_a()
+    bruno = _doctor("Dr. Bruno", services=[s for s in _services() if s["name"] != CONSULTA])
+    tenant = _router_tenant([ana, bruno])
+    clinic, anas = _Agenda(open_days=(), hours=(8, 10)), _doctor_a_agenda()
+
+    def calendar_for(professional_id):
+        return anas if str(professional_id) == str(ana.id) else clinic
+
+    state = initial_state()
+    state.update(
+        flow_state=FlowState.SERVICE_CATALOG.value,
+        flow_step=fr.STEP_AWAITING_CATALOG_SERVICE,
+        flow_attendee_name=ATTENDEE_SELF,
+    )
+    turn = await simulate_turn(
+        tenant=tenant,
+        professionals=[ana, bruno],
+        calendar_for=calendar_for,
+        state=state,
+        tap={"title": CONSULTA, "id": f"svc|{CONSULTA}"},
+    )
+    days = [
+        option["id"].split("|")[1]
+        for bubble in turn.bubbles
+        if bubble["kind"] == "list"
+        for option in bubble["options"]
+        if option["id"].startswith("day|")
+    ]
+    assert days == [D3.isoformat()]
+
+
+async def test_a_parked_draft_that_cannot_resume_falls_back_to_the_doctors_days(world):
+    # The resolver only uses the router's result as its fallback (missing / expired / corrupt
+    # draft): that fallback was drawn on the clinic's agenda too.
+    ana = _doctor_a()
+    bruno = _doctor("Dr. Bruno", services=[s for s in _services() if s["name"] != CONSULTA])
+    await _seed_doctors(world, ana, bruno)
+    world.agendas[ana.id] = _doctor_a_agenda()
+    tenant = _router_tenant([ana, bruno])
+    conv = _conv(fr.STEP_AWAITING_CATALOG_SERVICE, flow_draft={"v": 1, "expired": True})
+    tap = inbound_routing_text(CONSULTA, f"svc|{CONSULTA}")
+    result = await _turn(world, conv, tenant, [ana, bruno], tap)
+    assert result.flow_step == fr.STEP_AWAITING_DAY
+    assert _day_ids(result) == [D3.isoformat()]
+
+
+async def test_route_runs_twice_only_on_a_switch_clinic_agenda_first(world, monkeypatch):
+    calls = []
+    real_route = flow_runner.route
+
+    async def _counting(*args, **kwargs):
+        calls.append(args[2])
+        return await real_route(*args, **kwargs)
+
+    monkeypatch.setattr(flow_runner, "route", _counting)
+    ana = _doctor_a()
+    bruno = _doctor("Dr. Bruno", services=[s for s in _services() if s["name"] != CONSULTA])
+    await _seed_doctors(world, ana, bruno)
+    world.agendas[ana.id] = _doctor_a_agenda()
+    await _catalog_tap(world, [ana, bruno])
+    assert len(calls) == 2
+    assert calls[0] is world.clinic and calls[1] is world.agendas[ana.id]
+
+
+@pytest.mark.parametrize("flaw", ["other_tenant", "inactive"])
+async def test_a_doctor_row_of_another_tenant_or_inactive_resolves_to_no_calendar(world, flaw):
+    ana = _doctor_a()
+    bruno = _doctor("Dr. Bruno", services=[s for s in _services() if s["name"] != CONSULTA])
+    await _seed_doctors(world, bruno)
+    async with world.maker() as session:
+        session.add(
+            Professional(
+                id=ana.id,
+                tenant_id=uuid4() if flaw == "other_tenant" else world.tenant_id,
+                name=ana.name,
+                is_active=flaw != "inactive",
+            )
+        )
+        await session.commit()
+    world.agendas[ana.id] = _doctor_a_agenda()
+    result = await _catalog_tap(world, [ana, bruno])
+    assert world.resolved == []  # never resolved: the row is not this clinic's / not active
+    assert result.action == "calendar_unavailable"
+
+
+def test_the_agenda_owner_signal_is_never_persisted():
+    from secretaria.models import Conversation  # noqa: PLC0415
+
+    assert not hasattr(Conversation, "agenda_owner_id")
+    fields = fr.FlowRouterResult.__dataclass_fields__
+    assert "agenda_owner_id" in fields  # a router-only signal, like `resume_draft`
+    import inspect  # noqa: PLC0415
+
+    persisted = inspect.getsource(flow_runner._apply_flow_result)
+    assert "agenda_owner_id" not in persisted

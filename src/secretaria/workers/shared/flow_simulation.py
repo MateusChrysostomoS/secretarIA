@@ -182,7 +182,7 @@ async def simulate_turn(
     if calendar_owner_changed(conversation, result):
         # TASK-088 R41: the tap picked the doctor and went straight to the days - draw them on the
         # PICKED doctor's agenda, as the real worker does (help steps never reach here).
-        result = await _route(str(result.flow_selected_professional_id))
+        result = await _route(str(result.agenda_owner_id))
     bubbles = [_render(b) for b in result.bubbles]
     finished = result.appointment is not None
     note = note_for(result.action, result.flow_step)

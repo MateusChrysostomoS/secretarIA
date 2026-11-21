@@ -997,6 +997,14 @@ class FlowRouterResult:
     # worker (workers/shared/draft_resolution.py::_resume_booking_draft) re-runs the
     # resolver over the draft instead of showing this result's list. Never persisted.
     resume_draft: bool = False
+    # TASK-088 R41: the professional whose AGENDA the booking day picker was just drawn on (the
+    # state's explicit selection; None on a clinic where none is stored, whose calendar is the
+    # tenant's). Set by `_ask_day` on every result that reached `enter_day_picker` (the days, the
+    # calendar view, the "no days" menu, "calendar unavailable"), so a result built on the wrong
+    # agenda is recognisable whatever it turned out to be (`calendar_owner_changed`). A temporary
+    # signal for the worker, like `resume_draft`: never persisted (`_apply_flow_result` copies
+    # named fields only).
+    agenda_owner_id: UUID | None = None
     # True when this result DELIBERATELY leaves `flow_selected_insurance` empty (TASK-088: the
     # automatic Particular dropped on "back"), so `_carry_insurance` does not copy the old answer
     # back onto it. Never persisted.
@@ -1153,12 +1161,10 @@ EDIT_DAY_BRANCH = DayBranch(
 # `_manage_step` to dispatch the retry/escape renders to the same handler.
 _BOOKING_DAY_STEPS = (STEP_AWAITING_DAY, STEP_AWAITING_DAY_RETRY, STEP_AWAITING_DAY_ESCAPE)
 
-# TASK-088 R41: the steps whose result was BUILT from the turn's calendar (the booking's day picker
-# family, the slot list, the confirmation's re-check) and the steps that can call the LLM (the
-# scoped help nodes). A tap that selects the doctor in the same turn goes straight to the days now
-# (no service card in between), so the worker hands `route()` the calendar of the doctor stored
-# BEFORE the turn - the clinic's - and re-runs it on the picked doctor's (`calendar_owner_changed`).
-CALENDAR_BOOKING_STEPS = (*_BOOKING_DAY_STEPS, STEP_AWAITING_SLOT, STEP_AWAITING_CONFIRMATION)
+# TASK-088 R41: the steps that can call the LLM (the scoped help nodes). A tap that selects the
+# doctor in the same turn goes straight to the days now (no service card in between), so the worker
+# hands `route()` the calendar of the doctor stored BEFORE the turn - the clinic's - and runs it
+# again on the picked doctor's (`calendar_owner_changed`).
 LLM_HELP_STEPS = frozenset(
     {
         STEP_PROFESSIONAL_HELP,
@@ -1170,20 +1176,23 @@ LLM_HELP_STEPS = frozenset(
 
 
 def calendar_owner_changed(conversation: Any, result: FlowRouterResult) -> bool:
-    """Whether `result` was drawn on another doctor's agenda than the one it now selects (R41).
+    """Whether `result` was drawn on another doctor's agenda than the one the turn picked (R41).
 
-    True when the turn picked a DIFFERENT professional than the one the conversation had stored,
-    and the result is a step that consumed the calendar. Never for a turn that started on a help
-    step (it can call the LLM: it is not run twice - and it never needs to be, see the worker), nor
-    for a result that resumes a parked AI draft (the resolver builds its own agendas). Pure."""
-    picked = result.flow_selected_professional_id
+    True when the booking day picker was reached (`agenda_owner_id` is set by `_ask_day` on every
+    result that got there - days, calendar view, no days at all, calendar unavailable) on behalf
+    of a professional the conversation had NOT stored yet: the turn's calendar was the previous
+    owner's (the clinic's), so the result - whatever it says - must be drawn again. Never for a turn
+    that started on a help step (it can call the LLM: it is never run twice - and it never needs
+    to be, see the worker). A parked AI draft does not exempt it: the resolver only uses this
+    result as its fallback, and a resumed draft builds its own agendas. Pure."""
+    owner = result.agenda_owner_id
     return (
-        picked is not None
-        and picked != _selected_professional_id(conversation)
-        and result.flow_step in CALENDAR_BOOKING_STEPS
+        owner is not None
+        and owner != _selected_professional_id(conversation)
         and getattr(conversation, "flow_step", None) not in LLM_HELP_STEPS
-        and not result.resume_draft
     )
+
+
 _MANAGE_DAY_STEPS = (STEP_MANAGE_DAY, STEP_MANAGE_DAY_RETRY, STEP_MANAGE_DAY_ESCAPE)
 _EDIT_DAY_STEPS = (STEP_EDIT_DAY, STEP_EDIT_DAY_RETRY, STEP_EDIT_DAY_ESCAPE)
 
@@ -5705,6 +5714,9 @@ async def _ask_day(
         prefix=prefix,
         buffer_rule=_booking_buffer(professional),
     )
+    # R41: whose agenda this was drawn on - the state's explicit doctor (a clinic that stores none
+    # uses the tenant calendar, which is already right for it).
+    result.agenda_owner_id = _selected_professional_id(conversation)
     if unit is not None and result.flow_state is FlowState.SERVICE_CATALOG:
         result.flow_selected_unit_id = unit.id
     if gate.particular and result.flow_state is FlowState.SERVICE_CATALOG:

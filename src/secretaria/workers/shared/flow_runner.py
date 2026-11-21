@@ -128,7 +128,7 @@ async def _picked_doctor_calendar(
     try:
         async with async_session_factory() as session:
             row = await session.get(Professional, professional_id)
-            if row is None or row.tenant_id != tenant.id:
+            if row is None or row.tenant_id != tenant.id or not row.is_active:
                 return None
             return await resolve_professional_calendar(
                 session, tenant, row, tenant_config=tenant_config
@@ -214,7 +214,7 @@ async def _run_flow(
             and tenant is not None
             and calendar_owner_changed(conv_snapshot, result)
         ):
-            picked = result.flow_selected_professional_id
+            picked = result.agenda_owner_id
             logger.info(
                 "flow_turn_rerun_on_picked_doctor_calendar",
                 conversation_id=str(reply.conversation_id),
