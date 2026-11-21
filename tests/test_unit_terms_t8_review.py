@@ -595,9 +595,10 @@ async def test_c_router_help_hides_a_differing_price_before_the_unit(monkeypatch
 
 
 @pytest.mark.asyncio
-async def test_c_router_help_shows_the_chosen_units_price(monkeypatch):
-    assert await _router_help(monkeypatch, unit_id=_CENTRO.id) == "R$ 250,00"
-    assert await _router_help(monkeypatch, unit_id=_SEDE.id) == "R$ 200,00"
+async def test_c_router_help_never_hands_the_model_a_price_even_at_a_chosen_unit(monkeypatch):
+    # TASK-088 R38 ("valor só no fim"): it used to hand the chosen unit's price; now none.
+    assert await _router_help(monkeypatch, unit_id=_CENTRO.id) is None
+    assert await _router_help(monkeypatch, unit_id=_SEDE.id) is None
 
 
 async def _help_block(db, monkeypatch, w, *, unit=None) -> str:

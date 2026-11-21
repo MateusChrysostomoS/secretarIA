@@ -4269,17 +4269,11 @@ async def _handle_service_help(
     try:
         outcome = await run_service_help(
             conversation_id=getattr(conversation, "id", None),
-            # TASK-085 D3: the model reads the prices the service card would show - a price
-            # that differs between the doctor's units is not given to it before the unit; once
-            # the unit is picked (and does the service), that unit's price (T8 review c).
-            services=[
-                _priced_entry(
-                    service,
-                    professional,
-                    _service_card_unit_id(conversation, professional, service),
-                )
-                for service in services
-            ],
+            # TASK-088 R38 ("valor só no fim"): the model gets NO price - its one-line reason and
+            # its clarifying question reach the patient in the middle of the flow, and a convênio
+            # patient must never be told the Particular value. Money is said only on the final
+            # confirmation card.
+            services=[{**service, "price": None} for service in services],
             patient_message=body,
             final_round=final_round,
         )
@@ -8233,14 +8227,14 @@ def with_money_lines(body: str, lines: list[str]) -> str:
     with the sinal's two; a second pass changes nothing). The money wins over the recap: when the
     whole does not fit `MAX_INTERACTIVE_BODY_CHARS`, the recap is the part that is cut."""
     kept = body.split("\n")
-    while kept and kept[-1].startswith(_MONEY_LINE_PREFIXES):
+    while kept and (not kept[-1].strip() or kept[-1].startswith(_MONEY_LINE_PREFIXES)):
         kept.pop()
     recap = "\n".join(kept)
     if not lines:
         return truncate_plain(recap, MAX_INTERACTIVE_BODY_CHARS)
     block = "\n".join(lines)
-    room = MAX_INTERACTIVE_BODY_CHARS - len(block) - 1
-    return f"{truncate_plain(recap, room)}\n{block}"
+    room = MAX_INTERACTIVE_BODY_CHARS - len(block) - 2
+    return f"{truncate_plain(recap, room)}\n\n{block}"
 
 
 def _confirmation_card(

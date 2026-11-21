@@ -604,3 +604,181 @@ async def test_the_ai_express_card_gets_the_same_money_lines(db):
     out = await deposit_module._with_booking_money(convenio, tenant)
     body = _card(out).body
     assert "Sinal (Pix): R$ 60,00" in body and "Valor da consulta: R$ 200,00" in body
+
+
+# --------------------------------------------------------------------------
+# 5. Fix round 1 - whose price: the booking's OWNER, not the router's selected doctor
+# --------------------------------------------------------------------------
+#
+# A single-doctor clinic never stores a selected doctor (the router result carries None), yet the
+# hold and the appointment row carry the sole doctor (`resolve_booking_owner_id`). With his own
+# service list (the clinic's legacy catalog empty) and a price exception at one unit, the card
+# must say what the REAL charge asks: the doctor's price at that unit.
+
+
+from secretaria.services import booking_draft as bd, release_offer  # noqa: E402
+from secretaria.services.payments import booking_charge  # noqa: E402
+from secretaria.services.unit_booking import UnitOption  # noqa: E402
+from tests.test_unit_terms_money import (  # noqa: E402
+    CENTRO_250,
+    _after_sinal,
+    _booked,
+    _quiet_hooks,  # noqa: F401
+    _seed,
+    provider,  # noqa: F401
+)
+
+NL = chr(10)
+
+
+@pytest.fixture
+async def owner_db(monkeypatch):
+    from secretaria.services import booking_hold as holds  # noqa: PLC0415
+
+    engine, maker = await make_sessionmaker()
+    monkeypatch.setattr(deposit_module, "async_session_factory", maker)
+    monkeypatch.setattr(holds, "async_session_factory", maker)
+    monkeypatch.setattr(booking_charge, "async_session_factory", maker)
+    yield maker
+    await engine.dispose()
+
+
+def _single_doctor_conv(world, *, insurance):
+    return SimpleNamespace(
+        id=uuid4(),
+        flow_state=FlowState.SERVICE_CATALOG,
+        flow_step=fr.STEP_AWAITING_CONFIRMATION,
+        flow_selected_type="Consulta",
+        flow_selected_day="2099-01-06",
+        flow_selected_slot="2099-01-06T09:00",
+        flow_selected_professional_id=None,  # a single-doctor clinic never stores one
+        flow_selected_insurance=insurance,
+        flow_selected_unit_id=world.centro.id,
+        flow_managing_appointment_id=None,
+        flow_attendee_name="",
+        flow_draft=None,
+    )
+
+
+async def _card_result(kind, world, insurance):
+    """The router's own confirmation result: slot tap, AI express card or resumed card."""
+    conv = _single_doctor_conv(world, insurance=insurance)
+    router_tenant, roster, _ = _clinic(collect=False)
+    if kind == "slot":
+        result = fr._handle_slot(conv, "09:00 (2099-01-06T09:00)")
+    elif kind == "resume":
+        result = await fr.resume_bubbles(conv, router_tenant, None, roster)
+    else:
+        result = await bd._express_confirmation(
+            state=conv,
+            tenant=SimpleNamespace(initial_flows={"ai_draft_v2": True}),
+            professional=None,
+            service=_priced()[0],
+            slot_start=datetime(2099, 1, 6, 9, 0),
+            duration_minutes=30,
+            calendar=None,
+            professionals=[],
+            unit=UnitOption(id=world.centro.id, name="Centro", address=None, business_hours=None),
+        )
+    # What the entries carry on the way to the worker (`_carry_unit`, the resolver's `_carry`).
+    assert result.flow_selected_professional_id is None
+    result.flow_selected_unit_id = world.centro.id
+    result.flow_selected_type = "Consulta"
+    return result
+
+
+@pytest.mark.parametrize("kind", ["slot", "express", "resume"])
+@pytest.mark.parametrize("insurance", [None, "Unimed"])
+@pytest.mark.parametrize("timing", [DEPOSIT_TIMING_BEFORE, DEPOSIT_TIMING_AFTER])
+async def test_single_doctor_card_says_what_the_charge_asks_at_the_units_price(
+    owner_db,
+    provider,  # noqa: F811
+    monkeypatch,
+    kind,
+    insurance,
+    timing,
+):
+    world = await _seed(owner_db, terms=CENTRO_250, timing=timing)
+    async with owner_db() as session:
+        tenant = await session.get(Tenant, world.tenant.id)
+        assert not tenant.appointment_types  # the clinic's legacy catalog is empty
+        if timing == DEPOSIT_TIMING_BEFORE:
+            quoted = await deposit_gate.quote_deposit(
+                session,
+                tenant,
+                patient_id=world.patient.id,
+                appointment_type="Consulta",
+                professional_id=world.doctor.id,
+                insurance=insurance,
+                unit_id=world.centro.id,
+            )
+            assert quoted.required
+            charged = quoted.amount_cents
+    if timing == DEPOSIT_TIMING_AFTER:
+        # The real `after` path: the hook that runs once the appointment exists.
+        appointment, _ = await _booked(owner_db, world, world.centro)
+        charged = await _after_sinal(owner_db, world, appointment, monkeypatch, provider)
+    assert charged == 7500  # the doctor's price at Centro (R$ 250,00) x 30 %
+
+    result = await _card_result(kind, world, insurance)
+    async with owner_db() as session:
+        tenant = await session.get(Tenant, world.tenant.id)
+    out = await deposit_module._with_booking_money(result, tenant, uuid4())
+    body = _card(out).body
+    assert f"Sinal (Pix): {format_brl(charged)}" in body
+    assert "Valor da consulta: R$ 250,00" in body
+    assert "Valor: R$" not in body
+
+
+async def test_a_pending_carried_over_sinal_adds_no_sinal_lines(owner_db, monkeypatch):
+    world = await _seed(owner_db, terms=CENTRO_250, timing=DEPOSIT_TIMING_BEFORE)
+    calls = []
+
+    async def _pending(session, *, tenant_id, conversation_id, now=None):
+        calls.append(conversation_id)
+        return True
+
+    monkeypatch.setattr(release_offer, "carry_over_pending", _pending)
+    result = await _card_result("slot", world, None)
+    before = _card(result).body
+    async with owner_db() as session:
+        tenant = await session.get(Tenant, world.tenant.id)
+    out = await deposit_module._with_booking_money(result, tenant, uuid4())
+    assert calls and "Sinal" not in _card(out).body
+    assert _card(out).body == before
+
+
+async def test_money_block_is_separated_by_a_blank_line_and_replaced_not_doubled(db):
+    tenant = await _seed_tenant(db)
+    result = await _confirmation_result(plan="ins|particular")
+    out = await deposit_module._with_booking_money(result, tenant)
+    body = _card(out).body
+    assert NL + NL + "Sinal (Pix):" in body
+    again = await deposit_module._with_booking_money(out, tenant)
+    assert _card(again).body == body
+    # Taking the money away leaves the recap alone, without a dangling blank line.
+    assert fr.with_money_lines(body, []) == body.split(NL + NL + "Sinal")[0]
+    # The router's own value line is also set apart.
+    particular = await _confirmation_result(plan="ins|particular")
+    assert NL + NL + "Valor: R$ 200,00" in _card(particular).body
+
+
+async def test_the_help_node_is_handed_no_price_at_all(monkeypatch):
+    seen = []
+
+    async def _help(*, conversation_id, services, patient_message, final_round):
+        seen.append(services)
+        return SimpleNamespace(kind="clarify", question="Qual?", choice=None, message=None)
+
+    monkeypatch.setattr(fr, "run_service_help", _help)
+    tenant, roster, _ = _clinic(collect=False)
+    for insurance in (None, "Unimed"):
+        walk = _Walk(tenant, roster, flow_selected_insurance=insurance)
+        await walk.say(fr.LABEL_BOOK)
+        await walk.say(LABEL_ATTENDEE_SELF)
+        await walk.tap("svchelp|0")
+        await walk.say("nao sei qual escolher")
+    assert len(seen) == 2
+    for services in seen:
+        assert [s["name"] for s in services] == [CONSULTA, ECO, "Avaliação"]
+        assert all(s.get("price") is None for s in services)
