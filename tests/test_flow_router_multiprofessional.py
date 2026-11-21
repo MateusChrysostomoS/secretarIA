@@ -483,18 +483,17 @@ async def test_parked_catalog_service_step_still_resumes_the_deduplicated_catalo
     assert [row[1] for row in res.bubbles[0].rows] == ["🏥 Consulta Cardio"]
 
 
-async def test_catalog_service_with_one_professional_selects_them_and_confirms():
+async def test_catalog_service_with_one_professional_selects_them_and_goes_straight_on():
     """Exactly one doctor offers it: nothing left to ask, so the flow goes
-    straight to that service's own detail card with the doctor already
-    selected - the same card the doctor-first branch reaches."""
+    straight on (TASK-088: no service card) with the doctor already selected."""
     profs = _professionals()
     conv = _conversation(
         flow_state=FlowState.SERVICE_CATALOG,
         flow_step=flow_router.STEP_AWAITING_CATALOG_SERVICE,
     )
-    res = await route(conv, _tenant(), None, "Consulta Cardio", professionals=profs)
+    res = await route(conv, _tenant(), _FakeCalendar(), "Consulta Cardio", professionals=profs)
     assert res.action == "reply"
-    assert res.flow_step == STEP_AWAITING_SERVICE_CONFIRM
+    assert res.flow_step == flow_router.STEP_AWAITING_DAY
     assert res.flow_selected_type == "Consulta Cardio"
     assert res.flow_selected_professional_id == profs[0].id
 
@@ -514,14 +513,14 @@ async def test_catalog_service_with_two_professionals_asks_which_one():
     assert res.flow_selected_type == "Consulta Cardio"  # kept for the next step
     assert [row[1] for row in res.bubbles[0].rows] == ["🥼 Dra. Ana", "🥼 Dr. Bruno"]
 
-    # ...and the doctor tap lands on the detail card, NOT back on a service list.
+    # ...and the doctor tap goes straight on (the days here), NOT back on a service list.
     conv2 = _conversation(
         flow_state=FlowState.SERVICE_CATALOG,
         flow_step=flow_router.STEP_AWAITING_SERVICE_PROFESSIONAL,
         flow_selected_type="Consulta Cardio",
     )
-    picked = await route(conv2, _tenant(), None, _tap(profs[1]), professionals=profs)
-    assert picked.flow_step == STEP_AWAITING_SERVICE_CONFIRM
+    picked = await route(conv2, _tenant(), _FakeCalendar(), _tap(profs[1]), professionals=profs)
+    assert picked.flow_step == flow_router.STEP_AWAITING_DAY
     assert picked.flow_selected_professional_id == profs[1].id
     assert picked.flow_selected_type == "Consulta Cardio"
 
@@ -974,10 +973,12 @@ async def test_service_help_scoped_to_selected_professional(monkeypatch):
         flow_step=STEP_SERVICE_HELP,
         flow_selected_professional_id=profs[0].id,
     )
-    res = await route(conv, _tenant(), None, "avaliação do coração", professionals=profs)
+    res = await route(
+        conv, _tenant(), _FakeCalendar(), "avaliação do coração", professionals=profs
+    )
     assert [s["name"] for s in captured["services"]] == ["Consulta Cardio"]
     assert res.action == "reply"
-    assert res.flow_step == STEP_AWAITING_SERVICE_CONFIRM
+    assert res.flow_step == flow_router.STEP_AWAITING_DAY
     assert res.flow_selected_type == "Consulta Cardio"
     # The professional selection survives the hand-back.
     assert res.flow_selected_professional_id == profs[0].id

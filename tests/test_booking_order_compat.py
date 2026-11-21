@@ -790,7 +790,6 @@ async def test_q1_handback_to_another_service_drops_a_stored_particular():
     tenant = _tenant("shared", refused, [ana])
     walk = _Walk(tenant, [ana])
     await walk.to_service_card("Ecocardiograma", doctor=ana)
-    await walk.say(fr.LABEL_BOOK_SERVICE)
     assert walk.last.flow_selected_insurance == fr.LABEL_INSURANCE_PARTICULAR  # automatic
     stored = walk.last.flow_selected_insurance
 
@@ -911,7 +910,6 @@ async def test_a_multi_doctor_outro_servico_reopens_the_clinic_catalog():
     doctors = [ana, bruno]
     walk = _Walk(_tenant(doctors=doctors), doctors)
     await walk.to_service_card("Ecocardiograma", doctor=ana)
-    await walk.say(fr.LABEL_BOOK_SERVICE)
     assert walk.last.flow_step == fr.STEP_AWAITING_INSURANCE
     back = _list(walk.last).rows[-1]
     assert back == (f"{fr.ROW_DAY_BACK_PREFIX}{fr.BACK_TARGET_SERVICE}", fr.LABEL_ANOTHER_SERVICE)
@@ -923,7 +921,6 @@ async def test_a_multi_doctor_outro_servico_reopens_the_clinic_catalog():
     # From the day picker: its back row is the convenio list, whose back row is the catalog.
     await walk.tap("svc|Ecocardiograma")
     await walk.tap(f"prof|{ana.id}")
-    await walk.say(fr.LABEL_BOOK_SERVICE)
     await walk.tap("ins|Unimed")
     assert walk.last.flow_step == fr.STEP_AWAITING_DAY
     await walk.tap(_list(walk.last).rows[-1][0])
@@ -936,7 +933,6 @@ async def test_a_multi_doctor_outro_servico_reopens_the_clinic_catalog():
     )
     auto = _Walk(_tenant("shared", refused, doctors), doctors)
     await auto.to_service_card("Ecocardiograma", doctor=ana)
-    await auto.say(fr.LABEL_BOOK_SERVICE)
     assert auto.last.flow_selected_insurance == fr.LABEL_INSURANCE_PARTICULAR
     await auto.tap(_list(auto.last).rows[-1][0])
     assert auto.last.flow_step == fr.STEP_AWAITING_CATALOG_SERVICE
@@ -1215,8 +1211,8 @@ async def test_p4_legacy_service_without_doctor_drops_a_stored_particular(wired)
     assert landed.flow_step == fr.STEP_AWAITING_SERVICE_PROFESSIONAL
     assert landed.flow_selected_insurance is None
     await _wa_turn(tenant, "Dra. Ana")
-    await _wa_turn(tenant, fr.LABEL_BOOK_SERVICE)
-    # The question is asked - the old automatic answer did not ride along.
+    # TASK-088 Task 8: the doctor tap goes straight on. The question is asked - the old
+    # automatic answer did not ride along.
     assert (await _conversation(wired, tenant)).flow_step == fr.STEP_AWAITING_INSURANCE
 
 

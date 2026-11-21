@@ -965,7 +965,7 @@ async def test_zero_units_sets_notify_no_unit_and_returns_to_doctor_list():
     prof_rows = [row[0] for row in bubble.rows if row[0].startswith("prof|")]
     assert prof_rows == [f"prof|{bruno.id}"]  # only who really does it; never Ana again
     assert agenda.log.day_hours == []
-    # No dead end: the other doctor's tap opens the service card with that doctor.
+    # No dead end: the other doctor's tap goes straight on with that doctor (TASK-088: no card).
     picked = await fr.route(
         _conversation(
             flow_step=fr.STEP_AWAITING_PROFESSIONAL,
@@ -976,7 +976,7 @@ async def test_zero_units_sets_notify_no_unit_and_returns_to_doctor_list():
         inbound_routing_text("Dr. Bruno", f"prof|{bruno.id}"),
         professionals=[ana, bruno, carla],
     )
-    assert picked.flow_step == fr.STEP_AWAITING_SERVICE_CONFIRM
+    assert picked.flow_step == fr.STEP_AWAITING_DAY
     assert picked.flow_selected_professional_id == bruno.id
     assert picked.notify_no_unit is None
 
@@ -1048,8 +1048,11 @@ async def test_service_picked_first_then_doctor_filters_units():
         inbound_routing_text("Dra. Ana", f"prof|{ana.id}"),
         professionals=[ana, bruno],
     )
-    assert card.flow_step == fr.STEP_AWAITING_SERVICE_CONFIRM
+    # TASK-088 Task 8: the doctor tap goes straight to the units that do the service.
+    assert card.flow_step == STEP_AWAITING_UNIT
     assert card.flow_selected_professional_id == ana.id
+    assert _unit_row_ids(card) == [f"unit|{sul.id}", f"unit|{norte.id}"]
+    # A chat parked on the retired card ("Sim") lands on the same list.
     units = await fr.route(
         _conversation(flow_selected_professional_id=ana.id),
         _svc_tenant(),

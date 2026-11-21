@@ -45,7 +45,6 @@ from secretaria.services.flow_router import (  # noqa: E402
     STEP_AWAITING_DAY,
     STEP_AWAITING_DAY_RETRY,
     STEP_AWAITING_INSURANCE,
-    STEP_AWAITING_SERVICE_CONFIRM,
     STEP_SERVICE_HELP,
     route,
 )
@@ -53,7 +52,7 @@ from tests import (
     test_flow_day_picker as day_fixtures,  # noqa: E402
     test_flow_router_insurance as ins_fixtures,  # noqa: E402
 )
-from tests.test_flow_router import _conversation, _tenant  # noqa: E402
+from tests.test_flow_router import _conversation, _FakeCalendar, _tenant  # noqa: E402
 from tests.test_prompts import _config  # noqa: E402
 
 _NOW = datetime(2026, 10, 7, 10, 0, tzinfo=ZoneInfo("America/Sao_Paulo"))
@@ -216,7 +215,7 @@ async def test_the_draft_tool_caps_the_message():
     assert len(raised.value.intro) == HANDBACK_MESSAGE_MAX
 
 
-async def test_a_help_pick_puts_its_reason_before_the_card(monkeypatch):
+async def test_a_help_pick_puts_its_reason_before_the_next_step(monkeypatch):
     async def _pick(**kwargs):
         return ScopedHelpOutcome(
             kind="pick",
@@ -228,13 +227,14 @@ async def test_a_help_pick_puts_its_reason_before_the_card(monkeypatch):
     res = await route(
         _conversation(flow_state=FlowState.SERVICE_CATALOG, flow_step=STEP_SERVICE_HELP),
         _tenant(),
-        None,
+        _FakeCalendar(),
         "é a minha primeira vez",
     )
-    assert res.flow_step == STEP_AWAITING_SERVICE_CONFIRM
+    # TASK-088 Task 8: no service card - the reason comes in front of the next step (the days).
+    assert res.flow_step == STEP_AWAITING_DAY
     assert isinstance(res.bubbles[0], TextBubble)
     assert res.bubbles[0].body == "Pelo que você contou, a primeira consulta é o caminho."
-    assert len(res.bubbles) >= 2  # the service card still follows
+    assert len(res.bubbles) >= 2  # the day picker still follows
 
 
 async def test_a_help_reason_claiming_an_unproven_action_is_dropped(monkeypatch):
@@ -247,10 +247,10 @@ async def test_a_help_reason_claiming_an_unproven_action_is_dropped(monkeypatch)
     res = await route(
         _conversation(flow_state=FlowState.SERVICE_CATALOG, flow_step=STEP_SERVICE_HELP),
         _tenant(),
-        None,
+        _FakeCalendar(),
         "primeira vez",
     )
-    assert res.flow_step == STEP_AWAITING_SERVICE_CONFIRM
+    assert res.flow_step == STEP_AWAITING_DAY
     assert all("pagamento" not in getattr(b, "body", "") for b in res.bubbles)
 
 

@@ -220,7 +220,10 @@ class _Walk:
         return await self.say(inbound_routing_text(row[1], row[0]))
 
     async def to_service_card(self, service="Ecocardiograma", doctor=None):
-        """Agendar -> pra-quem Sim -> the service -> (the doctor) -> the service card."""
+        """Agendar -> pra-quem Sim -> the service -> (the doctor): the step AFTER the service.
+
+        TASK-088 Task 8: there is no service card any more - the tap goes straight on (the unit,
+        the convenio or the days). The name is kept so the older walks read as before."""
         await self.say(fr.LABEL_BOOK)
         await self.say(LABEL_ATTENDEE_SELF)
         await self.tap(f"svc|{service}")
@@ -230,7 +233,6 @@ class _Walk:
 
     async def to_unit_list(self, doctor):
         await self.to_service_card(doctor=doctor)
-        return await self.say(fr.LABEL_BOOK_SERVICE)
 
 
 def _list(result) -> SlotsBubble:
@@ -280,11 +282,9 @@ async def test_order_service_then_doctor_then_unit_then_insurance_then_day():
     assert walk.last.flow_step == fr.STEP_AWAITING_SERVICE_PROFESSIONAL
     assert walk.last.flow_selected_type == "Ecocardiograma"
     await walk.tap(f"prof|{ana.id}")
-    assert walk.last.flow_step == fr.STEP_AWAITING_SERVICE_CONFIRM  # the card stays (Task 8)
-    assert walk.last.flow_selected_professional_id == ana.id
-
-    await walk.say(fr.LABEL_BOOK_SERVICE)
+    # TASK-088 Task 8: no service card in between - the doctor tap goes to the unit.
     assert walk.last.flow_step == fu.STEP_AWAITING_UNIT
+    assert walk.last.flow_selected_professional_id == ana.id
     await walk.tap(f"unit|{sul.id}")
     # Service, doctor and unit are known: NOW the convenio, and the unit rides along.
     assert walk.last.flow_step == fr.STEP_AWAITING_INSURANCE
@@ -300,7 +300,6 @@ async def test_order_service_then_doctor_then_unit_then_insurance_then_day():
         fr.STEP_AWAITING_ATTENDEE_CHOICE,
         fr.STEP_AWAITING_CATALOG_SERVICE,
         fr.STEP_AWAITING_SERVICE_PROFESSIONAL,
-        fr.STEP_AWAITING_SERVICE_CONFIRM,
         fu.STEP_AWAITING_UNIT,
         fr.STEP_AWAITING_INSURANCE,
         fr.STEP_AWAITING_DAY,
@@ -317,15 +316,12 @@ async def test_single_doctor_single_unit_no_insurance_goes_service_to_day():
     # One doctor: his own service list - no doctor step, no convenio.
     assert walk.last.flow_step == fr.STEP_AWAITING_SERVICE
     await walk.tap("svc|Consulta")
-    assert walk.last.flow_step == fr.STEP_AWAITING_SERVICE_CONFIRM
-    await walk.say(fr.LABEL_BOOK_SERVICE)
     # One unit: implied, nothing to ask - straight to the days (no empty step, no loop).
     assert walk.last.flow_step == fr.STEP_AWAITING_DAY
     assert walk.last.flow_selected_unit_id == centro.id
     assert walk.steps == [
         fr.STEP_AWAITING_ATTENDEE_CHOICE,
         fr.STEP_AWAITING_SERVICE,
-        fr.STEP_AWAITING_SERVICE_CONFIRM,
         fr.STEP_AWAITING_DAY,
     ]
 
@@ -375,7 +371,6 @@ async def test_insurance_list_only_accepted_for_service_doctor_unit(mode):
     # Another service at Centro: Amil is the one refused.
     other = _Walk(tenant, doctors)
     await other.to_service_card("Consulta", doctor=ana)
-    await other.say(fr.LABEL_BOOK_SERVICE)
     await other.tap(f"unit|{centro.id}")
     assert _ins_ids(other.last) == ["ins|Unimed", "ins|Bradesco", "ins|particular", "ins|outro"]
 
@@ -458,7 +453,6 @@ async def test_zero_accepted_without_units_says_it_without_a_unit():
     )
     walk = _Walk(_tenant("shared", refused, doctors), doctors)
     await walk.to_service_card("Ecocardiograma", doctor=ana)
-    await walk.say(fr.LABEL_BOOK_SERVICE)
     assert walk.last.flow_step == fr.STEP_AWAITING_DAY
     assert walk.last.flow_selected_insurance == fr.LABEL_INSURANCE_PARTICULAR
     assert _list(walk.last).body == (
@@ -678,7 +672,6 @@ async def test_a_chat_parked_on_the_old_first_question_takes_the_new_order():
     # ...and the kept answer is judged at the day step like any other.
     await walk.tap("svc|Ecocardiograma")
     await walk.tap(f"prof|{ana.id}")
-    await walk.say(fr.LABEL_BOOK_SERVICE)
     assert walk.last.flow_step == fr.STEP_AWAITING_DAY
     assert walk.last.flow_selected_insurance == "Unimed"
 
@@ -772,11 +765,9 @@ async def test_back_to_the_service_after_an_automatic_particular_asks_again():
     )
     walk = _Walk(_tenant("shared", refused, doctors), doctors)
     await walk.to_service_card("Ecocardiograma", doctor=ana)
-    await walk.say(fr.LABEL_BOOK_SERVICE)
     assert walk.last.flow_selected_insurance == fr.LABEL_INSURANCE_PARTICULAR  # automatic
     await walk.tap(_list(walk.last).rows[-1][0])  # back (one unit: the service list)
     assert walk.last.flow_step == fr.STEP_AWAITING_SERVICE
     assert walk.last.flow_selected_insurance is None
     await walk.tap("svc|Consulta")
-    await walk.say(fr.LABEL_BOOK_SERVICE)
     assert walk.last.flow_step == fr.STEP_AWAITING_INSURANCE

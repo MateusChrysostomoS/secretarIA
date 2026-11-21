@@ -80,7 +80,6 @@ from secretaria.services.entitlements_client import EntitlementSummary  # noqa: 
 from secretaria.services.flow_router import (  # noqa: E402
     ATTENDEE_NEXT_BOOK,
     LABEL_BOOK,
-    LABEL_BOOK_SERVICE,
     LABEL_CONFIRM,
     STEP_AWAITING_ATTENDEE_AUTH,
     STEP_AWAITING_ATTENDEE_CHOICE,
@@ -194,11 +193,12 @@ def _row_tap(result: FlowRouterResult) -> str:
 
 
 async def _book(first_taps: list[str]) -> tuple[list[FlowRouterResult], _FakeCalendar]:
-    """Run `first_taps`, then service -> Sim -> first day -> first slot -> Confirmar."""
+    """Run `first_taps`, then service -> first day -> first slot -> Confirmar (TASK-088 Task 8:
+    the service tap goes straight on - no "Sim" card in between)."""
     cal = _FakeCalendar()
     results = await _drive(first_taps, cal)
     assert results[-1].flow_step == STEP_AWAITING_SERVICE
-    await _drive(["Primeira Consulta", LABEL_BOOK_SERVICE], cal, results)
+    await _drive(["Primeira Consulta"], cal, results)
     await _drive([_row_tap(results[-1])], cal, results)  # day
     await _drive([_row_tap(results[-1])], cal, results)  # slot
     await _drive([LABEL_CONFIRM], cal, results)

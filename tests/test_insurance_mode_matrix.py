@@ -168,15 +168,12 @@ async def _book_to_insurance_or_professional(snapshot, professionals):
 
 
 async def _book_to_the_convenio(snapshot, professionals, doctor=None, service="Consulta"):
-    """TASK-088 order: pra-quem "Sim" -> the SERVICE -> [the doctor] -> the card -> "Sim, agendar".
+    """TASK-088 order: pra-quem "Sim" -> the SERVICE -> [the doctor] (no card in between).
 
-    Returns (result, conv): the result after the card's "Sim" - the convênio list when the doctor
-    accepts any plan, else (Particular direct) the day step - and the conversation builder."""
-    from secretaria.services.flow_router import (
-        LABEL_BOOK_SERVICE,
-        STEP_AWAITING_SERVICE_CONFIRM,
-        STEP_AWAITING_SERVICE_PROFESSIONAL,
-    )
+    Returns (result, conv): the result after the service / doctor tap - the convênio list when
+    the doctor accepts any plan, else (Particular direct) the day step - and the conversation
+    builder."""
+    from secretaria.services.flow_router import STEP_AWAITING_SERVICE_PROFESSIONAL
 
     after, conv = await _book_to_insurance_or_professional(snapshot, professionals)
     row = next(r for r in after.bubbles[0].rows if r[0] == f"svc|{service}")
@@ -190,11 +187,7 @@ async def _book_to_the_convenio(snapshot, professionals, doctor=None, service="C
             conv(result), snapshot, None, inbound_routing_text(row[1], row[0]),
             professionals=professionals,
         )
-    assert result.flow_step == STEP_AWAITING_SERVICE_CONFIRM
-    asked = await route(
-        conv(result), snapshot, None, LABEL_BOOK_SERVICE, professionals=professionals
-    )
-    return asked, conv
+    return result, conv
 
 
 def _plan_titles(result) -> list[str]:

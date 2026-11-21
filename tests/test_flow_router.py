@@ -235,16 +235,18 @@ async def test_menu_freetext_delegates_llm():
     assert res.flow_state == FlowState.LLM
 
 
-async def test_select_service_shows_detail_with_price():
+async def test_select_service_goes_straight_to_the_day_picker_without_a_card_or_a_price():
+    # TASK-088 Task 8: no "Deseja agendar esse serviço?" card (it showed the price): the tap
+    # opens the next step - here the days (one doctor, no units, no convênio step).
     conv = _conversation(flow_state=FlowState.SERVICE_CATALOG, flow_step=STEP_AWAITING_SERVICE)
-    res = await route(conv, _tenant(), None, "Primeira Consulta")
+    cal = _FakeCalendar()
+    res = await route(conv, _tenant(), cal, "Primeira Consulta")
     assert res.action == "reply"
-    assert res.flow_step == STEP_AWAITING_SERVICE_CONFIRM
+    assert res.flow_step == STEP_AWAITING_DAY
     assert res.flow_selected_type == "Primeira Consulta"
-    assert isinstance(res.bubbles[0], ButtonBubble)
-    # Adjacent, no separator dash: "Primeira Consulta" + "R$ 250", not
-    # "Primeira Consulta — R$ 250".
-    assert "Primeira Consulta R$ 250" in res.bubbles[0].body
+    assert not [b for b in res.bubbles if isinstance(b, ButtonBubble)]
+    assert isinstance(res.bubbles[0], SlotsBubble)
+    assert "R$" not in " ".join(getattr(b, "body", "") or "" for b in res.bubbles)
 
 
 def test_service_detail_text_prefixes_a_bare_price_with_reais():
@@ -1110,9 +1112,9 @@ async def test_service_dont_know_tap_asks_scoped_opener():
     assert res.bubbles[0].body == SERVICE_HELP_OPENER
 
 
-async def test_service_help_pick_hands_back_to_service_detail(monkeypatch):
-    """A validated pick re-enters the deterministic flow at the service's own
-    detail card - the same result a direct tap on that service produces."""
+async def test_service_help_pick_hands_back_to_the_next_step(monkeypatch):
+    """A validated pick re-enters the deterministic flow right after the service -
+    the same result a direct tap on that service produces (TASK-088: no detail card)."""
     captured = {}
 
     async def _fake_help(*, conversation_id, services, patient_message, final_round):
@@ -1123,12 +1125,12 @@ async def test_service_help_pick_hands_back_to_service_detail(monkeypatch):
 
     monkeypatch.setattr(flow_router, "run_service_help", _fake_help)
     conv = _conversation(flow_state=FlowState.SERVICE_CATALOG, flow_step=STEP_SERVICE_HELP)
-    res = await route(conv, _tenant(), None, "preciso de uma avaliação completa")
+    res = await route(conv, _tenant(), _FakeCalendar(), "preciso de uma avaliação completa")
     assert res.action == "reply"
-    assert res.flow_step == STEP_AWAITING_SERVICE_CONFIRM
+    assert res.flow_step == STEP_AWAITING_DAY
     assert res.flow_selected_type == "Primeira Consulta"
-    assert isinstance(res.bubbles[0], ButtonBubble)
-    assert "Primeira Consulta R$ 250" in res.bubbles[0].body
+    assert isinstance(res.bubbles[-1], SlotsBubble)
+    assert not [b for b in res.bubbles if isinstance(b, ButtonBubble)]
     # Grounding: the node saw the tenant's real catalog and the round flag.
     assert [s["name"] for s in captured["services"]] == ["Primeira Consulta"]
     assert captured["patient_message"] == "preciso de uma avaliação completa"

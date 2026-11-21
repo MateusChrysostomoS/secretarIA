@@ -1202,7 +1202,7 @@ async def test_empty_booking_draft_service_then_professional_keeps_valid_choice(
 ):
     from secretaria.ai.graph import BOOKING_DRAFT_SENTINEL_PREFIX
     from secretaria.services.flow_router import (
-        STEP_AWAITING_SERVICE_CONFIRM,
+        STEP_AWAITING_DAY,
         STEP_AWAITING_SERVICE_PROFESSIONAL,
         route,
     )
@@ -1234,9 +1234,9 @@ async def test_empty_booking_draft_service_then_professional_keeps_valid_choice(
         snapshot = tasks._flow_tenant_snapshot(tenant, professionals, [], None)
         result = await route(conv, snapshot, None, "Dra. Ana", professionals=professionals)
 
-    assert result.flow_step == (
-        STEP_AWAITING_SERVICE_CONFIRM if compatible else STEP_AWAITING_SERVICE
-    )
+    # TASK-088 Task 8: the doctor tap goes straight on (no service card): the days for a doctor
+    # who still does the service (no calendar was handed in, so the picker says it is down).
+    assert result.flow_step == (STEP_AWAITING_DAY if compatible else STEP_AWAITING_SERVICE)
     assert result.flow_selected_type == ("Consulta Geral" if compatible else None)
     assert result.flow_selected_professional_id == ana.id
     assert _stub_calendar.day_scans == []

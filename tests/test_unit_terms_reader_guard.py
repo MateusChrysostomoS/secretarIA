@@ -128,7 +128,6 @@ ALLOWLIST: dict[tuple[str, str], str] = {
     ("services/flow_router.py", "_priced_entry"): (
         "flow_units.shown_terms; compares to base only to keep the same dict when equal"
     ),
-    ("services/flow_router.py", "_with_unit_terms_line"): "flow_units.shown_terms(...).price",
     ("services/payments/deposit_lifecycle.py", "_price_at_unit"): (
         "base for the no-exception case; the unit's own price via resolve_entry_at_unit"
     ),

@@ -39,7 +39,6 @@ from secretaria.services.flow_router import (  # noqa: E402
     BTN_CHOOSE_SERVICE,
     INSURANCE_ACCEPTED_MARK,
     LABEL_BOOK,
-    LABEL_BOOK_SERVICE,
     LABEL_DONT_KNOW,
     LABEL_INSURANCE_OTHER,
     LABEL_INSURANCE_PARTICULAR,
@@ -229,7 +228,10 @@ async def _to_card(
     tenant, professionals, service="Consulta Geral", doctor=None, entry=LABEL_BOOK,
     start_state=FlowState.IDLE,
 ):
-    """Entry -> pra-quem -> the SERVICE -> [the doctor, when several do it] -> the service card."""
+    """Entry -> pra-quem -> the SERVICE -> [the doctor, when several do it] -> the step after it.
+
+    TASK-088 Task 8: there is no service card any more - the tap (or the doctor's) goes straight
+    on: the convênio list (these doctors have no units), or the days when nothing is asked."""
     result = await _after_attendee(tenant, professionals, entry, start_state)
     result = await _turn(
         _advance(result), tenant, _tap(_row(result, lambda r: r[0] == f"svc|{service}")),
@@ -240,15 +242,14 @@ async def _to_card(
         result = await _turn(
             _advance(result), tenant, _tap(_prof_row(result, doctor)), professionals
         )
-    assert result.flow_step == STEP_AWAITING_SERVICE_CONFIRM, result
+    assert result.flow_step != STEP_AWAITING_SERVICE_CONFIRM, result
     return result
 
 
 async def _to_insurance_list(tenant, professionals, **kw):
-    """... -> "Sim, agendar" on the card: where the convênio is asked (TASK-088: after the
-    service, the doctor and the unit - these doctors have no units)."""
-    card = await _to_card(tenant, professionals, **kw)
-    return await _turn(_advance(card), tenant, LABEL_BOOK_SERVICE, professionals)
+    """... -> where the convênio is asked (TASK-088: after the service, the doctor and the unit
+    - these doctors have no units)."""
+    return await _to_card(tenant, professionals, **kw)
 
 
 def _doctor_rows(result):
@@ -451,11 +452,10 @@ async def test_table(collect, plans_filled, professional_count, accepts):
     assert after_attendee.flow_selected_insurance is None
     assert all(not row[0].startswith("prof|") for row in after_attendee.bubbles[0].rows)
 
-    card = await _to_card(tenant, professionals, doctor=doctor)
-    after_card = await _turn(_advance(card), tenant, LABEL_BOOK_SERVICE, professionals)
+    after_card = await _to_card(tenant, professionals, doctor=doctor)
 
     if not asks_insurance:
-        # No convênio question at all: "Sim, agendar" goes straight to the days.
+        # No convênio question at all: the service tap goes straight to the days.
         assert after_card.flow_step == STEP_AWAITING_DAY
         assert after_card.flow_selected_insurance is None
     elif doctor is not None and not accepts:
@@ -560,7 +560,7 @@ async def test_order_service_doctor_insurance_day(doctor_index):
         professionals,
     )
     if doctor_index == 0:
-        # Exactly one doctor does it: straight to the card, the doctor already selected.
+        # Exactly one doctor does it: straight on, the doctor already selected.
         detail = picked
     else:
         assert picked.flow_step == STEP_AWAITING_SERVICE_PROFESSIONAL
@@ -568,12 +568,12 @@ async def test_order_service_doctor_insurance_day(doctor_index):
         detail = await _turn(
             _advance(picked), tenant, _tap(_prof_row(picked, doctor)), professionals
         )
-    assert detail.flow_step == STEP_AWAITING_SERVICE_CONFIRM
+    assert detail.flow_step != STEP_AWAITING_SERVICE_CONFIRM
     assert detail.flow_selected_type == service
     assert detail.flow_selected_professional_id == doctor.id
 
-    # "Sim, agendar" -> the convênio (or, with nothing accepted, straight on) -> the DAY step.
-    after_card = await _turn(_advance(detail), tenant, LABEL_BOOK_SERVICE, professionals)
+    # The pick -> the convênio (or, with nothing accepted, straight on) -> the DAY step.
+    after_card = detail
     if doctor_index == 0:
         assert after_card.flow_step == STEP_AWAITING_INSURANCE
         day = await _turn(
@@ -627,8 +627,8 @@ async def test_single_doctor_order_services_then_insurance_then_day():
         _tap(_row(services, lambda row: row[0].startswith("svc|"))),
         professionals,
     )
-    assert detail.flow_step == STEP_AWAITING_SERVICE_CONFIRM
-    insurance_q = await _turn(_advance(detail), tenant, LABEL_BOOK_SERVICE, professionals)
+    assert detail.flow_step == STEP_AWAITING_INSURANCE  # TASK-088 Task 8: no card in between
+    insurance_q = detail
     assert _plan_rows(insurance_q) == ["Unimed", LABEL_INSURANCE_PARTICULAR, LABEL_INSURANCE_OTHER]
     day = await _turn(
         _advance(insurance_q), tenant, _tap(_row_titled(insurance_q, "Unimed")), professionals

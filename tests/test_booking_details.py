@@ -134,7 +134,7 @@ def test_a_text_longer_than_the_whatsapp_limit_drops_the_description_then_requir
     # The lines that identify the booking are never the ones cut.
     for line in (
         "🥼 Profissional: Dra. Ana — Cardiologia",
-        "🏥 Serviço: Consulta — R$250",
+        "🏥 Serviço: Consulta",
         "Convênio: Particular",
         "👤 Para: você",
         "Endereço: Rua A, 1, Recife",
@@ -229,11 +229,13 @@ def test_the_service_card_spells_the_price_exactly_as_before(price, first_line):
 
 
 @pytest.mark.parametrize("insurance", [None, "", "Particular", "particular "])
-def test_particular_or_no_answer_shows_the_price(insurance):
+def test_particular_or_no_answer_shows_no_price_either(insurance):
+    # TASK-088 R23: money is said only on the final confirmation card - not in this message.
     text = booking_details_text(
         service=FULL, professional=None, insurance=insurance, attendee_name=None, address=None
     )
-    assert "🏥 Serviço: Consulta — R$250" in text
+    assert "🏥 Serviço: Consulta" in text
+    assert "R$" not in text
 
 
 @pytest.mark.parametrize("insurance", ["Unimed", "Cassi do meu pai"])

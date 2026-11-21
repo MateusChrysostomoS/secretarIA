@@ -671,10 +671,8 @@ async def test_e2e_db_acceptance_decides_the_convenio_list(db):
     the chosen doctor (it used to mark the doctor rows when the convênio came first)."""
     from secretaria.schemas.webhook import inbound_routing_text
     from secretaria.services.flow_router import (
-        LABEL_BOOK_SERVICE,
         STEP_AWAITING_CATALOG_SERVICE,
         STEP_AWAITING_INSURANCE,
-        STEP_AWAITING_SERVICE_CONFIRM,
         STEP_AWAITING_SERVICE_PROFESSIONAL,
         route,
     )
@@ -700,7 +698,7 @@ async def test_e2e_db_acceptance_decides_the_convenio_list(db):
     professionals = [ana, bruno]
     snapshot = _flow_tenant(tenant, professionals, insurance)
     after, conv = await _book_until_after_attendee(snapshot, professionals)
-    # The SERVICE first, then the doctor, then (after the card) the convênio.
+    # The SERVICE first, then the doctor, then the convênio (TASK-088 Task 8: no card between).
     assert after.flow_step == STEP_AWAITING_CATALOG_SERVICE
     service_row = next(row for row in after.bubbles[0].rows if row[0] == "svc|Consulta")
     doctors = await route(
@@ -715,16 +713,12 @@ async def test_e2e_db_acceptance_decides_the_convenio_list(db):
 
     async def plans_of(doctor):
         row = next(r for r in doctors.bubbles[0].rows if r[0] == f"prof|{doctor.id}")
-        card = await route(
+        asked = await route(
             conv(doctors),
             snapshot,
             None,
             inbound_routing_text(row[1], row[0]),
             professionals=professionals,
-        )
-        assert card.flow_step == STEP_AWAITING_SERVICE_CONFIRM
-        asked = await route(
-            conv(card), snapshot, None, LABEL_BOOK_SERVICE, professionals=professionals
         )
         assert asked.flow_step == STEP_AWAITING_INSURANCE
         # (without the list's back row - TASK-088 R18)
@@ -761,16 +755,15 @@ async def test_e2e_clinic_with_only_non_catalog_legacy_plans_still_asks_insuranc
         insurance = await load_tenant_insurance(session, tenant.id)
 
     from secretaria.schemas.webhook import inbound_routing_text
-    from secretaria.services.flow_router import LABEL_BOOK_SERVICE, route
+    from secretaria.services.flow_router import route
 
     snapshot = _flow_tenant(tenant, [solo], insurance)
     after, conv = await _book_until_after_attendee(snapshot, [solo])
-    # TASK-088: the service first (one doctor: his own list), then the card, then the convênio.
+    # TASK-088: the service first (one doctor: his own list), then the convênio (no card).
     row = next(r for r in after.bubbles[0].rows if r[0].startswith("svc|"))
-    card = await route(
+    asked = await route(
         conv(after), snapshot, None, inbound_routing_text(row[1], row[0]), professionals=[solo]
     )
-    asked = await route(conv(card), snapshot, None, LABEL_BOOK_SERVICE, professionals=[solo])
     assert asked.flow_step == STEP_AWAITING_INSURANCE, (
         f"convênio step skipped: got {asked.flow_step!r} although collect_insurance=True "
         f"and tenants.insurances={tenant.insurances!r}"
