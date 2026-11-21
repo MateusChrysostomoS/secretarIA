@@ -93,12 +93,26 @@ class _Agenda:
             for s, e, event in [*self.consultations, *self.busy]
         )
 
-    async def list_available_days(self, start_day, days, slot_minutes=None):
+    def _has_free_slot(self, d, length, extra_busy):
+        t = datetime(d.year, d.month, d.day, self.hours[0], tzinfo=TZ)
+        stop = datetime(d.year, d.month, d.day, self.hours[1], tzinfo=TZ)
+        while t + length <= stop:
+            if not self._taken(t, t + length) and not any(
+                availability.overlaps(t, t + length, s, e) for s, e in extra_busy
+            ):
+                return True
+            t += timedelta(minutes=30)
+        return False
+
+    async def list_available_days(self, start_day, days, slot_minutes=None, extra_busy=None):
+        """One scan. Like the real calendar, `extra_busy` is taken time that can empty a day."""
         first = start_day.date()
+        length = timedelta(minutes=slot_minutes or 30)
         return [
             datetime(d.year, d.month, d.day, tzinfo=TZ)
             for d in self.open_days
             if first <= d < first + timedelta(days=days)
+            and (not extra_busy or self._has_free_slot(d, length, extra_busy))
         ]
 
     async def list_free_slots(self, day, slot_minutes=None, max_slots=6, **_):

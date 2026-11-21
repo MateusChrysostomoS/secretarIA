@@ -91,25 +91,12 @@ class _Agenda:
             (s, e) for s, e in self.consultation_list if availability.overlaps(start, end, s, e)
         ]
 
-    async def list_available_days(self, start_day, days, slot_minutes=None):
-        self.day_scans += 1
-        first = start_day.date()
-        return [
-            datetime(d.year, d.month, d.day, tzinfo=TZ)
-            for d in self.open_days
-            if first <= d < first + timedelta(days=days)
-        ]
-
-    async def list_free_slots(self, day, slot_minutes=None, max_slots=6):
-        d = day.date()
-        self.slot_reads.append(d)
-        if d not in self.open_days:
-            return []
-        length = timedelta(minutes=slot_minutes or 30)
+    def _walk(self, d, length, max_slots, extra_busy=()):
         slots, t = [], datetime(d.year, d.month, d.day, self.hours[0], tzinfo=TZ)
         stop = datetime(d.year, d.month, d.day, self.hours[1], tzinfo=TZ)
+        blocked = [*self.busy, *extra_busy]
         while t + length <= stop and len(slots) < max_slots:
-            if not any(availability.overlaps(t, t + length, s, e) for s, e in self.busy):
+            if not any(availability.overlaps(t, t + length, s, e) for s, e in blocked):
                 slots.append({
                     "start": t.isoformat(),
                     "end": (t + length).isoformat(),
@@ -117,6 +104,25 @@ class _Agenda:
                 })
             t += timedelta(minutes=30)
         return slots
+
+    async def list_available_days(self, start_day, days, slot_minutes=None, extra_busy=None):
+        """One scan. Like the real calendar, `extra_busy` is taken time that empties a day."""
+        self.day_scans += 1
+        first = start_day.date()
+        length = timedelta(minutes=slot_minutes or 30)
+        return [
+            datetime(d.year, d.month, d.day, tzinfo=TZ)
+            for d in self.open_days
+            if first <= d < first + timedelta(days=days)
+            and (not extra_busy or self._walk(d, length, 1, extra_busy))
+        ]
+
+    async def list_free_slots(self, day, slot_minutes=None, max_slots=6):
+        d = day.date()
+        self.slot_reads.append(d)
+        if d not in self.open_days:
+            return []
+        return self._walk(d, timedelta(minutes=slot_minutes or 30), max_slots)
 
 
 def _doctor(buffer_minutes):
@@ -269,19 +275,63 @@ async def test_day_dropped_when_buffer_removes_every_slot():
     assert [d.date() for d in padded] == [D1]
 
 
-async def test_day_list_reads_the_seam_once_and_rereads_only_touched_days():
-    consult = [_at("10:00", day=D1)]
-    open_days = [D0, D1, D2]
+async def test_day_list_with_a_buffer_is_one_scan_however_many_days_hold_consultations():
+    # One consultation on EVERY working day: the buffer must not turn the list into one
+    # calendar read per busy day (on Google each read is an API call). The padded
+    # consultations travel to the day scan as `extra_busy`; the answer is one seam read and
+    # one day scan, and no day is read slot by slot.
+    open_days = [D0 + timedelta(days=n) for n in range(180)]
+    consult = [_at("10:00", day=d) for d in open_days]
     calendar = _Agenda(open_days=open_days, busy=consult, consultations=consult)
     start = datetime(D0.year, D0.month, D0.day, tzinfo=TZ)
     days = await availability.available_day_starts(
-        calendar, start=start, window_days=20, duration_minutes=30, buffer_minutes=15
+        calendar, start=start, window_days=180, duration_minutes=30, buffer_minutes=15
     )
     assert [d.date() for d in days] == open_days
     assert len(calendar.seam_reads) == 1
     assert calendar.day_scans == 1
-    # Only D1 (the day the padded window touches) was read slot by slot.
-    assert calendar.slot_reads == [D1]
+    assert calendar.slot_reads == []
+
+
+async def test_day_list_with_a_buffer_drops_a_day_the_padding_empties_without_a_slot_read():
+    consult = [_at("10:00", day=D1)]
+    busy = consult + [_at("08:00", day=D1), _at("08:30", day=D1), _at("09:00", day=D1),
+                      _at("10:30", day=D1), _at("11:00", day=D1), _at("11:30", day=D1)]
+    calendar = _Agenda(open_days=[D0, D1, D2], busy=busy, consultations=consult)
+    start = datetime(D0.year, D0.month, D0.day, tzinfo=TZ)
+    days = await availability.available_day_starts(
+        calendar, start=start, window_days=20, duration_minutes=30, buffer_minutes=15
+    )
+    assert [d.date() for d in days] == [D0, D2]
+    assert calendar.day_scans == 1 and calendar.slot_reads == []
+
+
+async def test_day_list_with_a_buffer_still_rereads_the_day_a_hold_touches():
+    consult = [_at("10:00", day=D1)]
+    calendar = _Agenda(open_days=[D0, D1, D2], busy=consult, consultations=consult,
+                       hours=(8, 9))
+    start = datetime(D0.year, D0.month, D0.day, tzinfo=TZ)
+    days = await availability.available_day_starts(
+        calendar, start=start, window_days=20, duration_minutes=30,
+        holds=[_at("08:00", day=D2)], buffer_minutes=30,
+    )
+    # D2: the hold pads 08:30 away and takes 08:00 -> nothing left; only D2 was read.
+    assert [d.date() for d in days] == [D0, D1]
+    assert calendar.slot_reads == [D2]
+
+
+async def test_day_list_buffer_zero_works_for_a_calendar_that_does_not_know_extra_busy():
+    class Plain:
+        tzinfo = TZ
+
+        async def list_available_days(self, start_day, days, slot_minutes=None):
+            return [datetime(D0.year, D0.month, D0.day, tzinfo=TZ)]
+
+    days = await availability.available_day_starts(
+        Plain(), start=datetime(D0.year, D0.month, D0.day, tzinfo=TZ),
+        window_days=20, duration_minutes=30, buffer_minutes=0,
+    )
+    assert [d.date() for d in days] == [D0]
 
 
 async def test_day_list_with_buffer_zero_makes_no_extra_read():

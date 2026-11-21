@@ -48,8 +48,11 @@ compromisso real digitado direto no Google não ganha folga.
 ## Custo de leitura
 
 Com N = 0 nada muda e nenhuma leitura extra acontece. Com N > 0: as janelas de consulta são lidas **uma vez**
-para o período inteiro (lista de dias, varredura da IA) e só os dias que uma janela engordada toca são relidos
-horário a horário; nunca uma leitura por dia. Reconferência: uma leitura curta ao redor do horário.
+para o período inteiro (lista de dias, varredura da IA) e entregues, já engordadas, à varredura única de dias
+da agenda (`extra_busy`, o mesmo sentido da regra da folga); por isso o número de leituras da agenda **não
+cresce** com o número de dias que têm consulta (medido: 180 dias, uma consulta por dia = 1 varredura, 0 leituras
+horário a horário). Só os dias que uma reserva em espera (hold) engordada toca e o dia do prazo mínimo são
+relidos horário a horário (a lista de dias não passa holds). Reconferência: uma leitura curta ao redor do horário.
 
 ## Falha na leitura (ofertas)
 

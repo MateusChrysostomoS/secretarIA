@@ -269,6 +269,49 @@ async def free_slots_for_day(
     return [slot_start(slot["start"], tz).astimezone(tz) for slot in kept]
 
 
+async def buffered_free_slots(
+    calendar: CalendarService,
+    *,
+    day: datetime,
+    max_slots: int,
+    held: Sequence[Window],
+    buffer_minutes: int,
+    slot_minutes: int | None = None,
+) -> list[dict]:
+    """`calendar.list_free_slots` for the v1 AI slot lists, with the doctor's buffer (TASK-088 §B).
+
+    No buffer: the very call the tools always made (`extra_busy` = the held windows). With one,
+    the whole day is read, every slot closer than N minutes to a consultation or to a held
+    window is dropped (the consultation read is fail-open: `offer_consultation_windows`), and
+    only then is the list cut to `max_slots`, so it still fills. The slot dicts are the
+    calendar's own, untouched.
+    """
+    extra: dict = {"extra_busy": list(held)} if held else {}
+    if slot_minutes:
+        extra["slot_minutes"] = slot_minutes
+    if buffer_minutes <= 0:
+        return await calendar.list_free_slots(day=day, max_slots=max_slots, **extra)
+    slots = await calendar.list_free_slots(
+        day=day, max_slots=slot_scan_limit(slot_minutes or 30), **extra
+    )
+    tz = calendar.tzinfo
+    first = _aware(day, tz)
+    consultations = await offer_consultation_windows(
+        calendar, first, first + timedelta(days=1), buffer_minutes=buffer_minutes
+    )
+    # The slots of one call share a length: the calendar's own (a slot's "end"), else the asked one.
+    length = slot_minutes or 30
+    for slot in slots:
+        if slot.get("end"):
+            span = slot_start(slot["end"], tz) - slot_start(slot["start"], tz)
+            length = int(span.total_seconds() // 60)
+            break
+    kept = without_holds(
+        slots, padded([*held, *consultations], buffer_minutes), duration_minutes=length, tz=tz
+    )
+    return kept[:max_slots]
+
+
 def _touches_day(day_start: datetime, holds: Sequence[Window], tz: tzinfo | None) -> bool:
     start = day_start if day_start.tzinfo is not None else day_start.replace(tzinfo=tz)
     end = start + timedelta(days=1)
@@ -297,26 +340,36 @@ async def available_day_starts(
     picker's "next 20 days" stays the same 20 days.
 
     `buffer_minutes` (`booking_buffer_minutes`): the consultation windows are read ONCE for
-    the whole window (or passed in as `consultations`), and - like a hold - only the days a
-    padded consultation or hold touches are re-read slot by slot and dropped when the buffer
-    leaves no slot. With buffer 0 nothing is read beyond what is above.
+    the whole window (or passed in as `consultations`) and handed, padded, to the day scan as
+    `extra_busy` - so the number of calendar reads does NOT grow with the number of days that
+    have a consultation. Only the days a padded HOLD touches are re-read slot by slot (the
+    day picker passes no holds). With buffer 0 nothing is read beyond what is above.
     """
     tz = calendar.tzinfo
-    days = await calendar.list_available_days(
-        start_day=start, days=window_days, slot_minutes=duration_minutes
-    )
-    floor_day = None
-    if not_before is not None:
-        floor_day = not_before.astimezone(tz).date()
-        days = [day_start for day_start in days if day_start.date() >= floor_day]
-    blockers: Sequence[Window] = holds
+    consultations_known: Sequence[Window] = ()
     if buffer_minutes > 0:
         if consultations is None:
             first = _aware(start, tz)
             consultations = await offer_consultation_windows(
                 calendar, first, first + timedelta(days=window_days), buffer_minutes=buffer_minutes
             )
-        blockers = padded([*holds, *consultations], buffer_minutes)
+        consultations_known = consultations
+    # The padded consultations are taken time for the ONE day scan (`extra_busy`, the same
+    # meaning as the buffer rule), so a day they empty is gone without any extra read. Passed
+    # only when there is something to pad: a calendar that does not know `extra_busy` still
+    # works at buffer 0.
+    scan_extra: dict = {}
+    if consultations_known:
+        scan_extra["extra_busy"] = padded(consultations_known, buffer_minutes)
+    days = await calendar.list_available_days(
+        start_day=start, days=window_days, slot_minutes=duration_minutes, **scan_extra
+    )
+    floor_day = None
+    if not_before is not None:
+        floor_day = not_before.astimezone(tz).date()
+        days = [day_start for day_start in days if day_start.date() >= floor_day]
+    # Only holds (and the minimum-notice day) still need the slot-by-slot re-read.
+    blockers: Sequence[Window] = padded(holds, buffer_minutes)
     if not blockers and floor_day is None:
         return days
     kept: list[datetime] = []

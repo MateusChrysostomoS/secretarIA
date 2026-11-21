@@ -215,7 +215,9 @@ async def test_the_doctors_minimum_notice_applies_to_the_long_scan_too(monkeypat
     floor = datetime(2027, 3, 3, 8, 0, tzinfo=_TZ)
     seen = {}
 
-    async def fake_days(calendar, *, start, window_days, duration_minutes, not_before=None):
+    async def fake_days(
+        calendar, *, start, window_days, duration_minutes, not_before=None, **_buffer
+    ):
         seen.update(window_days=window_days, not_before=not_before)
         return [datetime(2027, 3, 3, tzinfo=_TZ)]
 
