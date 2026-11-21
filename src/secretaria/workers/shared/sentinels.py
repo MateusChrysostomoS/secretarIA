@@ -1031,6 +1031,7 @@ async def _legacy_booking_draft(
                 professionals=ctx.professionals,
                 attendee_name=attendee,
                 recorded=conversation,
+                named_now=insurance_text is not None,
             )
     else:
         # `ctx.professionals`, the router-shaped roster: see `_handle_start_guided_booking`.
@@ -1044,6 +1045,7 @@ async def _legacy_booking_draft(
             professionals=ctx.professionals,
             attendee_name=attendee,
             recorded=conversation,
+            named_now=insurance_text is not None,
         )
     logger.info(
         "conversation_booking_draft_entered",

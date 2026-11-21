@@ -6279,6 +6279,7 @@ async def enter_guided_booking(
     professionals: list | None = None,
     attendee_name: str | None = None,
     recorded: Any | None = None,
+    named_now: bool = False,
 ) -> FlowRouterResult:
     """LLM hand-back entry: resume the booking AFTER the service was chosen.
 
@@ -6306,7 +6307,10 @@ async def enter_guided_booking(
     A STORED "Particular" (R29/R30) may be the AUTOMATIC one - set because nothing was accepted at
     the (service, doctor, unit) the booking was at. `recorded` is the conversation as it stood: the
     Particular survives only when this hand-back lands on that SAME triple with no unit list still
-    to choose from (`particular_survives`); otherwise it is dropped and the gate decides again at
+    to choose from (`particular_survives`); `named_now` (R30 a) is for a caller whose `insurance`
+    the patient / the AI named in THIS turn - it is never dropped. A hand-back with no service (a
+    clinic without a catalog) keeps it too: with no service every plan is accepted, so no Particular
+    there can be the automatic one. Otherwise it is dropped and the gate decides again at
     the combination the booking reaches (with its line when nothing is accepted there). Cost
     accepted: a patient who really chose Particular answers the list once more. A plan stays.
 
@@ -6342,7 +6346,8 @@ async def enter_guided_booking(
         flow_attendee_name=attendee_name,
     )
     if (
-        _insurance_step_skip_reason(tenant) is None
+        appointment_type
+        and _insurance_step_skip_reason(tenant) is None
         and _label_match(insurance, LABEL_INSURANCE_PARTICULAR)
     ):
         owner = _booking_professional(state, professionals)
@@ -6354,6 +6359,7 @@ async def enter_guided_booking(
         if not particular_survives(
             tenant,
             insurance,
+            named_now=named_now,
             recorded=recorded,
             professionals=professionals,
             opens_choice=choice.kind == "list",

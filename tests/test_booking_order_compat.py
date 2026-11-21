@@ -1238,3 +1238,118 @@ async def test_legacy_doctor_only_drops_a_stored_particular(wired):
     landed = await _conversation(wired, tenant)
     assert landed.flow_step == fr.STEP_AWAITING_SERVICE
     assert landed.flow_selected_insurance is None
+
+
+# --------------------------------------------------------------------------
+# 10. Fix round 3: a Particular the patient names THIS turn is never dropped (R30 a)
+# --------------------------------------------------------------------------
+
+
+async def _legacy_named(wired, doctors, payload_fn, *, stored_type=None):
+    tenant = await _seed_tenant(wired, collect=True, doctors=doctors)
+    await _switch_off(wired, tenant)
+    await _onboard(tenant)
+    conv = await _conversation(wired, tenant)
+    async with wired() as session:
+        row = await session.get(Conversation, conv.id)
+        row.flow_attendee_name = ""
+        row.flow_state = FlowState.LLM
+        row.flow_step = None
+        row.flow_selected_type = stored_type
+        await session.commit()
+    await _hand_back(wired, tenant, await payload_fn(tenant))
+    return await _conversation(wired, tenant)
+
+
+_SOLE_CLINIC = [("Dra. Ana", ["Primeira Consulta", "Retorno"])]
+_MULTI_CLINIC = [
+    ("Dra. Ana", ["Primeira Consulta", "Retorno"]),
+    ("Dr. Beto", ["Primeira Consulta"]),
+]
+
+
+async def test_n1_legacy_particular_named_now_on_a_fresh_conversation_is_kept(wired):
+    async def payload(tenant):
+        return {"t": "Primeira Consulta", "i": "particular"}
+
+    landed = await _legacy_named(wired, _SOLE_CLINIC, payload)
+    assert landed.flow_step == fr.STEP_AWAITING_DAY  # not "Você vai usar convênio?"
+    assert landed.flow_selected_insurance == fr.LABEL_INSURANCE_PARTICULAR
+
+
+async def test_n2_legacy_particular_named_now_with_another_service_recorded_is_kept(wired):
+    async def payload(tenant):
+        return {"t": "Primeira Consulta", "i": "particular"}
+
+    landed = await _legacy_named(wired, _SOLE_CLINIC, payload, stored_type="Retorno")
+    assert landed.flow_step == fr.STEP_AWAITING_DAY
+    assert landed.flow_selected_insurance == fr.LABEL_INSURANCE_PARTICULAR
+
+
+async def test_n3_legacy_plan_named_now_is_kept_and_judged(wired):
+    async def payload(tenant):
+        return {"t": "Primeira Consulta", "i": "Unimed"}
+
+    landed = await _legacy_named(wired, _SOLE_CLINIC, payload)
+    assert landed.flow_step == fr.STEP_AWAITING_DAY
+    assert landed.flow_selected_insurance == "Unimed"
+
+
+async def test_n4_legacy_multi_doctor_particular_named_now_is_kept(wired):
+    async def payload(tenant):
+        doctor = await _professional(wired, tenant, "Dra. Ana")
+        return {"t": "Primeira Consulta", "p": str(doctor.id), "i": "particular"}
+
+    landed = await _legacy_named(wired, _MULTI_CLINIC, payload)
+    assert landed.flow_step == fr.STEP_AWAITING_DAY
+    assert landed.flow_selected_insurance == fr.LABEL_INSURANCE_PARTICULAR
+
+
+async def test_a_hand_back_named_now_and_a_clinic_without_a_catalog_keep_particular():
+    centro, sul = _units()
+    ana = _doctor(units=[centro, sul])
+    refused = _matrix(
+        "shared", ana, (CONSULTA_ID, sul, UNIMED), (CONSULTA_ID, sul, BRADESCO),
+        (CONSULTA_ID, sul, AMIL),
+    )
+    tenant = _tenant("shared", refused, [ana])
+    elsewhere = SimpleNamespace(
+        flow_selected_type="Ecocardiograma",
+        flow_selected_professional_id=ana.id,
+        flow_selected_unit_id=centro.id,
+    )
+    # The unit is still to be chosen (a list), the recorded triple is another one - but the patient
+    # said "particular" now: kept.
+    named = await fr.enter_guided_booking(
+        tenant,
+        _Agenda(),
+        "Consulta",
+        insurance=fr.LABEL_INSURANCE_PARTICULAR,
+        professionals=[ana],
+        recorded=elsewhere,
+        named_now=True,
+    )
+    assert named.flow_step == fu.STEP_AWAITING_UNIT
+    assert named.flow_selected_insurance == fr.LABEL_INSURANCE_PARTICULAR
+    # Stored (not named now): dropped, as R30 wants.
+    stored = await fr.enter_guided_booking(
+        tenant,
+        _Agenda(),
+        "Consulta",
+        insurance=fr.LABEL_INSURANCE_PARTICULAR,
+        professionals=[ana],
+        recorded=elsewhere,
+    )
+    assert stored.flow_selected_insurance is None
+    # No service at all (a clinic without a catalog): no Particular there can be the automatic
+    # one - nothing to re-ask.
+    solo = _doctor(units=[])
+    typeless = await fr.enter_guided_booking(
+        _tenant(doctors=[solo]),
+        _Agenda(),
+        None,
+        insurance=fr.LABEL_INSURANCE_PARTICULAR,
+        professionals=[solo],
+        recorded=elsewhere,
+    )
+    assert typeless.flow_selected_insurance == fr.LABEL_INSURANCE_PARTICULAR
