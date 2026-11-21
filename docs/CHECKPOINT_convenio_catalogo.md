@@ -1,5 +1,17 @@
 # CHECKPOINT — Catálogo canônico de convênios + aceitação por profissional + convênio primeiro no fluxo
 
+> **Atualização 2026-11-21 — TASK-088: a ordem "convênio primeiro" de 2026-09-23 foi SUBSTITUÍDA pelo dono em 2026-11-20.**
+> O fluxo agora é `pra quem → serviço → médico → unidade → convênio → dia → horário`: o convênio é a **última**
+> escolha, filtrado pela combinação (serviço, médico, unidade) já conhecida; nenhum aceito → Particular direto com um
+> aviso curto. Por isso, **o item 3 da §1 e a §5 abaixo (convênio logo depois do pra-quem, médicos marcados com "✅ Aceita
+> seu convênio", "Escolher serviço" igual a "Escolher médico", a regra "Sim, agendar com convênio sem resposta pergunta
+> ali") descrevem o desenho ANTIGO** e ficam como histórico. Continuam valendo o catálogo, a aceitação por profissional, o
+> schema, o contrato do hub e a matriz de aceitação (TASK-086), que agora é lida na combinação (`plans_accepted_for`).
+> Mudou também: as marcas "aceita seu convênio" saíram da lista de médicos; os handlers de `STEP_AWAITING_CATALOG_SERVICE` /
+> `STEP_AWAITING_SERVICE_PROFESSIONAL` deixaram de ser "só para conversas paradas" e são o caminho principal. Ordem,
+> filtro, regra do Particular, compatibilidade e o que foi removido:
+> [CHECKPOINT_ordem_agendar_servico_primeiro.md](CHECKPOINT_ordem_agendar_servico_primeiro.md). Local, sem push/deploy.
+
 > **Atualização 2026-11-18 (4ª rodada) — TASK-085 R U1b: a opção "não cobra sinal" foi APAGADA.**
 > Substitui o "compat por 1 release" da nota de U1 abaixo. Saíram: a rota `PATCH
 > /tenants/me/insurance-plans/{plan_id}`, o schema `TenantInsurancePlanDepositUpdate`, o

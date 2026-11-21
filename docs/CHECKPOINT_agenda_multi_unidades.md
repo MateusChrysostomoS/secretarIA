@@ -19,6 +19,11 @@ necessária). Decisão do dono na junção: na tela "Remarcar" depois do cancela
 valem os da unidade onde a lista é lida (ver `CHECKPOINT_service_days.md`). Registro: `../tasks/INTEGRACAO-MULTI-UNIDADES/`.
 Sem `main`, sem push, sem deploy.
 
+**TASK-088 (2026-11-21, só LOCAL, branch `task/TASK-088`):** a ordem do Agendar passou a ser serviço → médico → **unidade** →
+convênio → dia (o convênio vem DEPOIS da unidade e não estreita mais as unidades); o aviso "apenas na unidade X" ficou em negrito
+(`*apenas na unidade X*`); o Sim/Não "Pelo convênio X ... apenas na unidade Y" foi removido. Ver
+[CHECKPOINT_ordem_agendar_servico_primeiro.md](CHECKPOINT_ordem_agendar_servico_primeiro.md).
+
 ## Por quê
 
 1. **Multi-unidades.** Médico que usa a secretarIA como assistente pessoal atende em mais de um lugar. Antes,
@@ -294,8 +299,9 @@ escrita iniciado pelo paciente respeitam a regra):
 
 - 2+ unidades permitidas: a lista de hoje, só com as permitidas.
 - Médico que atende em 2+ unidades e o filtro deixa **1**: passo de confirmação com os botões fixos `✅ Sim` / `❌ Não`
-  e o texto exato "O serviço {serviço} feito por {médico} é feito apenas na unidade {unidade}, em {endereço}. Você
-  confirma essa unidade?". Sim → dias daquela unidade (`flow_selected_unit_id`); Não → lista de médicos **que fazem o
+  e o texto exato "O serviço {serviço} feito por {médico} é feito *apenas na unidade {unidade}*, em {endereço}. Você
+  confirma essa unidade?" (desde a TASK-088 o trecho "apenas na unidade {unidade}" vai em negrito do WhatsApp, entre
+  asteriscos). Sim → dias daquela unidade (`flow_selected_unit_id`); Não → lista de médicos **que fazem o
   serviço** (sem o médico recusado; clínica de um médico só, ou só um faz o serviço → lista de serviços).
 - Médico com 1 unidade só, ou sem nenhuma marcação: fluxo de antes, byte a byte (sem pergunta).
 - 0 unidades válidas (marcada(s) fechada(s)/desativada(s)): o serviço **não** some da lista (a clínica precisa ver o
