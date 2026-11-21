@@ -74,3 +74,30 @@ def test_no_features_block_no_sentence():
     bare = replace(_config(3), clinic_features=None)
     for prompt in _prompts(bare):
         assert prompts.INSURANCE_ACCEPTANCE_VARIES not in prompt
+
+
+# TASK-088 A2 T23: these instructions belong in both rendered prompts when there are plans.
+@pytest.mark.parametrize("version", ["v1", "v2"])
+def test_both_prompts_explain_payment_uncertainty_and_refer_to_the_clinic(version):
+    prompt = dict(zip(("v1", "v2"), _prompts(_config(3)), strict=True))[version]
+    assert prompt.count("Se perguntarem como funciona o pagamento com convênio") == 1
+    for instruction in (
+        "diga que você não sabe como cada convênio funciona com o pagamento nesta clínica",
+        "cobertura, coparticipação, se há algo a pagar",
+        "isso depende de cada convênio e de cada clínica",
+        "a clínica confirma",
+        "Não prometa cobertura nem valor para quem vai usar convênio",
+        "Se a clínica já informou uma condição de pagamento, repasse somente o que ela informou",
+    ):
+        assert instruction in prompt
+
+
+def test_particular_only_clinic_gets_no_payment_sentence():
+    for prompt in _prompts(_config(0)):
+        assert "Se perguntarem como funciona o pagamento com convênio" not in prompt
+
+
+def test_no_features_block_no_payment_sentence():
+    bare = replace(_config(3), clinic_features=None)
+    for prompt in _prompts(bare):
+        assert "Se perguntarem como funciona o pagamento com convênio" not in prompt

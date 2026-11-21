@@ -525,6 +525,15 @@ INSURANCE_ACCEPTANCE_VARIES = (
     "que um convênio vale para um serviço; quem confere é o fluxo."
 )
 
+# Per-plan payment notes are rendered by the booking flow. This block adds no plan data.
+INSURANCE_PAYMENT_UNKNOWN = (
+    "Se perguntarem como funciona o pagamento com convênio, diga que você não sabe como cada "
+    "convênio funciona com o pagamento nesta clínica (cobertura, coparticipação, se há algo "
+    "a pagar), pois isso depende de cada convênio e de cada clínica. Diga que a clínica confirma "
+    "as condições. Não prometa cobertura nem valor para quem vai usar convênio. Se a clínica já "
+    "informou uma condição de pagamento, repasse somente o que ela informou."
+)
+
 
 def _format_clinic_features(config: TenantRuntimeConfig) -> str:
     """The "RECURSOS DESTA CLÍNICA" block: what is ON / OFF here, and the ban on the OFF ones."""
@@ -551,7 +560,11 @@ def _format_clinic_features(config: TenantRuntimeConfig) -> str:
         'nunca fale de sinal, Pix, pagamento antecipado nem "aguardando pagamento"). Sobre '
         "convênio, só confirme os cadastrados; se perguntarem por outro, diga que não consta "
         "e ofereça a recepção."
-        + (f" {INSURANCE_ACCEPTANCE_VARIES}" if features.insurance_plan_count else "")
+        + (
+            f" {INSURANCE_ACCEPTANCE_VARIES} {INSURANCE_PAYMENT_UNKNOWN}"
+            if features.insurance_plan_count
+            else ""
+        )
     )
 
 
