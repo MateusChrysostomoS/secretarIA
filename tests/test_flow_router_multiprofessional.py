@@ -217,11 +217,8 @@ async def test_single_professional_keeps_configured_menu():
 
 
 def test_menu_buttons_for_helper():
-    assert menu_buttons_for(_tenant(), True) == [
-        BTN_CHOOSE_PROFESSIONAL,
-        BTN_CHOOSE_SERVICE,
-        "Outro",
-    ]
+    # TASK-088: "Escolher médico" left the menu - the booking opens with the service.
+    assert menu_buttons_for(_tenant(), True) == [BTN_CHOOSE_SERVICE, "Outro"]
     assert menu_buttons_for(_tenant(), False) == ["Serviços e Custo", "Horários", "Outro"]
 
 
@@ -327,10 +324,11 @@ async def test_cancel_label_wins_before_multi_doctor_menu_dispatch():
 
 
 async def test_book_label_wins_before_multi_doctor_menu_dispatch():
-    # "Agendar" (the greeting's fixed trio) must resolve straight to the
-    # doctor list on a multi-doctor tenant, exactly like tapping "Escolher
-    # médico" - it is matched in route() BEFORE the multi-doctor menu's own
-    # dispatch, same place-it-anywhere precedent as Remarcar/Cancelar above.
+    # "Agendar" (the greeting's fixed pair) must resolve straight to the
+    # booking's first list on a multi-doctor tenant - since TASK-088 the clinic's
+    # service catalog (the doctor comes after the service). It is matched in
+    # route() BEFORE the multi-doctor menu's own dispatch, same place-it-anywhere
+    # precedent as Remarcar/Cancelar above.
     res = await _route_past_attendee(
         _conversation(flow_state=FlowState.IDLE),
         _tenant(),
@@ -340,23 +338,32 @@ async def test_book_label_wins_before_multi_doctor_menu_dispatch():
     )
     assert res.action == "reply"
     assert res.flow_state == FlowState.SERVICE_CATALOG
-    assert res.flow_step == STEP_AWAITING_PROFESSIONAL
+    assert res.flow_step == flow_router.STEP_AWAITING_CATALOG_SERVICE
 
 
 # --------------------------------------------------------------------------
-# "Escolher médico": tappable list -> greeting -> services
+# The doctor list (reached after a service, by the draft/back paths): tappable
+# rows -> greeting -> services. The "Escolher médico" door itself is gone
+# (TASK-088): a typed one opens the service-first booking.
 # --------------------------------------------------------------------------
 
 
-async def test_choose_doctor_lists_professionals_with_specialty_description():
-    profs = _professionals()
+async def test_a_typed_choose_doctor_opens_the_service_first_booking():
     res = await _route_past_attendee(
         _conversation(flow_state=FlowState.MENU),
         _tenant(),
         None,
         BTN_CHOOSE_PROFESSIONAL,
-        professionals=profs,
+        professionals=_professionals(),
     )
+    assert res.action == "reply"
+    assert res.flow_state == FlowState.SERVICE_CATALOG
+    assert res.flow_step == flow_router.STEP_AWAITING_CATALOG_SERVICE
+
+
+async def test_doctor_list_has_professionals_with_specialty_description():
+    profs = _professionals()
+    res = flow_router._enter_professional_list(_tenant(), profs)
     assert res.action == "reply"
     assert res.flow_state == FlowState.SERVICE_CATALOG
     assert res.flow_step == STEP_AWAITING_PROFESSIONAL
@@ -436,16 +443,15 @@ async def test_stale_selected_professional_delegates_llm():
 
 
 # --------------------------------------------------------------------------
-# "Escolher serviço" since the convênio-first order (owner, 2026-09-23):
-# convênio -> profissional -> serviço, so this entry opens the SAME doctor list
-# as "Escolher médico". The service-first handlers below stay only for a
-# conversation parked on STEP_AWAITING_CATALOG_SERVICE when the order shipped.
+# "Escolher serviço" since TASK-088 (owner, 2026-11-20): serviço -> médico -> unidade ->
+# convênio, so this is THE booking entry again - the clinic-wide service list, whose pick
+# then narrows the doctors (the doctor list is the second step, not the first).
 # --------------------------------------------------------------------------
 
 
-async def test_choose_service_now_opens_the_doctor_list_like_choose_doctor():
-    """Not the clinic-wide service list any more: the service is chosen AFTER
-    the doctor, and the doctor list shows every doctor."""
+async def test_choose_service_opens_the_clinic_wide_service_list():
+    """The service is chosen BEFORE the doctor: the unified catalog of every doctor's
+    services, deduplicated, with no "Não sei" row (that help node needs a doctor)."""
     profs = _professionals()
     res = await _route_past_attendee(
         _conversation(flow_state=FlowState.MENU),
@@ -456,9 +462,9 @@ async def test_choose_service_now_opens_the_doctor_list_like_choose_doctor():
     )
     assert res.action == "reply"
     assert res.flow_state == FlowState.SERVICE_CATALOG
-    assert res.flow_step == STEP_AWAITING_PROFESSIONAL
+    assert res.flow_step == flow_router.STEP_AWAITING_CATALOG_SERVICE
     titles = [row[1] for row in res.bubbles[0].rows]
-    assert titles[:2] == ["🥼 Dra. Ana", "🥼 Dr. Bruno"]
+    assert "🏥 Consulta Cardio" in titles and "🏥 Consulta Geral" in titles
 
 
 async def test_parked_catalog_service_step_still_resumes_the_deduplicated_catalog():
@@ -826,13 +832,7 @@ async def test_manage_appointment_label_wins_before_multi_doctor_menu_dispatch()
 
 async def test_professional_list_offers_dont_know_last_row():
     profs = _professionals()
-    res = await _route_past_attendee(
-        _conversation(flow_state=FlowState.MENU),
-        _tenant(),
-        None,
-        BTN_CHOOSE_PROFESSIONAL,
-        professionals=profs,
-    )
+    res = flow_router._enter_professional_list(_tenant(), profs)
     rows = res.bubbles[0].rows
     assert rows[-1] == ("profhelp|0", LABEL_DONT_KNOW, "Te ajudo a escolher")
     assert all(row[0].startswith("prof|") for row in rows[:-1])
@@ -852,13 +852,7 @@ async def test_professional_list_reserves_help_slot_at_whatsapp_cap():
         )
         for i in range(12)
     ]
-    res = await _route_past_attendee(
-        _conversation(flow_state=FlowState.MENU),
-        _tenant(),
-        None,
-        BTN_CHOOSE_PROFESSIONAL,
-        professionals=many,
-    )
+    res = flow_router._enter_professional_list(_tenant(), many)
     rows = res.bubbles[0].rows
     assert len(rows) == 10
     assert rows[-1][0] == "profhelp|0"

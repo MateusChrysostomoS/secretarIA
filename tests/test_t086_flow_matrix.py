@@ -529,15 +529,29 @@ async def test_known_service_lists_only_plans_accepted_somewhere(mode):
     )
     tenant = _tenant(mode, refused, doctors)
 
-    # Doctor chosen: the "Sim" on the service card asks the convênio, filtered by Ana's matrix.
-    result = await fr.route(
+    # Doctor chosen (TASK-088 order): the "Sim" on the service card asks the UNIT first, then the
+    # convênio, filtered by Ana's matrix at that unit.
+    asked = await fr.route(
         _conversation(flow_selected_professional_id=ana.id, flow_selected_insurance=None),
         tenant,
         _Agenda(),
         fr.LABEL_BOOK_SERVICE,
         professionals=doctors,
     )
+    assert asked.flow_step == fu.STEP_AWAITING_UNIT
+    result = await fr.route(
+        _conversation(
+            flow_step=fu.STEP_AWAITING_UNIT,
+            flow_selected_professional_id=ana.id,
+            flow_selected_insurance=None,
+        ),
+        tenant,
+        _Agenda(),
+        f"Centro (unit|{centro.id})",
+        professionals=doctors,
+    )
     assert result.flow_step == fr.STEP_AWAITING_INSURANCE
+    assert result.flow_selected_unit_id == centro.id
     bubble = _list(result)
     ids = [r[0] for r in bubble.rows]
     assert "ins|Unimed" not in ids and "ins|Bradesco" in ids
@@ -546,6 +560,7 @@ async def test_known_service_lists_only_plans_accepted_somewhere(mode):
         "service": "Ecocardiograma",
         "unit_marks": True,
         "professional_id": str(ana.id),
+        "unit_id": str(centro.id),
     }
     _portal_matches(bubble, tenant, doctors)
     # Doctor not chosen (an AI draft with the service only): accepted by ANY doctor offering it.
@@ -558,19 +573,21 @@ async def test_known_service_lists_only_plans_accepted_somewhere(mode):
         assert "ins|Unimed" in anyone_ids  # Bruno takes it
     assert "ins|Bradesco" in anyone_ids
     _portal_matches(anyone, tenant, doctors)
-    # Main path (no service yet): every plan, scope as today.
+    # No booking yet (the retired first question): every plan, scope as before.
     start = _list(fr._enter_insurance(tenant))
     assert {"ins|Unimed", "ins|Bradesco"} <= {r[0] for r in start.rows}
     assert start.source.scope == {}
 
 
 # --------------------------------------------------------------------------
-# A5: the unit step filtered by the convênio
+# A5 (TASK-088 order): the unit comes BEFORE the convênio, so it is never narrowed by it - the
+# plan is judged AT the unit the patient picks (a convênio that arrived early: kept when accepted
+# there, asked again with a line when not, Particular saying so when nothing else is accepted).
 # --------------------------------------------------------------------------
 
 
 @pytest.mark.parametrize("mode", MODES)
-async def test_one_unit_left_by_the_convenio_asks_with_the_convenio_text(mode):
+async def test_a_known_convenio_does_not_narrow_the_unit_it_is_judged_at_the_unit(mode):
     centro, sul, _norte = _units()
     ana = _doctor(units=[centro, sul])
     tenant = _tenant(mode, _matrix(mode, ana, (ECO_ID, centro, UNIMED)), [ana])
@@ -578,26 +595,39 @@ async def test_one_unit_left_by_the_convenio_asks_with_the_convenio_text(mode):
     result = await fr.route(
         _conversation(), tenant, agenda, fr.LABEL_BOOK_SERVICE, professionals=[ana]
     )
-    assert result.flow_step == fu.STEP_AWAITING_UNIT_CONFIRM
-    assert _menu(result).body == (
-        "Pelo convênio Unimed, o serviço Ecocardiograma com Dra. Ana é atendido apenas na "
-        "unidade Zona Sul, em Av. B, 20. Você confirma essa unidade?"
-    )
+    # Both units are offered - the convênio does not leave one (the old convênio-specific
+    # Sim/Não card is gone from this path) - and nothing is read or sent to the clinic.
+    assert result.flow_step == fu.STEP_AWAITING_UNIT
+    assert [r[0] for r in _list(result).rows][:2] == [f"unit|{centro.id}", f"unit|{sul.id}"]
     assert result.notify_no_unit is None and agenda.log["days"] == 0
-    # "Sim" stores Zona Sul and opens its days.
-    yes = await fr.route(
-        _conversation(flow_step=fu.STEP_AWAITING_UNIT_CONFIRM),
+    # Zona Sul accepts the plan: kept, and its days open.
+    at_sul = await fr.route(
+        _conversation(flow_step=fu.STEP_AWAITING_UNIT),
         tenant,
         agenda,
-        fr.LABEL_YES,
+        f"Zona Sul (unit|{sul.id})",
         professionals=[ana],
     )
-    assert yes.flow_step == fr.STEP_AWAITING_DAY
-    assert yes.flow_selected_unit_id == sul.id
+    assert at_sul.flow_step == fr.STEP_AWAITING_DAY
+    assert at_sul.flow_selected_unit_id == sul.id
+    assert at_sul.flow_selected_insurance == "Unimed"
+    # Centro does not: never Particular in silence - the filtered list, with a line on top.
+    at_centro = await fr.route(
+        _conversation(flow_step=fu.STEP_AWAITING_UNIT),
+        tenant,
+        agenda,
+        f"Centro (unit|{centro.id})",
+        professionals=[ana],
+    )
+    assert at_centro.flow_step == fr.STEP_AWAITING_INSURANCE
+    assert at_centro.flow_selected_unit_id == centro.id
+    assert at_centro.flow_selected_insurance is None
+    assert "ins|Unimed" not in [r[0] for r in _list(at_centro).rows]
+    assert _list(at_centro).body == fr.INSURANCE_REFUSED_LIST_UNIT
 
 
 @pytest.mark.parametrize("mode", MODES)
-async def test_the_unit_list_offers_only_units_that_accept_the_convenio(mode):
+async def test_the_unit_list_offers_every_unit_of_the_service_whatever_the_convenio(mode):
     centro, sul, norte = _units()
     ana = _doctor(units=[centro, sul, norte])
     tenant = _tenant(mode, _matrix(mode, ana, (ECO_ID, norte, UNIMED)), [ana])
@@ -606,9 +636,8 @@ async def test_the_unit_list_offers_only_units_that_accept_the_convenio(mode):
     )
     assert result.flow_step == fu.STEP_AWAITING_UNIT
     ids = [r[0] for r in _list(result).rows]
-    assert f"unit|{norte.id}" not in ids
-    assert ids[:2] == [f"unit|{centro.id}", f"unit|{sul.id}"]
-    # A typed/tapped refused unit is not taken.
+    assert ids[:3] == [f"unit|{centro.id}", f"unit|{sul.id}", f"unit|{norte.id}"]
+    # A tapped unit is taken even where the plan is refused (the plan is judged at it, next).
     tapped = await fr.route(
         _conversation(flow_step=fu.STEP_AWAITING_UNIT),
         tenant,
@@ -616,11 +645,12 @@ async def test_the_unit_list_offers_only_units_that_accept_the_convenio(mode):
         f"Norte (unit|{norte.id})",
         professionals=[ana],
     )
-    assert tapped.action == "delegate_llm"
+    assert tapped.action == "reply"
+    assert tapped.flow_selected_unit_id == norte.id
 
 
 @pytest.mark.parametrize("mode", MODES)
-async def test_zero_units_by_the_convenio_never_alert_the_clinic(mode):
+async def test_a_known_convenio_refused_at_every_unit_never_alerts_the_clinic(mode):
     centro, sul, _norte = _units()
     ana = _doctor(units=[centro, sul])
     bruno = _doctor("Dr. Bruno", units=[centro])
@@ -638,15 +668,36 @@ async def test_zero_units_by_the_convenio_never_alert_the_clinic(mode):
         fr.LABEL_BOOK_SERVICE,
         professionals=doctors,
     )
-    assert result.flow_step == fr.STEP_AWAITING_PLAN_REFUSED
-    assert result.action == "reply"
-    assert result.notify_no_unit is None  # R4: nothing is misconfigured
-    assert result.flow_selected_unit_id is None
+    # The units first (TASK-088); then, at one of them, the plan is asked again - R4: nothing is
+    # misconfigured, the clinic is NOT told.
+    assert result.flow_step == fu.STEP_AWAITING_UNIT
+    assert result.notify_no_unit is None
+    at_sul = await fr.route(
+        _conversation(flow_step=fu.STEP_AWAITING_UNIT, flow_selected_professional_id=ana.id),
+        tenant,
+        _Agenda(),
+        f"Zona Sul (unit|{sul.id})",
+        professionals=doctors,
+    )
+    assert at_sul.flow_step == fr.STEP_AWAITING_INSURANCE
+    assert at_sul.notify_no_unit is None
+    assert at_sul.flow_selected_unit_id == sul.id
+
+    # The "não atende este convênio" step itself (still reached by a refused service row and by
+    # the final guard) keeps its buttons and its alternatives.
+    card = fr._enter_plan_refused(
+        _conversation(flow_selected_professional_id=ana.id),
+        tenant,
+        doctors,
+        ana,
+        "Ecocardiograma",
+    )
+    assert card.notify_no_unit is None and card.flow_selected_unit_id is None
     if mode == "shared":
         # The clinic matrix refuses Unimed for Eco at Centro AND Zona Sul: nobody else either.
-        assert _menu(result).labels == ["Outro serviço", "Trocar convênio"]
+        assert _menu(card).labels == ["Outro serviço", "Trocar convênio"]
     else:
-        assert _menu(result).labels == ["Outro médico", "Outro serviço", "Trocar convênio"]
+        assert _menu(card).labels == ["Outro médico", "Outro serviço", "Trocar convênio"]
         # A6: "Outro médico" lists only Carla (Bruno is refused too).
         other = await fr.route(
             _conversation(
@@ -688,20 +739,27 @@ async def test_the_not_accepted_step_buttons_lead_to_service_and_convenio():
         _conversation(**conv), tenant, _Agenda(), "qual o endereço?", professionals=[ana]
     )
     assert talk.action == "delegate_llm"
-    # Resumed later: the card again, while it still applies.
+    # Resumed later (TASK-088): the day step decides afresh - the plan is still refused at the
+    # doctor's only unit, so it asks the convênio again, filtered, with its line (the card is only
+    # reached by a refused service row now).
     resumed = await fr.resume_bubbles(_conversation(**conv), tenant, _Agenda(), [ana])
-    assert resumed.flow_step == fr.STEP_AWAITING_PLAN_REFUSED
+    assert resumed.flow_step == fr.STEP_AWAITING_INSURANCE
+    assert "ins|Unimed" not in [r[0] for r in _list(resumed).rows]
 
 
 @pytest.mark.parametrize("mode", MODES)
 async def test_a_doctor_without_units_asks_the_no_unit_slice(mode):
     ana = _doctor(units=[])
     tenant = _tenant(mode, _matrix(mode, ana, (ECO_ID, None, UNIMED)), [ana])
+    # The plan the patient already gave is refused in the "no unit" slice: asked again, filtered,
+    # and the line has no "nessa unidade" (the doctor has no units).
     refused = await fr.route(
         _conversation(), tenant, _Agenda(), fr.LABEL_BOOK_SERVICE, professionals=[ana]
     )
-    assert refused.flow_step == fr.STEP_AWAITING_PLAN_REFUSED
+    assert refused.flow_step == fr.STEP_AWAITING_INSURANCE
     assert refused.notify_no_unit is None
+    assert "ins|Unimed" not in [r[0] for r in _list(refused).rows]
+    assert _list(refused).body == fr.INSURANCE_REFUSED_LIST
     ok = await fr.route(
         _conversation(flow_selected_type="Consulta"),
         tenant,
@@ -785,7 +843,9 @@ async def test_the_final_guard_refuses_and_reopens_the_convenio(mode, armed):
     assert result.flow_step == fr.STEP_AWAITING_INSURANCE
     assert result.flow_selected_type == "Ecocardiograma"
     assert result.flow_selected_professional_id == ana.id
-    assert result.flow_selected_unit_id is None
+    # TASK-088: the unit is chosen BEFORE the convênio, so reopening the convênio keeps it (the
+    # list is for that unit); day and time are the ones dropped.
+    assert result.flow_selected_unit_id == sul.id
     assert result.flow_selected_slot is None
     notice = result.bubbles[0]
     assert isinstance(notice, TextBubble)
@@ -793,8 +853,9 @@ async def test_the_final_guard_refuses_and_reopens_the_convenio(mode, armed):
         "Desculpe, o convênio Unimed não é mais aceito para Ecocardiograma com Dra. Ana na "
         "unidade Zona Sul. Nada foi agendado. Escolha outro convênio ou Particular:"
     )
-    # Ana still takes Unimed for Eco at Centro: the reopened list keeps it.
-    assert "ins|Unimed" in [r[0] for r in _list(result).rows]
+    # TASK-088: the reopened list is the one for THIS unit (Zona Sul), where Unimed is now
+    # refused: only what Zona Sul accepts is offered (Ana still takes it at Centro).
+    assert [r[0] for r in _list(result).rows] == ["ins|Bradesco", "ins|particular", "ins|outro"]
     [event] = [e for e in logs if e["event"] == "flow_booking_insurance_refused"]
     assert event["plan_id"] == UNIMED and event["unit_id"] == str(sul.id)
     assert "Unimed" not in str(event)

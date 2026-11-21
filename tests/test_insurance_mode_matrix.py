@@ -55,13 +55,11 @@ from secretaria.models.professional import Professional  # noqa: E402
 from secretaria.schemas.webhook import inbound_routing_text  # noqa: E402
 from secretaria.services.attendee import LABEL_ATTENDEE_SELF  # noqa: E402
 from secretaria.services.flow_router import (  # noqa: E402
-    INSURANCE_ACCEPTED_MARK,
     INSURANCE_SKIP_EMPTY_CATALOG,
     INSURANCE_SKIP_NO_MODE,
     LABEL_BOOK,
     STEP_AWAITING_ATTENDEE_CHOICE,
     STEP_AWAITING_INSURANCE,
-    STEP_AWAITING_PROFESSIONAL,
     _insurance_step_skip_reason,
     enter_guided_booking,
     route,
@@ -168,6 +166,42 @@ async def _book_to_insurance_or_professional(snapshot, professionals):
     return after, _conv
 
 
+async def _book_to_the_convenio(snapshot, professionals, doctor=None, service="Consulta"):
+    """TASK-088 order: pra-quem "Sim" -> the SERVICE -> [the doctor] -> the card -> "Sim, agendar".
+
+    Returns (result, conv): the result after the card's "Sim" - the convênio list when the doctor
+    accepts any plan, else (Particular direct) the day step - and the conversation builder."""
+    from secretaria.services.flow_router import (
+        LABEL_BOOK_SERVICE,
+        STEP_AWAITING_SERVICE_CONFIRM,
+        STEP_AWAITING_SERVICE_PROFESSIONAL,
+    )
+
+    after, conv = await _book_to_insurance_or_professional(snapshot, professionals)
+    row = next(r for r in after.bubbles[0].rows if r[0] == f"svc|{service}")
+    result = await route(
+        conv(after), snapshot, None, inbound_routing_text(row[1], row[0]),
+        professionals=professionals,
+    )
+    if result.flow_step == STEP_AWAITING_SERVICE_PROFESSIONAL:
+        row = next(r for r in result.bubbles[0].rows if r[0] == f"prof|{doctor.id}")
+        result = await route(
+            conv(result), snapshot, None, inbound_routing_text(row[1], row[0]),
+            professionals=professionals,
+        )
+    assert result.flow_step == STEP_AWAITING_SERVICE_CONFIRM
+    asked = await route(
+        conv(result), snapshot, None, LABEL_BOOK_SERVICE, professionals=professionals
+    )
+    return asked, conv
+
+
+def _plan_titles(result) -> list[str]:
+    """The plans a convênio list offers (the two fixed rows left out)."""
+    assert result.flow_step == STEP_AWAITING_INSURANCE, result.flow_step
+    return [row[1] for row in result.bubbles[0].rows[:-2]]
+
+
 # --------------------------------------------------------------------------
 # 1. `insurance_mode` x catalog x professionals - representative matrix
 # --------------------------------------------------------------------------
@@ -197,9 +231,9 @@ async def test_mode_none_skips_regardless_of_catalog(db):
     assert after.flow_step != STEP_AWAITING_INSURANCE
 
 
-async def test_mode_shared_marks_every_active_professional_no_rows_needed(db):
+async def test_mode_shared_lists_the_plan_for_every_active_professional_no_rows_needed(db):
     """`shared`: nobody has (or needs) a `professional_insurance_plans` row -
-    the mode alone marks everyone who is active."""
+    the mode alone makes every active doctor accept the clinic's plans."""
     async with db() as session:
         tenant = await _tenant(
             session,
@@ -218,20 +252,9 @@ async def test_mode_shared_marks_every_active_professional_no_rows_needed(db):
 
     professionals = [ana, bruno]
     snapshot = _flow_snapshot(tenant, professionals, insurance)
-    after, conv = await _book_to_insurance_or_professional(snapshot, professionals)
-    assert after.flow_step == STEP_AWAITING_INSURANCE
-    unimed_row = next(row for row in after.bubbles[0].rows if row[1] == "Unimed")
-    doctors = await route(
-        conv(after),
-        snapshot,
-        None,
-        inbound_routing_text(unimed_row[1], unimed_row[0]),
-        professionals=professionals,
-    )
-    assert doctors.flow_step == STEP_AWAITING_PROFESSIONAL
-    by_id = {row[0]: row[2] for row in doctors.bubbles[0].rows}
     for professional in professionals:
-        assert str(by_id[f"prof|{professional.id}"]).startswith(INSURANCE_ACCEPTED_MARK)
+        asked, _conv = await _book_to_the_convenio(snapshot, professionals, doctor=professional)
+        assert _plan_titles(asked) == ["Unimed"]
 
 
 async def test_mode_clinic_with_exceptions_inherit_all_default(db):
@@ -259,19 +282,12 @@ async def test_mode_clinic_with_exceptions_inherit_all_default(db):
 
     professionals = [never_customized, explicitly_none]
     snapshot = _flow_snapshot(tenant, professionals, insurance)
-    after, conv = await _book_to_insurance_or_professional(snapshot, professionals)
-    assert after.flow_step == STEP_AWAITING_INSURANCE
-    unimed_row = next(row for row in after.bubbles[0].rows if row[1] == "Unimed")
-    doctors = await route(
-        conv(after),
-        snapshot,
-        None,
-        inbound_routing_text(unimed_row[1], unimed_row[0]),
-        professionals=professionals,
-    )
-    by_id = {row[0]: row[2] for row in doctors.bubbles[0].rows}
-    assert str(by_id[f"prof|{never_customized.id}"]).startswith(INSURANCE_ACCEPTED_MARK)
-    assert not str(by_id[f"prof|{explicitly_none.id}"] or "").startswith(INSURANCE_ACCEPTED_MARK)
+    inherits, _conv = await _book_to_the_convenio(snapshot, professionals, doctor=never_customized)
+    assert _plan_titles(inherits) == ["Unimed"]
+    # TASK-088: the doctor who accepts NONE is not asked at all - Particular direct.
+    refuses, _conv = await _book_to_the_convenio(snapshot, professionals, doctor=explicitly_none)
+    assert refuses.flow_step != STEP_AWAITING_INSURANCE
+    assert refuses.flow_selected_insurance == "Particular"
     assert unimed_plan_id  # sanity: the plan row really exists
 
 
@@ -300,20 +316,13 @@ async def test_mode_independent_union_of_doctors_no_clinic_inheritance(db):
 
     professionals = [ana, bruno]
     snapshot = _flow_snapshot(tenant, professionals, insurance)
-    after, conv = await _book_to_insurance_or_professional(snapshot, professionals)
-    assert after.flow_step == STEP_AWAITING_INSURANCE
-    assert [row[1] for row in after.bubbles[0].rows[:-2]] == ["Amil"]
-    amil_row = next(row for row in after.bubbles[0].rows if row[1] == "Amil")
-    doctors = await route(
-        conv(after),
-        snapshot,
-        None,
-        inbound_routing_text(amil_row[1], amil_row[0]),
-        professionals=professionals,
-    )
-    by_id = {row[0]: row[2] for row in doctors.bubbles[0].rows}
-    assert str(by_id[f"prof|{ana.id}"]).startswith(INSURANCE_ACCEPTED_MARK)
-    assert not str(by_id[f"prof|{bruno.id}"] or "").startswith(INSURANCE_ACCEPTED_MARK)
+    # Ana's own pick is the whole offer; Bruno picked nothing, so for him nothing is accepted
+    # (the clinic's own list is ignored): Particular direct.
+    asked, _conv = await _book_to_the_convenio(snapshot, professionals, doctor=ana)
+    assert _plan_titles(asked) == ["Amil"]
+    none, _conv = await _book_to_the_convenio(snapshot, professionals, doctor=bruno)
+    assert none.flow_step != STEP_AWAITING_INSURANCE
+    assert none.flow_selected_insurance == "Particular"
 
 
 async def test_empty_catalog_skips_even_with_mode_chosen(db):
@@ -481,13 +490,13 @@ async def test_clinic_custom_plan_appears_in_patient_list_and_can_toggle_deposit
         ]
 
     snapshot = _flow_snapshot(tenant, [solo], insurance)
-    after, conv = await _book_to_insurance_or_professional(snapshot, [solo])
-    assert after.flow_step == STEP_AWAITING_INSURANCE
+    after, conv = await _book_to_the_convenio(snapshot, [solo])
+    assert _plan_titles(after) == ["Convênio da Prefeitura"]
     row = next(row for row in after.bubbles[0].rows if row[1] == "Convênio da Prefeitura")
-    doctors = await route(
+    answered = await route(
         conv(after), snapshot, None, inbound_routing_text(row[1], row[0]), professionals=[solo]
     )
-    assert str(doctors.flow_selected_insurance) == "Convênio da Prefeitura"
+    assert str(answered.flow_selected_insurance) == "Convênio da Prefeitura"
 
 
 async def test_professional_custom_plan_independent_mode(db):

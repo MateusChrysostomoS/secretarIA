@@ -1283,7 +1283,7 @@ async def test_empty_draft_insurance_survives_complete_attendee_flow(
         LABEL_ATTENDEE_OTHER,
         LABEL_ATTENDEE_SELF,
     )
-    from secretaria.services.flow_router import STEP_AWAITING_PROFESSIONAL, route
+    from secretaria.services.flow_router import STEP_AWAITING_CATALOG_SERVICE, route
 
     tenant, ana, bruno, patient, conversation = await _seed(db)
     async with db() as session:
@@ -1314,7 +1314,10 @@ async def test_empty_draft_insurance_survives_complete_attendee_flow(
         )
     async with db() as session:
         conv = await session.get(Conversation, conversation.id)
-        assert conv.flow_step == STEP_AWAITING_PROFESSIONAL
+        # TASK-088: pra-quem answered -> the booking's first list is the SERVICE catalog (the
+        # convênio the draft held rides along, to be checked once the unit is known).
+        assert conv.flow_step == STEP_AWAITING_CATALOG_SERVICE
+        assert conv.flow_selected_insurance == "Unimed"
         from secretaria.services.attendee import ATTENDEE_SELF
 
         assert conv.flow_attendee_name == ("Pessoa Teste" if other else ATTENDEE_SELF)
