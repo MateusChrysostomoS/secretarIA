@@ -641,6 +641,36 @@ async def _resolve(
         flow_selected_unit_id=getattr(conversation, "flow_selected_unit_id", None),
     )
 
+    # R29 (TASK-088 fix round 1): a STORED "Particular" (not one this draft names) may be the
+    # AUTOMATIC one - set because nothing was accepted at the service / unit the conversation
+    # was at. It survives only where the booking lands on that SAME service with no unit still
+    # to be chosen; anywhere else it is dropped and the gate decides again (with its line when
+    # nothing is accepted there). A convênio PLAN the patient chose is kept and judged.
+    if (
+        draft.insurance is None
+        and checked.insurance is not None
+        and fr._insurance_step_skip_reason(tenant) is None
+        and fr._label_match(checked.insurance, fr.LABEL_INSURANCE_PARTICULAR)
+    ):
+        recorded = _recorded_service(conversation)
+        same_service = (
+            recorded is not None
+            and checked.service is not None
+            and normalize_service_name(recorded)
+            == normalize_service_name(str(checked.service.get("name") or ""))
+        )
+        owner = fr._booking_professional(state, professionals)
+        service_id = fr._booking_service_id(
+            state, tenant, _booking_services(checked, tenant, service_catalog), owner
+        )
+        unit_to_choose = (
+            flow_units.unit_choice(owner, service_id).kind == "list"
+            and getattr(conversation, "flow_selected_unit_id", None) is None
+        )
+        if not same_service or unit_to_choose:
+            checked.insurance = None
+            state.flow_selected_insurance = None
+
     def done(result: FlowRouterResult, *names: str, fallback: str | None = None) -> DraftResolution:
         result = _carry(result, state)
         return DraftResolution(
@@ -1023,7 +1053,7 @@ async def _land_day(
         target,
         duration_minutes=duration,
         branch=fr.BOOKING_DAY_BRANCH,
-        back_target=fr.BACK_TARGET_SERVICE,
+        back_target=fr._day_back_target(tenant, owner, entry, unit, choice),
         professionals=professionals,
     )
     return land(result, *names)

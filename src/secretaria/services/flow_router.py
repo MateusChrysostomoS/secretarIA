@@ -587,6 +587,10 @@ BACK_TARGET_PROFESSIONAL = "professional"
 BACK_TARGET_UNIT = flow_units.BACK_TARGET_UNIT
 # TASK-088: the convênio list, one step back from the days when the patient was asked it.
 BACK_TARGET_INSURANCE = "insurance"
+# TASK-088 (fix round 1): "Outro serviço" of the REBOOKING after a doctor's cancellation - the
+# candidate doctor's own service list, as it always was. The booking's "service" back row is the
+# clinic catalog on a multi-doctor clinic (the service is the first thing it chose).
+BACK_TARGET_DOCTOR_SERVICES = "doctorservice"
 
 
 def _day_back_label(back_target: str | None) -> str:
@@ -602,7 +606,9 @@ def _day_back_label(back_target: str | None) -> str:
         return flow_units.LABEL_ANOTHER_UNIT
     if back_target == BACK_TARGET_INSURANCE:
         return LABEL_ANOTHER_INSURANCE
-    return LABEL_ANOTHER_SERVICE if back_target == BACK_TARGET_SERVICE else LABEL_BACK
+    if back_target in (BACK_TARGET_SERVICE, BACK_TARGET_DOCTOR_SERVICES):
+        return LABEL_ANOTHER_SERVICE
+    return LABEL_BACK
 
 
 def _is_day_back(body: str | None, back_target: str | None) -> bool:
@@ -611,7 +617,12 @@ def _is_day_back(body: str | None, back_target: str | None) -> bool:
     target is the unit list, and the row's payload says where it goes (TASK-083)."""
     if _control_match(body, _day_back_label(back_target)):
         return True
-    booking_targets = (BACK_TARGET_SERVICE, BACK_TARGET_UNIT, BACK_TARGET_INSURANCE)
+    booking_targets = (
+        BACK_TARGET_SERVICE,
+        BACK_TARGET_UNIT,
+        BACK_TARGET_INSURANCE,
+        BACK_TARGET_DOCTOR_SERVICES,
+    )
     return back_target in booking_targets and any(
         _control_match(body, _day_back_label(target)) for target in booking_targets
     )
@@ -621,7 +632,12 @@ def _back_target_of(body: str | None) -> str:
     """Where a back row's tap goes: its payload (`dayback|unit` -> "unit"), else the destination
     its label names, else the service (the oldest and safest destination)."""
     payload = _row_payload(body)
-    targets = (BACK_TARGET_UNIT, BACK_TARGET_INSURANCE, BACK_TARGET_SERVICE)
+    targets = (
+        BACK_TARGET_UNIT,
+        BACK_TARGET_INSURANCE,
+        BACK_TARGET_SERVICE,
+        BACK_TARGET_DOCTOR_SERVICES,
+    )
     if payload in targets:
         return str(payload)
     return next(
@@ -5032,7 +5048,16 @@ def _day_back_result(
     if target == BACK_TARGET_INSURANCE:
         # The convênio list again, the unit kept (it rides in the conversation). The answer
         # given there is not kept behind the question: it is the thing being chosen again.
-        return _enter_insurance(tenant, conversation, professionals=professionals)
+        # A stale row (the combination accepts nothing any more) never draws a list that holds
+        # only Particular: it goes one step further back, where the gate decides afresh.
+        owner = _booking_professional(conversation, professionals)
+        entry = _booking_service_entry(conversation, tenant, services, owner)
+        unit = flow_units.effective_unit(
+            conversation, owner, entry_service_id(entry) if entry else None
+        )
+        if _accepted_plans(tenant, owner, entry, unit):
+            return _enter_insurance(tenant, conversation, professionals=professionals)
+        target = _back_target_for(_booking_unit_choice(conversation, tenant, services, owner))
     if target == BACK_TARGET_UNIT:
         owner = _booking_professional(conversation, professionals)
         choice = _booking_unit_choice(conversation, tenant, services, owner)
@@ -5049,7 +5074,12 @@ def _day_back_result(
         result.flow_selected_type = conversation.flow_selected_type
         result.flow_selected_insurance = _selected_insurance(conversation)
         return result
-    if target == BACK_TARGET_SERVICE and services:
+    if target == BACK_TARGET_SERVICE and _is_multi_professional(professionals):
+        # TASK-088 R18: on a multi-doctor clinic the service was the first choice (the clinic's
+        # catalog), the doctor the second - "Outro serviço" reopens the catalog, doctor and
+        # service cleared (they are not named on the result), not the chosen doctor's list.
+        return _enter_clinic_service_catalog(tenant, professionals or [])
+    if target in (BACK_TARGET_SERVICE, BACK_TARGET_DOCTOR_SERVICES) and services:
         return FlowRouterResult(
             action="reply",
             bubbles=[
@@ -6198,6 +6228,7 @@ async def enter_guided_booking(
     services: list[dict] | None = None,
     professionals: list | None = None,
     attendee_name: str | None = None,
+    recorded_type: str | None = None,
 ) -> FlowRouterResult:
     """LLM hand-back entry: resume the booking AFTER the service was chosen.
 
@@ -6222,11 +6253,12 @@ async def enter_guided_booking(
     An answer that already exists is checked against the combination like any other: kept when
     accepted, asked again (never swapped for Particular in silence) when not.
 
-    A "Particular" that arrives here, on a doctor with several units still to choose from, may be
-    the AUTOMATIC one (nothing was accepted at the unit the booking left) - this entry knows
-    neither that unit nor the one it lands on, so it is judged afresh: dropped, and the gate
-    decides again at the unit the booking reaches (a patient who really chose Particular
-    answers the list once more). With one unit or none the unit never changes: kept as is.
+    A STORED "Particular" (R29) may be the AUTOMATIC one - set because nothing was accepted at the
+    service / unit the booking was at. `recorded_type` is the service the conversation recorded
+    it at: it is kept only when this hand-back is for that same service AND the doctor has no unit
+    list still to choose from; otherwise it is dropped and the gate decides again at the service
+    and unit the booking reaches (with its line when nothing is accepted there). Cost accepted: a
+    patient who really chose Particular answers the list once more. A plan stays and is judged.
 
     Takes the conversation's state as plain arguments rather than a
     Conversation: the caller (workers/tasks.py::_handle_start_guided_booking)
@@ -6265,9 +6297,12 @@ async def enter_guided_booking(
     ):
         owner = _booking_professional(state, professionals)
         service_id = _booking_service_id(state, tenant, services, owner)
-        if flow_units.unit_choice(owner, service_id).kind == "list":
-            # The unit is still to be chosen: the Particular may be the AUTOMATIC one of the
-            # unit the patient left, so it is judged afresh at the unit he reaches.
+        same_service = bool(appointment_type and recorded_type) and (
+            _norm(appointment_type) == _norm(recorded_type)
+        )
+        if not same_service or flow_units.unit_choice(owner, service_id).kind == "list":
+            # Another service, or a unit still to be chosen: the Particular may be the AUTOMATIC
+            # one of what the patient left, so it is judged afresh where the booking lands.
             state.flow_selected_insurance = None
     return _carry_booking(state, await _ask_day(state, tenant, calendar, services, professionals))
 
@@ -6501,7 +6536,6 @@ async def _booking_insurance_refusal(
             f"{PLAN_REFUSED_AT_CONFIRM_LEAD.format(**values)} {PLAN_REFUSED_HOW_TO_GO_ON}"
         )[:MAX_INTERACTIVE_BODY_CHARS]
         return result
-    notice = PLAN_REFUSED_AT_CONFIRM.format(**values)
     # TASK-088: the same decision the booking made the first time (`_insurance_gate`, through
     # `_ask_day`) - the list of what is accepted now, or, when nothing is, Particular with its
     # line and the days. Never a list that holds only Particular. The unit is kept (it was
@@ -6520,7 +6554,14 @@ async def _booking_insurance_refusal(
         professionals,
     )
     if result.action == "reply":
-        result.bubbles.insert(0, TextBubble(body=notice))
+        # "Escolha outro convênio ou Particular:" only in front of a list; a Particular day
+        # picker offers no such choice (the "nothing accepted" line says what happens).
+        template = (
+            PLAN_REFUSED_AT_CONFIRM
+            if result.flow_step == STEP_AWAITING_INSURANCE
+            else PLAN_REFUSED_AT_CONFIRM_LEAD
+        )
+        result.bubbles.insert(0, TextBubble(body=template.format(**values)))
     return result
 
 
@@ -8403,7 +8444,7 @@ async def enter_rebooking(
             professionals=professionals,
             # TASK-052: "Remarcar" on a released PAID slot says what happens to the deposit.
             prefix=prefix,
-            back_target=None if same_professional else BACK_TARGET_SERVICE,
+            back_target=None if same_professional else BACK_TARGET_DOCTOR_SERVICES,
         )
         # enter_day_picker knows nothing about who or what is being booked, and
         # these fields are written unconditionally by the caller — so a result

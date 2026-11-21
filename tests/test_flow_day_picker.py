@@ -51,11 +51,11 @@ from secretaria.services.flow_router import (  # noqa: E402
     LABEL_OTHER,
     LABEL_OTHER_DATE,
     MANAGE_DAY_BRANCH,
+    STEP_AWAITING_CATALOG_SERVICE,
     STEP_AWAITING_DAY,
     STEP_AWAITING_DAY_ESCAPE,
     STEP_AWAITING_DAY_RETRY,
     STEP_AWAITING_PROFESSIONAL,
-    STEP_AWAITING_SERVICE,
     STEP_AWAITING_SLOT,
     STEP_MANAGE_DAY,
     STEP_MANAGE_DAY_ESCAPE,
@@ -464,9 +464,11 @@ async def test_voltar_preserves_service_professional_and_insurance():
         professionals=profs,
     )
     assert result.action == "reply"
-    assert result.flow_step == STEP_AWAITING_SERVICE
-    assert result.flow_selected_type == _SERVICE
-    assert result.flow_selected_professional_id == profs[0].id
+    # TASK-088 R18: on a multi-doctor clinic the service was the FIRST choice, so "Outro serviço"
+    # reopens the clinic's catalog (doctor and service cleared); a chosen plan still rides along.
+    assert result.flow_step == STEP_AWAITING_CATALOG_SERVICE
+    assert result.flow_selected_type is None
+    assert result.flow_selected_professional_id is None
     assert result.flow_selected_insurance == "Unimed"
 
 
@@ -492,8 +494,8 @@ async def test_voltar_from_the_slot_list_preserves_the_same_fields():
         _control_tap(slots.bubbles[0], LABEL_ANOTHER_SERVICE),
         professionals=profs,
     )
-    assert result.flow_step == STEP_AWAITING_SERVICE
-    assert result.flow_selected_professional_id == profs[0].id
+    assert result.flow_step == STEP_AWAITING_CATALOG_SERVICE
+    assert result.flow_selected_professional_id is None
     assert result.flow_selected_insurance == "Unimed"
 
 

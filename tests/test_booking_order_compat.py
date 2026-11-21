@@ -18,7 +18,7 @@ from uuid import uuid4
 os.environ.setdefault("APP_ENV", "test")
 
 from secretaria.ai.formatter import SlotsBubble, TextBubble  # noqa: E402
-from secretaria.models import FlowState  # noqa: E402
+from secretaria.models import Conversation, FlowState  # noqa: E402
 from secretaria.services import (  # noqa: E402
     appointment_edit as ae,
     appointment_edit_flow as aef,
@@ -29,6 +29,7 @@ from secretaria.services.booking_draft import BookingDraft, draft_from_record  #
 from secretaria.services.insurance_acceptance import AcceptanceExceptions  # noqa: E402
 from secretaria.workers.shared.draft_resolution import _fold_answer  # noqa: E402
 from tests._edit_flow_support import TZ as EDIT_TZ  # noqa: E402
+from tests.test_booking_capture_worker import _off as _switch_off  # noqa: E402
 from tests.test_booking_draft_resolver import (  # noqa: E402  # noqa: E402
     DAY,
     NOW,
@@ -37,6 +38,14 @@ from tests.test_booking_draft_resolver import (  # noqa: E402  # noqa: E402
     _resolve,
     _sole,
     _tenant as _tenant_base,  # noqa: E402
+)
+from tests.test_booking_draft_resume_questions import (  # noqa: E402
+    _conversation,
+    _hand_back,
+    _onboard,
+    _seed_tenant,
+    db as _db_fixture,
+    wired as _wired_fixture,
 )
 from tests.test_booking_order_service_first import (  # noqa: E402
     AMIL,
@@ -55,6 +64,7 @@ from tests.test_booking_order_service_first import (  # noqa: E402
 from tests.test_t086_ai_draft import (  # noqa: E402
     CONSULTA,
     PLAN,
+    RETORNO,
     SERVICES,
     _unit,
     _with_units,
@@ -76,6 +86,8 @@ from tests.test_t086_edit_flow import (  # noqa: E402
 )
 
 TEN = dt.time(10, 0)
+db = _db_fixture
+wired = _wired_fixture
 PLAN_B = "plan-bradesco"
 
 
@@ -756,3 +768,252 @@ async def test_the_not_accepted_card_change_insurance_with_nothing_accepted_goes
     await walk.say(fr.LABEL_PLAN_CHANGE_INSURANCE)
     assert walk.last.flow_step == fr.STEP_AWAITING_DAY
     assert walk.last.flow_selected_insurance == fr.LABEL_INSURANCE_PARTICULAR
+
+
+
+# --------------------------------------------------------------------------
+# 8. Fix round 1 (Opus review): stored Particular, legacy landing (switch OFF), "Outro serviço"
+# --------------------------------------------------------------------------
+
+
+async def test_q1_handback_to_another_service_drops_a_stored_particular():
+    """R29: Particular set automatically for the echo (nothing accepted) is NOT carried into the
+    consulta (everything accepted) by a hand-back - the question is asked."""
+    centro, _sul = _units()
+    ana = _doctor(units=[centro])
+    refused = _matrix(
+        "shared", ana, (ECO_ID, centro, UNIMED), (ECO_ID, centro, BRADESCO), (ECO_ID, centro, AMIL)
+    )
+    tenant = _tenant("shared", refused, [ana])
+    walk = _Walk(tenant, [ana])
+    await walk.to_service_card("Ecocardiograma", doctor=ana)
+    await walk.say(fr.LABEL_BOOK_SERVICE)
+    assert walk.last.flow_selected_insurance == fr.LABEL_INSURANCE_PARTICULAR  # automatic
+    stored = walk.last.flow_selected_insurance
+
+    other = await fr.enter_guided_booking(
+        tenant,
+        _Agenda(),
+        "Consulta",
+        insurance=stored,
+        professionals=[ana],
+        recorded_type="Ecocardiograma",
+    )
+    assert other.flow_step == fr.STEP_AWAITING_INSURANCE
+    assert other.flow_selected_insurance is None
+
+    # The SAME service (nothing changed): the stored answer stays, no repeated question.
+    same = await fr.enter_guided_booking(
+        tenant,
+        _Agenda(),
+        "Ecocardiograma",
+        insurance=stored,
+        professionals=[ana],
+        recorded_type="Ecocardiograma",
+    )
+    assert same.flow_step == fr.STEP_AWAITING_DAY
+    assert same.flow_selected_insurance == fr.LABEL_INSURANCE_PARTICULAR
+    # A chosen PLAN is kept and judged, never dropped.
+    plan = await fr.enter_guided_booking(
+        tenant,
+        _Agenda(),
+        "Consulta",
+        insurance="Unimed",
+        professionals=[ana],
+        recorded_type="Ecocardiograma",
+    )
+    assert plan.flow_step == fr.STEP_AWAITING_DAY
+    assert plan.flow_selected_insurance == "Unimed"
+
+
+async def test_q2_resolver_drops_a_stored_particular_for_another_service():
+    centro = _unit("Centro")
+    sole = _with_units(_sole(), centro)
+    refused = _refuse(
+        (str(RETORNO), str(centro.id), PLAN), (str(RETORNO), str(centro.id), PLAN_B)
+    )
+    tenant = _two_plans(refused)
+    conv = _conv(
+        flow_state=FlowState.LLM,
+        flow_selected_type="Retorno",
+        flow_selected_unit_id=centro.id,
+        flow_selected_insurance=fr.LABEL_INSURANCE_PARTICULAR,  # the automatic one of Retorno
+    )
+    res = await _resolve(
+        BookingDraft(service="Consulta", day=DAY, time=TEN), conv=conv, tenant=tenant, pros=[sole]
+    )
+    # Not the express card with Particular: the combination accepts plans, so it asks.
+    assert res.landing_step == fr.STEP_AWAITING_INSURANCE
+    assert res.result.flow_selected_insurance is None
+
+    # Same service: the stored Particular stays (the patient's own, or still automatic there).
+    same = await _resolve(
+        BookingDraft(service="Retorno", day=DAY, time=TEN), conv=conv, tenant=tenant, pros=[sole]
+    )
+    assert same.landing_step == fr.STEP_AWAITING_CONFIRMATION
+    assert same.result.flow_selected_insurance == fr.LABEL_INSURANCE_PARTICULAR
+
+
+async def _legacy_clinic(wired):
+    tenant = await _seed_tenant(
+        wired,
+        doctors=[("Dra. Ana", ["Primeira Consulta"]), ("Dr. Beto", ["Primeira Consulta"])],
+    )
+    await _switch_off(wired, tenant)
+    await _onboard(tenant)
+    conv = await _conversation(wired, tenant)
+    async with wired() as session:
+        row = await session.get(Conversation, conv.id)
+        row.flow_attendee_name = ""  # pra-quem answered: "para mim"
+        await session.commit()
+    return tenant
+
+
+async def test_legacy_landing_multi_doctor_selection_only_opens_the_service_catalog(wired):
+    tenant = await _legacy_clinic(wired)
+    await _hand_back(wired, tenant, {"i": None})
+    current = await _conversation(wired, tenant)
+    # The service first - never the doctor list with "Aceita seu convênio" marks.
+    assert current.flow_step == fr.STEP_AWAITING_CATALOG_SERVICE
+
+
+async def test_legacy_landing_multi_doctor_service_without_doctor_asks_the_doctors_of_it(wired):
+    tenant = await _legacy_clinic(wired)
+    await _hand_back(wired, tenant, {"t": "Primeira Consulta"})
+    current = await _conversation(wired, tenant)
+    # Not the menu: the doctors of THAT service, the service kept.
+    assert current.flow_step == fr.STEP_AWAITING_SERVICE_PROFESSIONAL
+    assert current.flow_selected_type == "Primeira Consulta"
+
+
+async def test_a_multi_doctor_outro_servico_reopens_the_clinic_catalog():
+    """R18: the service was the first choice, so its back row is the catalog; the doctor and the
+    service are cleared and the automatic Particular is dropped. Reached from the convenio list
+    and from the day picker alike."""
+    centro, _sul = _units()
+    ana = _doctor(units=[centro])
+    bruno = _doctor("Dr. Bruno", units=[centro])
+    doctors = [ana, bruno]
+    walk = _Walk(_tenant(doctors=doctors), doctors)
+    await walk.to_service_card("Ecocardiograma", doctor=ana)
+    await walk.say(fr.LABEL_BOOK_SERVICE)
+    assert walk.last.flow_step == fr.STEP_AWAITING_INSURANCE
+    back = _list(walk.last).rows[-1]
+    assert back == (f"{fr.ROW_DAY_BACK_PREFIX}{fr.BACK_TARGET_SERVICE}", fr.LABEL_ANOTHER_SERVICE)
+    await walk.tap(back[0])
+    assert walk.last.flow_step == fr.STEP_AWAITING_CATALOG_SERVICE
+    assert walk.last.flow_selected_professional_id is None
+    assert walk.last.flow_selected_type is None
+
+    # From the day picker: its back row is the convenio list, whose back row is the catalog.
+    await walk.tap("svc|Ecocardiograma")
+    await walk.tap(f"prof|{ana.id}")
+    await walk.say(fr.LABEL_BOOK_SERVICE)
+    await walk.tap("ins|Unimed")
+    assert walk.last.flow_step == fr.STEP_AWAITING_DAY
+    await walk.tap(_list(walk.last).rows[-1][0])
+    await walk.tap(_list(walk.last).rows[-1][0])
+    assert walk.last.flow_step == fr.STEP_AWAITING_CATALOG_SERVICE
+
+    # Nothing accepted for the first service (automatic Particular): dropped on the way back.
+    refused = _matrix(
+        "shared", ana, (ECO_ID, centro, UNIMED), (ECO_ID, centro, BRADESCO), (ECO_ID, centro, AMIL)
+    )
+    auto = _Walk(_tenant("shared", refused, doctors), doctors)
+    await auto.to_service_card("Ecocardiograma", doctor=ana)
+    await auto.say(fr.LABEL_BOOK_SERVICE)
+    assert auto.last.flow_selected_insurance == fr.LABEL_INSURANCE_PARTICULAR
+    await auto.tap(_list(auto.last).rows[-1][0])
+    assert auto.last.flow_step == fr.STEP_AWAITING_CATALOG_SERVICE
+    assert auto.last.flow_selected_insurance is None
+
+
+async def test_rebooking_outro_servico_keeps_the_candidates_own_service_list():
+    """The rebooking after a doctor's cancellation keeps its OWN destination (candidate's list)."""
+    centro, _sul = _units()
+    ana = _doctor(units=[centro])
+    bruno = _doctor("Dr. Bruno", units=[centro])
+    doctors = [ana, bruno]
+    tenant = _tenant(doctors=doctors)
+    day = await fr.enter_rebooking(
+        _Walk(tenant, doctors).conversation(),
+        tenant,
+        _Agenda(),
+        professionals=doctors,
+        cancelled_professional_id=ana.id,
+        service_name="Consulta",
+        same_professional=False,
+        candidates=[bruno],
+    )
+    back = _list(day).rows[-1]
+    assert back[0] == f"{fr.ROW_DAY_BACK_PREFIX}{fr.BACK_TARGET_DOCTOR_SERVICES}"
+    assert back[1] == fr.LABEL_ANOTHER_SERVICE
+    walk = _Walk(
+        tenant,
+        doctors,
+        flow_state=FlowState.SERVICE_CATALOG,
+        flow_step=fr.STEP_AWAITING_DAY,
+        flow_selected_type="Consulta",
+        flow_selected_professional_id=bruno.id,
+        flow_attendee_name=fr.ATTENDEE_SELF,
+    )
+    walk.last = day
+    await walk.tap(back[0])
+    assert walk.last.flow_step == fr.STEP_AWAITING_SERVICE
+    assert walk.last.flow_selected_professional_id == bruno.id
+
+
+async def test_a_stale_convenio_back_row_never_draws_a_list_of_only_particular():
+    centro, sul = _units()
+    ana = _doctor(units=[centro, sul])
+    refused_now = _matrix(
+        "shared", ana, (ECO_ID, sul, UNIMED), (ECO_ID, sul, BRADESCO), (ECO_ID, sul, AMIL)
+    )
+    walk = _Walk(
+        _tenant("shared", refused_now, [ana]),
+        [ana],
+        flow_state=FlowState.SERVICE_CATALOG,
+        flow_step=fr.STEP_AWAITING_DAY,
+        flow_selected_type="Ecocardiograma",
+        flow_selected_professional_id=ana.id,
+        flow_selected_unit_id=sul.id,
+        flow_selected_insurance="Unimed",
+        flow_attendee_name=fr.ATTENDEE_SELF,
+    )
+    # An old card whose "Trocar convênio" row is tapped after the matrix changed.
+    await walk.say(f"{fr.LABEL_ANOTHER_INSURANCE} ({fr.BACK_TARGET_INSURANCE})")
+    assert walk.last.flow_step == fu.STEP_AWAITING_UNIT  # one step further back
+    assert walk.last.flow_step != fr.STEP_AWAITING_INSURANCE
+
+
+async def test_a_parked_draft_resumes_on_the_unit_pick_and_waits_on_the_convenio_list():
+    """M7: the unit pick resumes the parked draft when the days open next, and does NOT when the
+    convenio list opens (the draft stays parked on it)."""
+    centro, sul = _units()
+    ana = _doctor(units=[centro, sul])
+    parked = {"t": "Ecocardiograma", "d": "2026-10-08", "h": "10:00"}
+
+    async def pick(tenant):
+        walk = _Walk(
+            tenant,
+            [ana],
+            flow_state=FlowState.SERVICE_CATALOG,
+            flow_step=fu.STEP_AWAITING_UNIT,
+            flow_selected_type="Ecocardiograma",
+            flow_selected_professional_id=ana.id,
+            flow_attendee_name=fr.ATTENDEE_SELF,
+            flow_draft=parked,
+        )
+        walk.last = fr._enter_unit_list(walk.conversation(), ana, units=[centro, sul])
+        await walk.tap(f"unit|{sul.id}")
+        return walk.last
+
+    no_convenio = await pick(_tenant(collect=False, doctors=[ana]))
+    assert no_convenio.flow_step == fr.STEP_AWAITING_DAY
+    assert no_convenio.resume_draft is True
+    assert no_convenio.flow_selected_unit_id == sul.id
+
+    collecting = await pick(_tenant(doctors=[ana]))
+    assert collecting.flow_step == fr.STEP_AWAITING_INSURANCE
+    assert collecting.resume_draft is False
+    assert collecting.flow_draft == parked  # still parked, on the convenio question

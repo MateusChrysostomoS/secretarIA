@@ -31,8 +31,9 @@ from secretaria.services.flow_router import (
     FlowRouterResult,
     MenuBubble,
     _appt_uuid,
+    _booking_entry,
     _enter_professional_services,
-    _start_booking,
+    _enter_service_professional_list,
     ai_draft_v2_enabled,
     booking_gate_scope,
     enter_guided_booking,
@@ -755,6 +756,7 @@ async def _handle_start_guided_booking(
         # ORM rows: the day picker reads the unit's hours and blocked weekdays off it (P1).
         professionals=ctx.professionals,
         attendee_name=ctx.conversation.flow_attendee_name,
+        recorded_type=ctx.conversation.flow_selected_type,
     )
     logger.info(
         "conversation_guided_booking_entered",
@@ -942,7 +944,15 @@ async def _legacy_booking_draft(
                 professional, tenant_snapshot, insurance=insurance
             )
         else:
-            result = _start_booking(tenant_snapshot, professional_rows, insurance=insurance)
+            # TASK-088: the service comes first - the clinic's catalog on a multi-doctor clinic
+            # (never the doctor list with convênio marks), his own list with one doctor.
+            if is_multi and stored_type is not None:
+                # The patient already chose the service: where he was is the doctors of it.
+                result = _enter_service_professional_list(
+                    tenant_snapshot, professional_rows, stored_type, insurance=insurance
+                )
+            else:
+                result = _booking_entry(None, tenant_snapshot, professional_rows)
         if result.action == "professional_config_incomplete":
             await _land(result)
             return
@@ -974,10 +984,14 @@ async def _legacy_booking_draft(
     appointment_type = canonical_type
     if is_multi:
         if professional is None:
-            # A service without a doctor on a multi-doctor clinic: no one to book with yet.
-            await _menu(hb.FALLBACK_MISSING_PROFESSIONAL)
-            return
-        if appointment_type is None:
+            # A service without a doctor on a multi-doctor clinic (TASK-088): the doctors of
+            # THAT service, the booking's second step - not the menu.
+            result = _enter_service_professional_list(
+                tenant_snapshot, professional_rows, str(appointment_type), insurance=insurance
+            )
+            result.flow_selected_insurance = insurance
+            result.flow_attendee_name = attendee
+        elif appointment_type is None:
             result = _enter_professional_services(
                 professional, tenant_snapshot, insurance=insurance
             )
@@ -997,6 +1011,7 @@ async def _legacy_booking_draft(
                 ),
                 professionals=ctx.professionals,
                 attendee_name=attendee,
+                recorded_type=stored_type,
             )
     else:
         # `ctx.professionals`, the router-shaped roster: see `_handle_start_guided_booking`.
@@ -1009,6 +1024,7 @@ async def _legacy_booking_draft(
             insurance=insurance,
             professionals=ctx.professionals,
             attendee_name=attendee,
+            recorded_type=stored_type,
         )
     logger.info(
         "conversation_booking_draft_entered",

@@ -57,6 +57,7 @@ from secretaria.services.calendar import (
 )
 from secretaria.services.flow_router import (
     SLOT_TAKEN_AT_CONFIRM_MESSAGE,
+    STEP_AWAITING_INSURANCE,
     WHEN_FORMAT,
     FlowRouterResult,
     booking_gate_scope,
@@ -199,9 +200,12 @@ class InsuranceRefusedAtPromotion(SlotTakenAtPromotion):
 
 # TASK-086 A19: what the patient reads when the convênio stopped being accepted between
 # "Confirmar" and the code. Plain words: nothing was booked, and the next step.
-INSURANCE_REFUSED_AT_CONFIRM_MESSAGE = (
+INSURANCE_REFUSED_AT_CONFIRM_LEAD = (
     "Não consegui confirmar o horário: a clínica não está atendendo mais esse convênio "
-    "nesta consulta. Vamos escolher o convênio de novo."
+    "nesta consulta."
+)
+INSURANCE_REFUSED_AT_CONFIRM_MESSAGE = (
+    f"{INSURANCE_REFUSED_AT_CONFIRM_LEAD} Vamos escolher o convênio de novo."
 )
 _INSURANCE_REFUSED_NO_REOFFER_MESSAGE = (
     f"{INSURANCE_REFUSED_AT_CONFIRM_MESSAGE}\n\nDigite *menu* para começar outro agendamento."
@@ -711,7 +715,14 @@ async def _insurance_refused_reoffer(
         )
     if replaces is not None and result.appointment is None:
         result.flow_replaces_appointment_id = replaces
-    result.bubbles = [TextBubble(body=INSURANCE_REFUSED_AT_CONFIRM_MESSAGE), *result.bubbles]
+    # "Vamos escolher o convênio de novo" only in front of the list; with nothing accepted the
+    # booking goes on as Particular (the day step's own line says so) and there is no choice.
+    notice = (
+        INSURANCE_REFUSED_AT_CONFIRM_MESSAGE
+        if result.flow_step == STEP_AWAITING_INSURANCE
+        else INSURANCE_REFUSED_AT_CONFIRM_LEAD
+    )
+    result.bubbles = [TextBubble(body=notice), *result.bubbles]
     return InsuranceRefusedAtPromotion(reoffer=result)
 
 
