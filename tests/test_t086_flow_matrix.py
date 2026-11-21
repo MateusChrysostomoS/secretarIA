@@ -462,7 +462,7 @@ def test_a_refused_service_row_says_so_on_whatsapp_and_on_every_portal_page(mode
 
 
 @pytest.mark.parametrize("mode", MODES)
-async def test_tapping_a_refused_service_opens_the_not_accepted_step_without_alerting(mode):
+async def test_tapping_a_refused_service_goes_on_to_the_unit_without_the_not_accepted_card(mode):
     centro, sul, norte = _units()
     ana = _doctor(units=[centro, sul])
     bruno = _doctor("Dr. Bruno", units=[norte])
@@ -482,16 +482,15 @@ async def test_tapping_a_refused_service_opens_the_not_accepted_step_without_ale
         "Ecocardiograma",
         professionals=doctors,
     )
-    assert result.flow_step == fr.STEP_AWAITING_PLAN_REFUSED
+    # TASK-088 review round: no mid-flow "não atende" card - the tap goes on (the unit, then the
+    # convênio gate judges the early Unimed with service, doctor and unit known), exactly as a
+    # clinic with several doctors does.
+    assert result.flow_step == fu.STEP_AWAITING_UNIT
     assert result.notify_no_unit is None
     assert result.flow_selected_type == "Ecocardiograma"
     assert result.flow_selected_professional_id == ana.id
     assert result.flow_selected_insurance == "Unimed"
-    menu = _menu(result)
-    assert menu.body == (
-        "Dra. Ana não atende o convênio Unimed em Ecocardiograma. Como você prefere seguir?"
-    )
-    assert menu.labels == ["Outro médico", "Outro serviço", "Trocar convênio"]
+    assert result.flow_step != fr.STEP_AWAITING_PLAN_REFUSED
     assert agenda.log["days"] == 0
 
 

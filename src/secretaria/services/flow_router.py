@@ -849,9 +849,44 @@ def moving_event_scope(event_id: str | None):
     return moving_booking_scope(BufferRule(moved_event_id=event_id or None))
 
 
+# The event of the appointment a "Marcar outra consulta" booking REPLACES (it is only cancelled at
+# the confirmation, so until then it sits in the agenda): the replacement's own pickers and
+# rechecks never let it pad them (SPEC designer decision 3 - the same rule as a reschedule).
+# The router does no DB I/O: `route()` reads it off `upcoming_appointments` (the worker loads
+# them when the conversation carries the marker) and publishes it here for the block.
+_REPLACED_EVENT: ContextVar[str | None] = ContextVar("flow_router_replaced_event", default=None)
+
+
+@contextmanager
+def replacing_booking_scope(event_id: str | None) -> Iterator[None]:
+    """Publish the replaced appointment's calendar event id for the block; ALWAYS reset."""
+    token = _REPLACED_EVENT.set(event_id or None)
+    try:
+        yield
+    finally:
+        _REPLACED_EVENT.reset(token)
+
+
+def replaced_event_id(
+    conversation: Any, upcoming_appointments: list[dict] | None
+) -> str | None:
+    """The `google_event_id` of the appointment `conversation` replaces, or None (no marker, or
+    the appointment is not among `upcoming_appointments`)."""
+    replaced = getattr(conversation, "flow_replaces_appointment_id", None)
+    if replaced is None:
+        return None
+    for appt in upcoming_appointments or []:
+        if str(appt.get("id")) == str(replaced):
+            return str(appt.get("google_event_id") or "") or None
+    return None
+
+
 def _booking_buffer(professional: Any | None) -> BufferRule:
-    """The rule of a NEW booking with `professional`: nothing moves."""
-    return BufferRule(minutes=booking_buffer_minutes(professional))
+    """The rule of a NEW booking with `professional`: nothing moves - except the appointment a
+    "Marcar outra" booking replaces, which never pads its replacement."""
+    return BufferRule(
+        minutes=booking_buffer_minutes(professional), moved_event_id=_REPLACED_EVENT.get()
+    )
 
 
 def _appointment_owner(appt: dict | None, professionals: list | None) -> Any | None:
@@ -890,7 +925,10 @@ def _picker_buffer(
     minutes = rule.minutes
     if minutes is None:
         minutes = booking_buffer_minutes(_booking_professional(conversation, professionals))
-    return max(minutes, 0), rule.moved_event_id
+    moved_event_id = rule.moved_event_id
+    if moved_event_id is None and branch is BOOKING_DAY_BRANCH:
+        moved_event_id = _REPLACED_EVENT.get()
+    return max(minutes, 0), moved_event_id
 
 
 async def _inside_buffer(
@@ -2347,7 +2385,10 @@ async def route(
     See `_ACTIVE_GATE` for why the gate travels this way rather than as an
     argument on every function between here and the slot picker.
     """
-    with booking_gate_scope(gate):
+    with (
+        booking_gate_scope(gate),
+        replacing_booking_scope(replaced_event_id(conversation, upcoming_appointments)),
+    ):
         result = await _route(
             conversation,
             tenant,
@@ -4206,11 +4247,18 @@ def _insurance_gate(
     if known:
         plan = _selected_plan(tenant, known)
         if plan is None:
-            # Unlisted plans are kept on the ordinary path. At a chosen unit
-            # without confirmed plans, offer the alternatives without claiming
-            # that the clinic explicitly refused the patient's unlisted plan.
-            if accepted or not where_unit or _label_match(known, LABEL_INSURANCE_PARTICULAR):
+            # Unlisted plans are kept on the ordinary path ("Outro convênio") while the
+            # combination accepts some plan, and Particular is always kept.
+            if accepted or _label_match(known, LABEL_INSURANCE_PARTICULAR):
                 return _InsuranceGate()
+            if not where_unit:
+                # Nothing is accepted and no unit was asked (no units, or only one): the
+                # typed name is not kept in silence either - Particular, saying so (the same
+                # line as a catalog plan the combination refuses).
+                refused_known = True
+            # At a chosen unit without confirmed plans, offer the alternatives without claiming
+            # that the clinic explicitly refused the patient's unlisted plan (`refused_known`
+            # stays False there).
         elif any(str(each.get("id")) == str(plan["id"]) for each in accepted):
             return _InsuranceGate()
         else:
@@ -4247,6 +4295,36 @@ def _insurance_gate(
         notice=notice,
     )
     return _InsuranceGate(ask=ask)
+
+
+_STALE_PARTICULAR = "particular"
+_STALE_OTHER = "other"
+
+
+def _stale_unit_control(body: str | None) -> str | None:
+    """What the unit cards / lists left behind look like when tapped at the convênio list.
+
+    WhatsApp keeps every old button on screen and the Portal accepts the ids it offered
+    recently, so the "Seguir particular" / "Unidades c/ convênio" of the no-plan card, the
+    unit rows (`unit|<uuid>`, `unitpart|<uuid>`, `unitmore|<n>`) can all arrive here, where
+    they are not a plan name. Returns `_STALE_PARTICULAR` for "Seguir particular", `_STALE_OTHER`
+    for the other controls and any title carrying a unit id, else None (an ordinary answer)."""
+    if not body:
+        return None
+    if _control_match(body, flow_units.LABEL_CONTINUE_PARTICULAR):
+        return _STALE_PARTICULAR
+    if _control_match(body, flow_units.LABEL_UNITS_WITH_INSURANCE) or _control_match(
+        body, flow_units.LABEL_MORE_UNITS
+    ):
+        return _STALE_OTHER
+    payload = _row_payload(body)
+    if payload is not None:
+        try:
+            UUID(payload)
+        except ValueError:
+            return None
+        return _STALE_OTHER
+    return None
 
 
 async def _handle_insurance(
@@ -4288,7 +4366,29 @@ async def _handle_insurance(
             flow_selected_professional_id=_selected_professional_id(conversation),
             flow_selected_unit_id=flow_units.selected_unit_id(conversation),
         )
-    matched = _match_insurance_plan(tenant, body)
+    stale_unit_control = _stale_unit_control(body)
+    if stale_unit_control is not None:
+        matched = None
+        if stale_unit_control == _STALE_PARTICULAR and _row_payload(body) == str(
+            flow_units.selected_unit_id(conversation)
+        ):
+            # The "Seguir particular" of the unit the patient is AT: his answer, honoured.
+            matched = LABEL_INSURANCE_PARTICULAR
+        else:
+            # A control of a card or list left behind (the old button WhatsApp keeps on screen,
+            # a row the Portal still accepts): never an insurance name, and Particular at a unit
+            # that is not clearly this one is not safe - the current list is asked again.
+            logger.info(
+                "insurance_stale_unit_control",
+                conversation_id=str(getattr(conversation, "id", None)),
+            )
+            if conversation.flow_selected_type:
+                return await _ask_day(
+                    conversation, tenant, calendar, services, professionals, reask_insurance=True
+                )
+            return _enter_insurance(tenant, conversation, professionals=professionals)
+    else:
+        matched = _match_insurance_plan(tenant, body)
     if matched is None and _says_no_insurance(body):
         matched = LABEL_INSURANCE_PARTICULAR
     if matched is None and _reads_as_conversation(body):
@@ -4739,20 +4839,11 @@ async def _catalog_step(
         service = _match_service(services, body)
         if service is None:
             return _preserve(conversation, "delegate_llm")
-        refused_service_id = _matrix_refused_service(
-            tenant, booking_owner, service, _selected_insurance(conversation)
-        )
-        if refused_service_id is not None:
-            # TASK-086 A4: a "não atende este convênio" row was tapped - its ways on, not its card.
-            return _enter_plan_refused(
-                conversation,
-                tenant,
-                professionals,
-                booking_owner,
-                str(service.get("name", "")),
-                refused_service_id,
-            )
-        # TASK-088: no service card - the pick goes straight to the next step.
+        # TASK-088: no service card - the pick goes straight to the next step, whatever convênio
+        # arrived early: the convênio gate (`_ask_day`) judges it with service, doctor and unit
+        # known - the filtered list with a line, or Particular saying so - exactly like a clinic
+        # with several doctors. (The "não atende este convênio" card of `_enter_plan_refused`
+        # is no longer offered here; a chat already parked on it still answers it.)
         return _resume_parked_draft(
             conversation,
             await _continue_with_service(
@@ -6346,22 +6437,6 @@ def _another_doctor_or_service(
     )
 
 
-def _matrix_refused_service(
-    tenant: Tenant, professional: Any | None, service: dict | None, insurance: str | None
-) -> UUID | None:
-    """The service's id when the convênio matrix refuses `insurance` for it with `professional`
-    at every place it is bookable (the "não atende este convênio" row, A4), else None."""
-    if professional is None or service is None:
-        return None
-    plan_id = _matrix_plan_id(tenant, insurance)
-    service_id = entry_service_id(service)
-    if plan_id is None or service_id is None:
-        return None
-    if refuses_everywhere(snapshot_exceptions(tenant), professional, service_id, plan_id):
-        return service_id
-    return None
-
-
 def _plan_refused_labels(
     conversation: Conversation,
     tenant: Tenant,
@@ -7319,6 +7394,8 @@ async def _handle_confirmation(
         source="flow_confirm",
         conversation_id=getattr(conversation, "id", None),
         professional_id=professional_id,
+        # "Marcar outra": the appointment being replaced never pads its replacement.
+        ignore_event_id=_REPLACED_EVENT.get(),
     ):
         return await _reoffer_taken_slot(
             conversation,

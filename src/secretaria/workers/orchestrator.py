@@ -564,6 +564,9 @@ async def _send_bot_reply_inner(reply: _ReplyContext, redis=None) -> None:
                         or _label_match_body(reply.inbound_body, LABEL_RESCHEDULE)
                         or _label_match_body(reply.inbound_body, LABEL_CANCEL_APPT)
                         or _label_match_body(reply.inbound_body, LABEL_OTHER)
+                        # TASK-088: "Marcar outra consulta" - the router needs the replaced
+                        # appointment's calendar event so it never pads its own replacement.
+                        or conversation.flow_replaces_appointment_id is not None
                     )
                     if wants_upcoming_appointments and conversation.patient_id is not None:
                         upcoming_appointments = await load_upcoming_appointments(

@@ -644,18 +644,26 @@ async def test_a_known_refused_convenio_with_none_accepted_goes_particular_and_s
     )
 
 
-async def test_a_known_particular_or_typed_plan_is_never_second_guessed():
+async def test_a_known_particular_is_never_second_guessed_and_a_typed_plan_is_not_kept_in_silence():
     centro, _sul = _units()
     ana = _doctor(units=[centro])
     doctors = [ana]
     refused = _matrix(
         "shared", ana, (ECO_ID, centro, UNIMED), (ECO_ID, centro, BRADESCO), (ECO_ID, centro, AMIL)
     )
-    for kept in ("Particular", "Plano da Empresa"):
-        walk = await _from_card(_tenant("shared", refused, doctors), doctors, ana, kept)
-        assert walk.last.flow_step == fr.STEP_AWAITING_DAY
-        assert walk.last.flow_selected_insurance == kept
-        assert _list(walk.last).body == fr.DAY_PICKER_BODY
+    walk = await _from_card(_tenant("shared", refused, doctors), doctors, ana, "Particular")
+    assert walk.last.flow_step == fr.STEP_AWAITING_DAY
+    assert walk.last.flow_selected_insurance == "Particular"
+    assert _list(walk.last).body == fr.DAY_PICKER_BODY
+    # A typed plan outside the catalog with NOTHING accepted for the combination (review round:
+    # SPEC acceptance 2 + designer decision 1): Particular, said out loud - never kept silently.
+    walk = await _from_card(
+        _tenant("shared", refused, doctors), doctors, ana, "Plano da Empresa"
+    )
+    assert walk.last.flow_step == fr.STEP_AWAITING_DAY
+    assert walk.last.flow_selected_insurance == "Particular"
+    assert walk.last.flow_insurance_auto is True
+    assert _list(walk.last).body == f"{fr.INSURANCE_REFUSED_PARTICULAR} {fr.DAY_PICKER_BODY}"
 
 
 async def test_a_chat_parked_on_the_old_first_question_takes_the_new_order():

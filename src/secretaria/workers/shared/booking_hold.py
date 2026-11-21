@@ -653,10 +653,39 @@ async def _held_slot_unavailable(
         held.end_at,
         buffer_minutes=minutes,
         source="booking_hold_promotion",
+        # "Marcar outra": the appointment being replaced never pads its replacement.
+        ignore_event_id=await _replaced_event_id(reply, tenant),
         holds=others,
         conversation_id=reply.conversation_id,
         tenant_id=tenant.id,
     )
+
+
+async def _replaced_event_id(reply: _ReplyContext, tenant: Tenant) -> str | None:
+    """The calendar event id of the appointment this conversation's booking replaces ("Marcar
+    outra consulta"), or None. It is cancelled only when the booking is written, so until then
+    it sits in the agenda and must not pad its own replacement. Tenant-scoped; fail-open
+    (None, logged with the error type only) like every confirm recheck."""
+    try:
+        async with async_session_factory() as session:
+            conversation = await session.get(Conversation, reply.conversation_id)
+            replaced_id = (
+                conversation.flow_replaces_appointment_id if conversation is not None else None
+            )
+            if replaced_id is None:
+                return None
+            appointment = await session.get(Appointment, replaced_id)
+            if appointment is None or appointment.tenant_id != tenant.id:
+                return None
+            return str(appointment.google_event_id or "") or None
+    except Exception as exc:  # noqa: BLE001 - fail-open
+        logger.warning(
+            "booking_hold_replaced_event_lookup_failed",
+            error_type=type(exc).__name__,
+            conversation_id=str(reply.conversation_id),
+            tenant_id=str(tenant.id),
+        )
+        return None
 
 
 async def _held_buffer_rule(

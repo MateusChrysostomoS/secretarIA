@@ -2,9 +2,9 @@
 
 TASK-082 F1, CONTRACT.md D10 (owner, 2026-11-13): WhatsApp has no search - only the
 lists, and a list past the limit ends with a "Ver mais serviços / profissionais /
-convênios" row (`svcmore|<n>` / `profmore|<n>` / `insmore|<n>`). A patient who TYPES
-"ver mais" (any case/accents, optionally followed by "serviços", "profissionais" or
-"convênios") instead of tapping gets the same next page.
+convênios / unidades" row (`svcmore|<n>` / `profmore|<n>` / `insmore|<n>` / `unitmore|<n>`).
+A patient who TYPES "ver mais" (any case/accents, optionally followed by "serviços",
+"profissionais", "convênios" or "unidades") instead of tapping gets the same next page.
 
 Resolved here, in the WhatsApp inbound path, BEFORE routing, so the flow router stays
 DB-free: the most recent OUTBOUND interactive card of this patient's conversation
@@ -32,8 +32,9 @@ _KIND_PREFIXES: dict[str, tuple[str, ...]] = {
     "servicos": ("svcmore|",),
     "profissionais": ("profmore|",),
     "convenios": ("insmore|",),
+    "unidades": ("unitmore|",),
 }
-_ANY_MORE_PREFIX: tuple[str, ...] = ("svcmore|", "profmore|", "insmore|")
+_ANY_MORE_PREFIX: tuple[str, ...] = ("svcmore|", "profmore|", "insmore|", "unitmore|")
 # Light punctuation a patient may end the two words with ("ver mais.", "ver mais!").
 _TRAILING = " .!"
 
@@ -49,8 +50,8 @@ def typed_more_kind(text: str | None) -> str | None:
     """The empty string for a bare "ver mais", the list word after it, or None.
 
     The list word is one of `_KIND_PREFIXES` ("servicos", "profissionais",
-    "convenios", accents and case ignored). Anything longer or different ("ver mais
-    dias", "quero ver mais opções") is not a typed "ver mais".
+    "convenios", "unidades", accents and case ignored). Anything longer or different
+    ("ver mais dias", "quero ver mais opções") is not a typed "ver mais".
     """
     if not text:
         return None
