@@ -426,16 +426,21 @@ async def test_menu_with_a_paid_charge_shows_the_menu_but_never_deletes_the_paym
 # ---- the Portal: the code first, then the Pix on the SAME hold (decision D12) ----------------
 
 
-async def _code_held_portal(db, **kw):
+async def _code_held_portal(db, *, insurance=None, insurance_auto=None, **kw):
     async with db() as session:
         world = await make_world(session, channel="brain_message", **kw)
+        conv = await session.get(Conversation, world.conversation.id)
+        conv.flow_state = FlowState.AWAITING_EMAIL_CODE
+        conv.flow_selected_insurance = insurance
+        conv.flow_insurance_auto = insurance_auto
+        await session.commit()
     held = await holds.place_hold(
         tenant_id=world.tenant_id,
         conversation_id=world.conversation.id,
         patient_id=world.patient.id,
         professional_id=None,
         appointment_type="Consulta",
-        insurance=None,
+        insurance=insurance,
         start_at=SLOT_START,
         end_at=SLOT_END,
     )
@@ -451,13 +456,18 @@ async def _code_held_portal(db, **kw):
     return world, held, tenant, reply
 
 
-async def test_a_verified_code_moves_the_same_hold_to_the_payment_phase(db, env):
-    world, held, tenant, reply = await _code_held_portal(db)
+@pytest.mark.parametrize("insurance_auto", [True, False])
+async def test_a_verified_code_moves_the_same_hold_to_the_payment_phase(db, env, insurance_auto):
+    world, held, tenant, reply = await _code_held_portal(
+        db, insurance="Particular", insurance_auto=insurance_auto
+    )
     result = await tasks._payment_after_code(reply, tenant=tenant, redis=None)
 
     assert result.flow_state is FlowState.AWAITING_DEPOSIT
     assert result.deposit_request["amount_cents"] == 6000
     assert result.flow_selected_type == "Consulta"
+    assert result.flow_selected_insurance == "Particular"
+    assert result.flow_insurance_auto is insurance_auto
     async with db() as session:
         (hold,) = list(await session.scalars(select(BookingHold)))
     assert hold.id == held.id and (hold.phase, hold.charge_id) == (

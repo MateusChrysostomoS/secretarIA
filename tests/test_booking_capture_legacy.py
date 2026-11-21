@@ -85,7 +85,7 @@ async def test_ambiguous_doctor_correction_never_reuses_the_previous_doctor(clin
         draft, tenant=_tenant(), pros=roster,
         conv=_conv(flow_selected_professional_id=roster[-1].id),
     )
-    assert res.landing_step == fr.STEP_AWAITING_PROFESSIONAL
+    assert res.landing_step == fr.STEP_AWAITING_SERVICE_PROFESSIONAL
     assert res.result.flow_draft["d"] == DAY.isoformat()
     assert res.result.flow_draft["h"] == "10:00"
     assert res.result.flow_selected_professional_id is None
@@ -103,7 +103,7 @@ async def test_doctor_removed_before_fresh_resolution_is_not_replaced_implicitly
         ),
         tenant=_tenant(), pros=roster,
     )
-    assert res.landing_step == fr.STEP_AWAITING_PROFESSIONAL
+    assert res.landing_step == fr.STEP_AWAITING_SERVICE_PROFESSIONAL
     assert res.result.flow_draft["d"] == DAY.isoformat()
     assert res.result.flow_selected_professional_id is None
     assert res.result.flow_draft["p_unresolved"] is True

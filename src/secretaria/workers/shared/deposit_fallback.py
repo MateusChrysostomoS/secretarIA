@@ -188,6 +188,7 @@ def _slot_taken_retry(held: HeldSlot, tenant: Tenant) -> FlowRouterResult:
         flow_selected_slot=local.strftime("%Y-%m-%dT%H:%M"),
         flow_selected_professional_id=held.professional_id,
         flow_selected_insurance=held.insurance,
+        flow_insurance_auto=getattr(held, "insurance_auto", None),
         flow_attendee_name=held.attendee_name,
         flow_selected_unit_id=getattr(held, "unit_id", None),
     )
@@ -211,10 +212,14 @@ def _offer_human(
             draft, "flow_selected_professional_id", None
         )
         result.flow_selected_insurance = getattr(draft, "flow_selected_insurance", None)
+        result.flow_insurance_auto = getattr(draft, "flow_insurance_auto", None)
         result.flow_attendee_name = getattr(draft, "flow_attendee_name", None)
     if held is not None:
         result.flow_selected_type = held.appointment_type
         result.flow_selected_professional_id = held.professional_id
+        held_auto = getattr(held, "insurance_auto", None)
+        if held_auto is not None or result.flow_selected_insurance != held.insurance:
+            result.flow_insurance_auto = held_auto
         result.flow_selected_insurance = held.insurance
         result.flow_attendee_name = held.attendee_name
     result.bubbles = [TextBubble(body=sentence), *result.bubbles]

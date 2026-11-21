@@ -174,6 +174,8 @@ async def test_list_shape_is_whitelisted(
         "context_doctor_message",
         # Additive (2026-10-27): the doctor's minimum notice for a new booking, in hours.
         "min_booking_notice_hours",
+        # Additive (TASK-088): minutes the doctor wants between two consultations.
+        "buffer_minutes",
         "business_hours",
         # Additive since the null/empty round: says whether the (possibly empty)
         # value above is inheritance or an own override. Asserted here on
@@ -499,6 +501,73 @@ async def test_put_config_rejects_a_min_booking_notice_out_of_range(
         f"{ENDPOINT}/{prof.id}/config", json={"min_booking_notice_hours": hours}
     )
     assert response.status_code == 422
+
+
+async def test_hub_saves_and_reads_buffer_minutes(
+    client: AsyncClient, db, tenant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    prof = await _seed_professional(db, tenant)
+    monkeypatch.setattr(professionals_api, "get_entitlements", _never_called_fake)
+    url = f"{ENDPOINT}/{prof.id}/config"
+
+    assert (await client.get(ENDPOINT)).json()[0]["buffer_minutes"] is None  # default: none
+    saved = await client.put(url, json={"buffer_minutes": 15})
+    assert saved.status_code == 200
+    assert saved.json()["buffer_minutes"] == 15
+    listed = await client.get(ENDPOINT)
+    assert listed.json()[0]["buffer_minutes"] == 15
+    untouched = await client.put(url, json={"specialty": "Cirurgia"})
+    assert untouched.json()["buffer_minutes"] == 15  # absent = left alone
+    edge = await client.put(url, json={"buffer_minutes": 120})
+    assert edge.json()["buffer_minutes"] == 120
+    zero = await client.put(url, json={"buffer_minutes": 0})
+    assert zero.status_code == 200
+    assert zero.json()["buffer_minutes"] == 0
+    cleared = await client.put(url, json={"buffer_minutes": None})
+    assert cleared.json()["buffer_minutes"] is None
+    async with db() as session:
+        stored = (await session.execute(select(Professional))).scalars().one()
+        assert stored.buffer_minutes is None
+
+
+@pytest.mark.parametrize("minutes", [-1, 121])
+async def test_hub_rejects_buffer_over_120_and_negative(
+    client: AsyncClient, db, tenant, monkeypatch: pytest.MonkeyPatch, minutes: int
+) -> None:
+    prof = await _seed_professional(db, tenant)
+    monkeypatch.setattr(professionals_api, "get_entitlements", _never_called_fake)
+    response = await client.put(f"{ENDPOINT}/{prof.id}/config", json={"buffer_minutes": minutes})
+    assert response.status_code == 422
+
+
+async def test_roster_snapshot_carries_buffer_minutes(db, tenant) -> None:
+    from secretaria.workers.shared.greeting import _flow_professionals
+
+    prof = await _seed_professional(db, tenant)
+    prof.buffer_minutes = 20
+    snapshot = _flow_professionals([prof], [])
+    assert snapshot[0].buffer_minutes == 20
+    prof.buffer_minutes = None
+    assert _flow_professionals([prof], [])[0].buffer_minutes is None
+
+
+async def test_simulator_snapshot_carries_buffer_minutes(db, tenant) -> None:
+    from secretaria.workers.shared.flow_simulation_input import (
+        load_simulation_inputs,
+        overlay_professional,
+    )
+
+    prof = await _seed_professional(db, tenant, buffer_minutes=25)
+    # Draft overlay of a professional carries the field too (same path as notice hours).
+    view = overlay_professional(prof, {"buffer_minutes": 40}, applies=True)
+    assert view.buffer_minutes == 40
+    async with db() as session:
+        inputs = await load_simulation_inputs(session, tenant)
+        assert inputs.professionals[0].buffer_minutes == 25
+        drafted = await load_simulation_inputs(
+            session, tenant, professional_id=prof.id, draft_professional={"buffer_minutes": 10}
+        )
+        assert drafted.professionals[0].buffer_minutes == 10
 
 
 async def test_put_config_appointment_type_requirements_round_trip(

@@ -173,6 +173,7 @@ from secretaria.workers.shared.dispatch import (
     _send_name_question,
     _send_plain_reply,
 )
+from secretaria.workers.shared.draft_resolution import _resume_booking_draft, _turn_booking_gate
 from secretaria.workers.shared.flow_runner import (
     _apply_flow_result,
     _run_flow,
@@ -528,6 +529,7 @@ async def _send_bot_reply_inner(reply: _ReplyContext, redis=None) -> None:
                                 conversation.flow_selected_professional_id
                             ),
                             flow_selected_insurance=conversation.flow_selected_insurance,
+                            flow_insurance_auto=getattr(conversation, "flow_insurance_auto", None),
                             flow_selected_unit_id=conversation.flow_selected_unit_id,
                             flow_managing_appointment_id=(
                                 conversation.flow_managing_appointment_id
@@ -562,6 +564,9 @@ async def _send_bot_reply_inner(reply: _ReplyContext, redis=None) -> None:
                         or _label_match_body(reply.inbound_body, LABEL_RESCHEDULE)
                         or _label_match_body(reply.inbound_body, LABEL_CANCEL_APPT)
                         or _label_match_body(reply.inbound_body, LABEL_OTHER)
+                        # TASK-088: "Marcar outra consulta" - the router needs the replaced
+                        # appointment's calendar event so it never pads its own replacement.
+                        or conversation.flow_replaces_appointment_id is not None
                     )
                     if wants_upcoming_appointments and conversation.patient_id is not None:
                         upcoming_appointments = await load_upcoming_appointments(
@@ -759,6 +764,7 @@ async def _send_bot_reply_inner(reply: _ReplyContext, redis=None) -> None:
             )
             return
         stands, _held = await _code_wait_booking(reply.conversation_id)
+        await _write_flow_state(reply.conversation_id, FlowState.IDLE)
         await _send_plain_reply(
             reply,
             tenant=tenant,
@@ -1247,6 +1253,7 @@ async def _send_bot_reply_inner(reply: _ReplyContext, redis=None) -> None:
                     # these drops the patient's doctor on the way back in.
                     flow_selected_professional_id=conv_snapshot.flow_selected_professional_id,
                     flow_selected_insurance=conv_snapshot.flow_selected_insurance,
+                    flow_insurance_auto=getattr(conv_snapshot, "flow_insurance_auto", None),
                     flow_attendee_name=conv_snapshot.flow_attendee_name,
                     flow_selected_unit_id=getattr(conv_snapshot, "flow_selected_unit_id", None),
                 ),
@@ -1260,6 +1267,9 @@ async def _send_bot_reply_inner(reply: _ReplyContext, redis=None) -> None:
             result = await resume_bubbles(
                 conv_snapshot, tenant_snapshot, calendar, professionals=flow_professionals
             )
+            if result.resume_draft and tenant is not None:
+                gate = _turn_booking_gate(reply, tenant, redis=redis)
+                result = await _resume_booking_draft(reply, tenant, result, gate=gate)
             if await _apply_flow_result(
                 reply, result, patient_wa, redis=redis, tenant=tenant, waba_token=waba_token
             ):

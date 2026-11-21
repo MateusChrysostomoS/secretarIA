@@ -749,7 +749,7 @@ async def test_selection_only_draft_logs_the_administrative_step_it_lands_on(
     expected = (
         "awaiting_attendee_choice"
         if attendee is None
-        else "awaiting_professional"
+        else "awaiting_catalog_service"
         if multi
         else "awaiting_service"
     )
@@ -810,15 +810,6 @@ async def test_selection_only_draft_on_a_clinic_with_no_bookable_catalog_is_a_co
             ["service"],
             {"professional": "unknown_professional"},
             id="professional_not_on_the_roster",
-        ),
-        pytest.param(
-            True,
-            lambda ana: {"t": "Consulta Geral"},
-            "missing_professional",
-            ["service"],
-            ["service"],
-            {},
-            id="multi_clinic_service_without_doctor",
         ),
         pytest.param(
             False,
@@ -1237,7 +1228,7 @@ async def test_selection_only_keeps_a_typed_convenio(db, _captured_bubbles, log)
 
     async with db() as session:
         conv = await session.get(Conversation, conversation.id)
-    assert conv.flow_step == "awaiting_professional"
+    assert conv.flow_step == "awaiting_catalog_service"
     assert conv.flow_selected_insurance == "Amil Dental"  # the patient's typed answer
 
 
@@ -1258,10 +1249,34 @@ async def test_another_tenants_doctor_is_dropped_never_used(db, _captured_bubble
 
     (event,) = _events(log)
     assert event["dropped"] == {"professional": "unknown_professional"}
-    assert event["landing_step"] == "awaiting_professional"
+    assert event["landing_step"] == "awaiting_service_professional"
     async with db() as session:
         conv = await session.get(Conversation, conversation.id)
     assert conv.flow_selected_professional_id is None
+
+
+async def test_legacy_service_without_doctor_lands_on_the_doctors_of_that_service(
+    db, _captured_bubbles, _stub_calendar, log
+) -> None:
+    """TASK-088 (was: the menu, `missing_professional`): switch OFF, a multi-doctor clinic, a
+    service and no doctor - the second step of the booking, the doctors who do it."""
+    tenant, ana, bruno, patient, conversation = await _seed(db, attendee=ATTENDEE_SELF)
+
+    await tasks._handle_set_booking_draft(
+        _reply_ctx(conversation),
+        BOOKING_DRAFT_SENTINEL_PREFIX + json.dumps({"t": "Consulta Geral"}),
+        tenant,
+        None,
+        [],
+        patient.wa_id,
+    )
+
+    (event,) = _events(log)
+    assert event["landing_step"] == "awaiting_service_professional"
+    assert event["fallback"] is None
+    async with db() as session:
+        conv = await session.get(Conversation, conversation.id)
+    assert conv.flow_selected_type == "Consulta Geral"
 
 
 def test_the_resolver_speaks_the_hand_back_vocabulary() -> None:
@@ -1363,6 +1378,52 @@ async def test_select_professional_reads_the_attendee_fresh(
     async with db() as session:
         conv = await session.get(Conversation, conversation.id)
     assert conv.flow_attendee_name == stored
+
+
+@pytest.mark.parametrize(
+    "stored, automatic, kept, kept_automatic",
+    [
+        ("Particular", True, None, None),
+        ("Particular", False, "Particular", False),
+        ("Particular", None, "Particular", None),
+        ("Plano A", False, "Plano A", False),
+    ],
+)
+async def test_select_professional_opening_the_service_list_keeps_patient_coverage(
+    db, _captured_bubbles, log, stored, automatic, kept, kept_automatic
+) -> None:
+    """The legacy hand-back keeps the patient's choice and rechecks automatic Particular."""
+    from secretaria.models import TenantInsurancePlan
+
+    tenant, ana, bruno, patient, conversation = await _seed(
+        db, attendee="Maria da Silva", insurance=stored
+    )
+    async with db() as session:
+        conv = await session.get(Conversation, conversation.id)
+        conv.flow_insurance_auto = automatic
+        row = await session.get(Tenant, tenant.id)
+        row.collect_insurance = True
+        row.insurance_mode = "shared"
+        session.add(TenantInsurancePlan(tenant_id=tenant.id, custom_name="Plano A"))
+        await session.commit()
+        await session.refresh(row)
+        tenant = row
+
+    await tasks._handle_select_professional(
+        _reply_ctx(conversation),
+        f"{SELECT_PROFESSIONAL_SENTINEL_PREFIX}{ana.id}",
+        tenant,
+        None,
+        _snapshots([ana, bruno]),
+        patient.wa_id,
+    )
+
+    (event,) = _events(log)
+    assert event["landing_step"] == "awaiting_service"
+    async with db() as session:
+        conv = await session.get(Conversation, conversation.id)
+    assert conv.flow_selected_insurance == kept
+    assert conv.flow_insurance_auto == kept_automatic
 
 
 async def test_guided_booking_asks_pra_quem_first_when_unknown(

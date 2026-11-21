@@ -19,6 +19,9 @@ from secretaria.services import flow_router as fr  # noqa: E402
 from tests.test_flow_router import _conversation, _FakeCalendar, _tenant  # noqa: E402
 
 TAP = "🗓️ 08:00 (2026-10-05T08:00)"
+# TASK-088 (owner: "Valor só no fim, na confirmação final"): a Particular patient's card ends
+# with the service value after a blank line; the lines above it are unchanged.
+MONEY = "\n\nValor: R$ 250,00"
 
 
 def _doctor(name):
@@ -62,7 +65,7 @@ async def test_without_the_switch_the_card_is_byte_for_byte_todays():
         professionals=[ANA, BETO],
     )
     assert res.flow_step == fr.STEP_AWAITING_CONFIRMATION
-    assert res.bubbles[0].body == "Primeira Consulta\n05/10/2026 às 08:00"
+    assert res.bubbles[0].body == "Primeira Consulta\n05/10/2026 às 08:00" + MONEY
 
 
 async def test_with_the_switch_the_card_names_the_chosen_doctor():
@@ -73,13 +76,17 @@ async def test_with_the_switch_the_card_names_the_chosen_doctor():
         TAP,
         professionals=[ANA, BETO],
     )
-    assert res.bubbles[0].body == "Primeira Consulta\nProfissional: Dra. Ana\n05/10/2026 às 08:00"
+    assert res.bubbles[0].body == (
+        "Primeira Consulta\nProfissional: Dra. Ana\n05/10/2026 às 08:00" + MONEY
+    )
     assert res.flow_selected_slot == "2026-10-05T08:00"
 
 
 async def test_a_single_professional_clinic_names_its_only_doctor():
     res = await fr.route(_at_slot(), _switched(), _FakeCalendar(), TAP, professionals=[ANA])
-    assert res.bubbles[0].body == "Primeira Consulta\nProfissional: Dra. Ana\n05/10/2026 às 08:00"
+    assert res.bubbles[0].body == (
+        "Primeira Consulta\nProfissional: Dra. Ana\n05/10/2026 às 08:00" + MONEY
+    )
 
 
 async def test_the_doctor_comes_before_the_patient_line():
@@ -92,12 +99,13 @@ async def test_the_doctor_comes_before_the_patient_line():
     )
     assert res.bubbles[0].body == (
         "Primeira Consulta\nProfissional: Dra. Ana\nPaciente: Maria da Silva\n05/10/2026 às 08:00"
+        + MONEY
     )
 
 
 async def test_a_clinic_without_professionals_has_no_doctor_line():
     res = await fr.route(_at_slot(), _switched(), _FakeCalendar(), TAP, professionals=[])
-    assert res.bubbles[0].body == "Primeira Consulta\n05/10/2026 às 08:00"
+    assert res.bubbles[0].body == "Primeira Consulta\n05/10/2026 às 08:00" + MONEY
 
 
 async def test_the_resumed_card_reads_like_the_tapped_one():
@@ -110,7 +118,9 @@ async def test_the_resumed_card_reads_like_the_tapped_one():
         flow_selected_professional_id=ANA.id,
     )
     res = await fr.resume_bubbles(conversation, _switched(), None, professionals=[ANA, BETO])
-    assert res.bubbles[0].body == "Primeira Consulta\nProfissional: Dra. Ana\n05/10/2026 às 08:00"
+    assert res.bubbles[0].body == (
+        "Primeira Consulta\nProfissional: Dra. Ana\n05/10/2026 às 08:00" + MONEY
+    )
 
 
 def test_the_card_body_never_exceeds_the_interactive_limit():

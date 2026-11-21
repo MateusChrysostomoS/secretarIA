@@ -66,10 +66,20 @@ def test_professional_prompt_lists_only_real_options():
 
 def test_service_prompt_lists_only_real_options_and_final_rule():
     prompt = _service_help_prompt(_services(), final_round=True)
-    assert "Primeira Consulta — R$ 250 — Avaliação completa." in prompt
+    assert "Primeira Consulta — Avaliação completa." in prompt  # TASK-088 R38: no price
+    assert "R$" not in prompt
     assert "- Retorno" in prompt
     assert "serviço" in prompt.lower()
     assert "ÚLTIMA troca" in prompt
+
+
+def test_both_prompts_forbid_stating_any_value():
+    """R38 ("valor só no fim"): the help model is handed no numbers, but must also be TOLD not to
+    state one - it could invent a price that would reach the patient mid-flow."""
+    rule = "não informe valores; o valor aparece na confirmação final"
+    assert rule in _professional_help_prompt(_professionals(), final_round=False)
+    assert rule in _service_help_prompt(_services(), final_round=False)
+    assert rule in _service_help_prompt(_services(), final_round=True)
 
 
 def test_prompts_are_scope_distinct():

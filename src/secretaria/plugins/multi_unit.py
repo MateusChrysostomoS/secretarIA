@@ -64,6 +64,7 @@ from secretaria.ai.unit_scope import (
 from secretaria.core.logging import get_logger
 from secretaria.plugins.base import PluginSpec
 from secretaria.plugins.registry import register
+from secretaria.services.availability import booking_buffer_minutes
 from secretaria.services.calendar import (
     build_event_description,
     build_patient_calendar_link,
@@ -310,6 +311,7 @@ async def create_event_at_unit(
         fallback_end,
         tool_name="create_event_at_unit",
         appointment_type=canonical_type,
+        buffer_minutes=booking_buffer_minutes(owner),
     )
     event = await _create_booking_event(
         cal,

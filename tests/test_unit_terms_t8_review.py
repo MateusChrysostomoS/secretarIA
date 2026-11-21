@@ -583,7 +583,7 @@ async def _router_help(monkeypatch, *, unit_id):
     conversation.flow_selected_professional_id = ana.id
     conversation.flow_selected_unit_id = unit_id
     await fr._handle_service_help(
-        conversation, _rb_tenant(), "quanto custa?", ana.appointment_types, ana
+        conversation, _rb_tenant(), "quanto custa?", ana.appointment_types
     )
     [service] = seen["services"]
     return service.get("price")
@@ -595,9 +595,10 @@ async def test_c_router_help_hides_a_differing_price_before_the_unit(monkeypatch
 
 
 @pytest.mark.asyncio
-async def test_c_router_help_shows_the_chosen_units_price(monkeypatch):
-    assert await _router_help(monkeypatch, unit_id=_CENTRO.id) == "R$ 250,00"
-    assert await _router_help(monkeypatch, unit_id=_SEDE.id) == "R$ 200,00"
+async def test_c_router_help_never_hands_the_model_a_price_even_at_a_chosen_unit(monkeypatch):
+    # TASK-088 R38 ("valor só no fim"): it used to hand the chosen unit's price; now none.
+    assert await _router_help(monkeypatch, unit_id=_CENTRO.id) is None
+    assert await _router_help(monkeypatch, unit_id=_SEDE.id) is None
 
 
 async def _help_block(db, monkeypatch, w, *, unit=None) -> str:
@@ -642,22 +643,23 @@ async def _help_block(db, monkeypatch, w, *, unit=None) -> str:
 
 
 @pytest.mark.asyncio
-async def test_c_scoped_help_before_the_unit_keeps_d3(db, monkeypatch):
+async def test_c_scoped_help_before_the_unit_has_no_money(db, monkeypatch):
     w = await base._world(db, exceptions=SEDE_200_CENTRO_250)
     block = await _help_block(db, monkeypatch, w)
-    assert block.startswith("- Consulta — valor depende da unidade escolhida")
-    assert "R$" not in block
+    assert block.startswith("- Consulta")
+    assert "R$" not in block and "valor depende" not in block
 
 
 @pytest.mark.asyncio
-async def test_c_scoped_help_after_the_unit_says_that_units_price(db, monkeypatch):
+async def test_c_scoped_help_after_the_unit_has_no_money_either(db, monkeypatch):
+    # TASK-088 R38, through the REAL `run_service_help` prompt builder (no fake of it): whatever
+    # the unit chosen - and even when the entry handed in carries a price - the options block the
+    # model reads has no "R$" and no "valor depende" sentence.
     w = await base._world(db, exceptions=SEDE_200_CENTRO_250)
-    assert (await _help_block(db, monkeypatch, w, unit=w.centro)).startswith(
-        "- Consulta — R$ 250,00"
-    )
-    assert (await _help_block(db, monkeypatch, w, unit=w.sede)).startswith(
-        "- Consulta — R$ 200,00"
-    )
+    for unit in (None, w.centro, w.sede):
+        block = await _help_block(db, monkeypatch, w, unit=unit)
+        assert block.startswith("- Consulta")
+        assert "R$" not in block and "valor depende" not in block
 
 
 # ========================================== M3: one rule for "na Unidade X" (never doubled)
@@ -682,22 +684,19 @@ def test_m3_unit_place_label(name, place):
 def test_m3_the_three_texts_name_the_unit_alike(name):
     place = unit_place_label(name)
     assert service_change.unit_change_label("Consulta", name) == f"Consulta na {place}"
-    line = fr._unit_terms_text("Consulta", SimpleNamespace(name=name), None, 30)
+    line = fr._unit_terms_text("Consulta", SimpleNamespace(name=name), 30)
     assert line.startswith(f"Consulta na {place}:")
     assert service_change._unit_label("u1", {"u1": name}) == place
 
 
-# ========================== cosmetic: "R$" and "min" never broken from their number (NBSP)
+# ========================== cosmetic: "min" never broken from its number (NBSP)
 
 NBSP = "\u00a0"
 
 
-def test_terms_line_keeps_the_money_and_minutes_together():
+def test_terms_line_keeps_the_minutes_together_and_has_no_money():
     centro = SimpleNamespace(name="Centro")
-    assert fr._unit_terms_text("Consulta", centro, "R$ 250,00", 40) == (
-        f"Consulta na Unidade Centro: R${NBSP}250,00 · 40{NBSP}min"
-    )
-    assert fr._unit_terms_text("Consulta", centro, None, 40) == (
+    assert fr._unit_terms_text("Consulta", centro, 40) == (
         f"Consulta na Unidade Centro: 40{NBSP}min"
     )
 

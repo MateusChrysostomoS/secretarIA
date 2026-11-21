@@ -41,12 +41,17 @@ from secretaria.services.booking_scope import BOOKING_TOPOLOGY_MULTI, booking_to
 from secretaria.services.calendar import CalendarService
 from secretaria.services.flow_router import (
     ATTENDEE_STEPS,
+    LABEL_INSURANCE_PARTICULAR,
+    STEP_AWAITING_CATALOG_SERVICE,
     STEP_AWAITING_INSURANCE,
+    STEP_AWAITING_NO_PLAN_AT_UNIT,
     STEP_AWAITING_PROFESSIONAL,
     STEP_AWAITING_SERVICE,
+    STEP_AWAITING_SERVICE_PROFESSIONAL,
     FlowRouterResult,
     booking_gate_scope,
 )
+from secretaria.services.flow_units import STEP_AWAITING_UNIT, STEP_AWAITING_UNIT_CONFIRM
 from secretaria.services.insurance_catalog import load_tenant_insurance
 from secretaria.services.service_catalog import load_service_catalog
 from secretaria.services.tenant_config import list_active_professionals
@@ -57,6 +62,9 @@ from secretaria.workers.shared.greeting import _flow_professionals, _flow_tenant
 from secretaria.workers.shared.llm_context import _appointment_calendar
 
 logger = get_logger(__name__)
+_UNIT_ANSWER_STEPS = (
+    STEP_AWAITING_UNIT, STEP_AWAITING_UNIT_CONFIRM, STEP_AWAITING_NO_PLAN_AT_UNIT,
+)
 
 
 @dataclass
@@ -85,6 +93,7 @@ def _conversation_flow_snapshot(conversation: Conversation) -> SimpleNamespace:
         flow_selected_slot=conversation.flow_selected_slot,
         flow_selected_professional_id=conversation.flow_selected_professional_id,
         flow_selected_insurance=conversation.flow_selected_insurance,
+        flow_insurance_auto=getattr(conversation, "flow_insurance_auto", None),
         flow_selected_unit_id=conversation.flow_selected_unit_id,
         flow_managing_appointment_id=conversation.flow_managing_appointment_id,
         flow_attendee_name=conversation.flow_attendee_name,
@@ -219,6 +228,13 @@ async def _resolve_draft(
         )
 
 
+def _chosen_particular_at_unit(result: FlowRouterResult) -> bool:
+    return (
+        result.flow_selected_insurance == LABEL_INSURANCE_PARTICULAR
+        and result.flow_insurance_auto is False
+    )
+
+
 def _fold_answer(
     draft: BookingDraft, answered_step: str | None, result: FlowRouterResult
 ) -> BookingDraft:
@@ -230,15 +246,31 @@ def _fold_answer(
     new doctor does not offer is dropped and asked again from its own step. Convênio: the
     answer is recorded on the conversation exactly as given (a typed "Outro convênio"
     included) and the draft's own convênio text gives way to it.
+
+    TASK-088: the service-first questions fold the same way - the clinic catalog's pick is the
+    service (and the doctor, when only one does it), the doctors-of-a-service pick is the
+    doctor. The unit lives on the conversation. Choosing Particular at a unit also
+    replaces any plan from the parked draft.
     """
     if answered_step in ATTENDEE_STEPS:
         answered_other = real_attendee_name(result.flow_attendee_name) is not None
         return replace(
             draft, attendee=DRAFT_ATTENDEE_OTHER if answered_other else DRAFT_ATTENDEE_SELF
         )
-    if answered_step == STEP_AWAITING_INSURANCE:
+    if answered_step == STEP_AWAITING_INSURANCE or (
+        answered_step in _UNIT_ANSWER_STEPS and _chosen_particular_at_unit(result)
+    ):
         return replace(draft, insurance=None)
-    if answered_step == STEP_AWAITING_PROFESSIONAL and result.flow_selected_professional_id:
+    if answered_step == STEP_AWAITING_CATALOG_SERVICE and result.flow_selected_type:
+        return replace(
+            draft,
+            service=result.flow_selected_type,
+            professional_id=result.flow_selected_professional_id or draft.professional_id,
+        )
+    if (
+        answered_step in (STEP_AWAITING_PROFESSIONAL, STEP_AWAITING_SERVICE_PROFESSIONAL)
+        and result.flow_selected_professional_id
+    ):
         return replace(
             draft, professional_id=result.flow_selected_professional_id,
             professional_unresolved=False,
@@ -289,8 +321,18 @@ async def _resume_booking_draft(
             ctx.conversation.flow_state = result.flow_state
             ctx.conversation.flow_step = result.flow_step
             ctx.conversation.flow_attendee_name = result.flow_attendee_name
-        if result.flow_selected_insurance is not None:
+        unit_answer = answered_step in _UNIT_ANSWER_STEPS
+        if unit_answer and result.flow_selected_unit_id is not None:
+            ctx.conversation.flow_selected_unit_id = result.flow_selected_unit_id
+        # On a unit answer, carry an explicit Particular choice. The resolver
+        # rechecks any earlier plan and computes automatic Particular itself.
+        if (
+            (not unit_answer or _chosen_particular_at_unit(result))
+            and result.flow_selected_insurance is not None
+            and result.flow_insurance_auto is not True
+        ):
             ctx.conversation.flow_selected_insurance = result.flow_selected_insurance
+            ctx.conversation.flow_insurance_auto = result.flow_insurance_auto
         resolution = await _resolve_draft(reply, tenant, draft, ctx, gate=gate)
     except Exception as exc:
         logger.warning(

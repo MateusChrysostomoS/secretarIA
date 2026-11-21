@@ -121,8 +121,10 @@ async def test_the_draft_is_dropped_by_anything_that_leaves_the_attendee_steps()
         flow_step=fr.STEP_AWAITING_SERVICE,
         flow_draft=RECORD,
     )
-    detail = await fr.route(on_service, tenant, None, "Primeira Consulta")
-    assert detail.flow_step == fr.STEP_AWAITING_SERVICE_CONFIRM
+    from tests.test_flow_router import _FakeCalendar  # noqa: PLC0415
+
+    detail = await fr.route(on_service, tenant, _FakeCalendar(), "Primeira Consulta")
+    assert detail.flow_step == fr.STEP_AWAITING_DAY  # TASK-088 Task 8: no service card
     assert detail.flow_draft is None
 
     llm = await fr.route(

@@ -7,15 +7,15 @@ booking gate (armed = the Portal's hold, unarmed = the WhatsApp booking).
 
 * characterization: no exception (no unit, two units, an exception that changes nothing) ->
   exactly today's card, offers, event and details;
-* B2/D3: a price that differs between the units is NOT on the service card (never a range); one
-  unit for the service -> that unit's value (R2);
-* A7: once the unit is picked, ONE line "Consulta na Unidade Centro: R$ 250,00 · 30 min" before
-  the day picker - only when the card hid the price, never under a convênio, never repeated for
-  the unit already chosen;
+* B2/D3 (TASK-088 Task 8): no service card and no price in the middle of the flow; the final
+  confirmation says the value AT THE CHOSEN UNIT (never a range), for a Particular patient only;
+* A7 (TASK-088 Task 8): once the unit is picked, ONE line "Consulta na Unidade Centro: 40 min"
+  before the day picker - only when the unit takes another time than the service's base, never
+  with money, never repeated for the unit already chosen;
 * A5/A6: the slots and the event take the unit's duration (SPEC §10 item 4), the hold too;
 * SPEC §10 item 3: two doctors with their own values at the same unit, each respected;
 * R13: a single-doctor clinic (implicit owner) books with the owner's own list;
-* A14: the AI landing's details message prices the service at the unit.
+* A14 (TASK-088 Task 8): the AI landing's details message carries no price.
 """
 
 import os
@@ -59,8 +59,7 @@ CONSULTA = {
     "sort_order": 0,
     "service_id": str(SID),
 }
-CARD_WITH_PRICE = "Consulta R$ 200,00\n\nDeseja agendar esse serviço?"
-CARD_WITHOUT_PRICE = "Consulta\n\nDeseja agendar esse serviço?"
+CARD_QUESTION = "Deseja agendar esse serviço?"
 
 
 class _MinutesAgenda(_Agenda):
@@ -132,14 +131,8 @@ def _longer_at_centro():
     return _doctor([SEDE, CENTRO], {SID: {CENTRO.id: UnitTerms(None, 40)}})
 
 
-def _card_body(result) -> str:
-    [bubble] = result.bubbles
-    assert isinstance(bubble, ButtonBubble)
-    return bubble.body
-
-
-async def _card(doctor, **conv):
-    """The service card the tap on "Consulta" draws (doctor-first list, doctor selected)."""
+async def _tap_service(doctor, agenda=None, **conv):
+    """The tap on "Consulta" in the doctor-first list: the step AFTER the service (no card)."""
     result = await fr.route(
         _conversation(
             flow_step=fr.STEP_AWAITING_SERVICE,
@@ -148,12 +141,14 @@ async def _card(doctor, **conv):
             **conv,
         ),
         _tenant(),
-        _MinutesAgenda(),
+        agenda or _MinutesAgenda(),
         "Consulta",
         professionals=[doctor, _doctor(name="Dr. Outro")],
     )
-    assert result.flow_step == fr.STEP_AWAITING_SERVICE_CONFIRM
-    return _card_body(result)
+    assert result.flow_step != fr.STEP_AWAITING_SERVICE_CONFIRM
+    assert not [b for b in result.bubbles if isinstance(b, ButtonBubble)]
+    assert CARD_QUESTION not in " ".join(getattr(b, "body", "") or "" for b in result.bubbles)
+    return result
 
 
 async def _pick_unit(doctor, unit, agenda=None, **conv):
@@ -172,12 +167,23 @@ def _texts(result) -> list[str]:
     return [b.body for b in result.bubbles if isinstance(b, TextBubble)]
 
 
-async def _book(doctor, unit, agenda, *, gate=None):
-    """Unit picked -> day -> slot -> Confirmar, every turn through `route()`."""
-    days = await _pick_unit(doctor, unit, agenda)
+async def _recap_body(doctor, unit, **conv) -> str:
+    """The final confirmation card's body for `doctor` at `unit`."""
+    recap = await _book(doctor, unit, _MinutesAgenda(), stop_at_recap=True, **conv)
+    [card] = [b for b in recap.bubbles if isinstance(b, ButtonBubble)]
+    return card.body
+
+
+async def _book(doctor, unit, agenda, *, gate=None, stop_at_recap=False, **conv):
+    """Unit picked -> day -> slot -> Confirmar, every turn through `route()`.
+
+    `stop_at_recap`: return the final confirmation result instead of confirming it."""
+    days = await _pick_unit(doctor, unit, agenda, **conv)
     assert days.flow_step == fr.STEP_AWAITING_DAY
     common = dict(
-        flow_selected_professional_id=doctor.id, flow_selected_unit_id=days.flow_selected_unit_id
+        flow_selected_professional_id=doctor.id,
+        flow_selected_unit_id=days.flow_selected_unit_id,
+        flow_selected_insurance=days.flow_selected_insurance,
     )
     slots = await fr.route(
         _conversation(flow_step=days.flow_step, **common),
@@ -199,6 +205,8 @@ async def _book(doctor, unit, agenda, *, gate=None):
         professionals=[doctor],
     )
     assert recap.flow_step == fr.STEP_AWAITING_CONFIRMATION
+    if stop_at_recap:
+        return recap
     return await fr.route(
         _conversation(
             flow_step=recap.flow_step,
@@ -220,25 +228,29 @@ async def _book(doctor, unit, agenda, *, gate=None):
 # --------------------------------------------------------------------------
 
 
-async def test_without_units_the_card_offers_and_event_are_todays():
+async def test_without_units_the_service_tap_goes_straight_to_the_days_as_today():
     doctor = _doctor()
-    assert await _card(doctor) == CARD_WITH_PRICE
     agenda = _MinutesAgenda()
-    days = await fr.route(
-        _conversation(flow_selected_professional_id=doctor.id),
-        _tenant(),
-        agenda,
-        fr.LABEL_BOOK_SERVICE,
-        professionals=[doctor],
-    )
+    days = await _tap_service(doctor, agenda)
     assert days.flow_step == fr.STEP_AWAITING_DAY
     assert _texts(days) == []
     assert agenda.minutes == [("days", 30)]
+    # The parked card step (a chat left there on deploy day) still answers "Sim".
+    parked = _MinutesAgenda()
+    again = await fr.route(
+        _conversation(flow_selected_professional_id=doctor.id),
+        _tenant(),
+        parked,
+        fr.LABEL_BOOK_SERVICE,
+        professionals=[doctor],
+    )
+    assert again.flow_step == fr.STEP_AWAITING_DAY and _texts(again) == []
+    assert parked.minutes == [("days", 30)]
 
 
-async def test_two_units_without_exceptions_show_the_price_and_no_extra_line():
+async def test_two_units_without_exceptions_say_no_price_and_no_extra_line():
     doctor = _doctor([SEDE, CENTRO])
-    assert await _card(doctor) == CARD_WITH_PRICE
+    assert (await _tap_service(doctor)).flow_step == STEP_AWAITING_UNIT
     agenda = _MinutesAgenda()
     booked = await _book(doctor, CENTRO, agenda)
     assert agenda.minutes == [("days", 30), ("slots", 30)]
@@ -248,23 +260,27 @@ async def test_two_units_without_exceptions_show_the_price_and_no_extra_line():
     picked = await _pick_unit(doctor, SEDE)
     assert _texts(picked) == []
     assert isinstance(picked.bubbles[0], SlotsBubble)
+    # The money is said once, on the final card: the service's own price, at either unit.
+    assert (await _recap_body(doctor, SEDE)).endswith("Valor: R$ 200,00")
+    assert (await _recap_body(doctor, CENTRO)).endswith("Valor: R$ 200,00")
 
 
-async def test_an_exception_that_changes_nothing_shown_keeps_todays_card_and_no_line():
+async def test_an_exception_that_changes_nothing_shown_keeps_no_line():
     # Centro's own price is the same money ("200" == "R$ 200,00"); another service has its own.
     doctor = _doctor(
         [SEDE, CENTRO],
         {SID: {CENTRO.id: UnitTerms("200", None)}, OTHER_SID: {SEDE.id: UnitTerms("R$ 9", 5)}},
     )
-    assert await _card(doctor) == CARD_WITH_PRICE
+    assert (await _tap_service(doctor)).flow_step == STEP_AWAITING_UNIT
     picked = await _pick_unit(doctor, CENTRO)
     assert _texts(picked) == []
+    assert (await _recap_body(doctor, CENTRO)).endswith("Valor: R$ 200,00")
 
 
-async def test_a_card_under_a_convenio_never_shows_a_price_as_today():
+async def test_a_final_card_under_a_convenio_never_shows_a_price():
     for doctor in (_doctor([SEDE, CENTRO]), _differs()):
-        body = await _card(doctor, flow_selected_insurance="Unimed")
-        assert body == "Consulta — convênio Unimed\n\nDeseja agendar esse serviço?"
+        body = await _recap_body(doctor, CENTRO, flow_selected_insurance="Unimed")
+        assert "R$" not in body and "Valor" not in body
 
 
 async def test_single_doctor_clinic_books_with_the_owners_own_list():
@@ -288,7 +304,7 @@ async def test_single_doctor_clinic_books_with_the_owners_own_list():
     assert booked.appointment["professional_id"] == doctor.id
 
 
-async def test_the_ai_details_message_prices_like_today_without_exceptions():
+async def test_the_ai_details_message_has_no_price_without_exceptions():
     doctor = _doctor([SEDE, CENTRO])
     text = bd._booking_details(
         SimpleNamespace(service=CONSULTA),
@@ -302,32 +318,44 @@ async def test_the_ai_details_message_prices_like_today_without_exceptions():
         owner=doctor,
         unit=CENTRO,
     )
-    assert "🏥 Serviço: Consulta — R$ 200,00" in text
+    assert "R$" not in text
+    assert "🏥 Serviço: Consulta" in text
 
 
 # --------------------------------------------------------------------------
-# B2 / D3: the service card before the unit
+# B2 / D3 (TASK-088 Task 8): no service card, no price before the final confirmation
 # --------------------------------------------------------------------------
 
 
-async def test_a_price_that_differs_between_units_is_not_on_the_card():
-    assert await _card(_differs()) == CARD_WITHOUT_PRICE
+async def test_a_price_that_differs_between_units_is_said_only_at_the_chosen_unit_at_the_end():
+    doctor = _differs()
+    tapped = await _tap_service(doctor)
+    assert tapped.flow_step == STEP_AWAITING_UNIT
+    assert "R$" not in "\n".join(_texts(tapped))
+    # The value on the final card is the CHOSEN unit's - never a range, never the other unit's.
+    assert (await _recap_body(doctor, CENTRO)).endswith("Valor: R$ 250,00")
+    assert (await _recap_body(doctor, SEDE)).endswith("Valor: R$ 200,00")
 
 
-async def test_a_service_done_at_one_unit_shows_that_units_price():
+async def test_a_service_done_at_one_unit_confirms_it_and_shows_that_units_price_at_the_end():
     # R2: Consulta only at Centro (of the doctor's two units), Centro charges R$ 250,00.
     doctor = _doctor(
         [SEDE, CENTRO],
         {SID: {CENTRO.id: UnitTerms("R$ 250,00", None)}},
         {SID: frozenset({CENTRO.id})},
     )
-    assert await _card(doctor) == "Consulta R$ 250,00\n\nDeseja agendar esse serviço?"
+    tapped = await _tap_service(doctor)
+    assert tapped.flow_step == STEP_AWAITING_UNIT_CONFIRM
+    assert "R$" not in "\n".join(getattr(b, "body", "") or "" for b in tapped.bubbles)
     # A doctor with a single unit that has its own price: that price.
     single = _doctor([CENTRO], {SID: {CENTRO.id: UnitTerms("R$ 250,00", None)}})
-    assert await _card(single) == "Consulta R$ 250,00\n\nDeseja agendar esse serviço?"
+    straight = await _tap_service(single)
+    assert straight.flow_step == fr.STEP_AWAITING_DAY
+    assert "R$" not in "\n".join(_texts(straight))
+    assert (await _recap_body(single, CENTRO)).endswith("Valor: R$ 250,00")
 
 
-async def test_the_resumed_card_hides_a_differing_price_too():
+async def test_the_resumed_parked_card_step_goes_on_and_says_no_price():
     doctor = _differs()
     result = await fr.resume_bubbles(
         _conversation(flow_selected_professional_id=doctor.id),
@@ -335,10 +363,12 @@ async def test_the_resumed_card_hides_a_differing_price_too():
         _MinutesAgenda(),
         professionals=[doctor],
     )
-    assert _card_body(result) == CARD_WITHOUT_PRICE
+    assert result.flow_step == STEP_AWAITING_UNIT
+    text = "\n".join(getattr(b, "body", "") or "" for b in result.bubbles)
+    assert CARD_QUESTION not in text and "R$" not in text
 
 
-async def test_the_clinic_catalog_branch_card_hides_a_differing_price():
+async def test_the_clinic_catalog_branch_goes_straight_on_without_a_price():
     doctor = _differs()
     result = await fr.route(
         _conversation(flow_step=fr.STEP_AWAITING_CATALOG_SERVICE, flow_selected_type=None),
@@ -347,7 +377,8 @@ async def test_the_clinic_catalog_branch_card_hides_a_differing_price():
         "Consulta",
         professionals=[doctor, _doctor(name="Dr. Outro", entries=[])],
     )
-    assert _card_body(result) == CARD_WITHOUT_PRICE
+    assert result.flow_step == STEP_AWAITING_UNIT
+    assert not [b for b in result.bubbles if isinstance(b, ButtonBubble)]
     assert result.flow_selected_professional_id == doctor.id
 
 
@@ -387,23 +418,25 @@ def _nb(text: str) -> str:
     return text.replace("R$ ", "R$" + nbsp).replace(" min", nbsp + "min")
 
 
-async def test_picking_a_unit_sends_its_values_once_before_the_day_picker():
-    doctor = _differs()
+async def test_picking_a_unit_sends_its_duration_once_before_the_day_picker_and_no_money():
+    doctor = _longer_at_centro()
     picked = await _pick_unit(doctor, CENTRO)
     assert picked.flow_step == fr.STEP_AWAITING_DAY
     first, picker = picked.bubbles
     assert isinstance(first, TextBubble)
-    assert first.body == _nb("Consulta na Unidade Centro: R$ 250,00 · 30 min")
+    assert first.body == _nb("Consulta na Unidade Centro: 40 min")
     assert isinstance(picker, SlotsBubble)
-    sede = await _pick_unit(doctor, SEDE)
-    assert _texts(sede) == [_nb("Consulta na Unidade Sede: R$ 200,00 · 30 min")]
+    # Sede takes the base time: nothing to say.
+    assert _texts(await _pick_unit(doctor, SEDE)) == []
+    # A price that differs, at the same duration: the unit pick says nothing - money waits.
+    assert _texts(await _pick_unit(_differs(), CENTRO)) == []
 
 
-async def test_the_line_never_doubles_the_word_unidade_and_drops_a_missing_price():
+async def test_the_line_never_doubles_the_word_unidade_and_never_carries_a_price():
     named = UnitOption(id=uuid4(), name="Unidade Centro", address=None, business_hours=TUESDAY)
     doctor = _doctor([SEDE, named], {SID: {named.id: UnitTerms("R$ 250,00", 40)}})
     picked = await _pick_unit(doctor, named)
-    assert _texts(picked) == [_nb("Consulta na Unidade Centro: R$ 250,00 · 40 min")]
+    assert _texts(picked) == [_nb("Consulta na Unidade Centro: 40 min")]
 
     no_base_price = {**CONSULTA, "price": None}
     priced_elsewhere = _doctor(
@@ -412,16 +445,17 @@ async def test_the_line_never_doubles_the_word_unidade_and_drops_a_missing_price
         entries=[no_base_price],
     )
     at_sede = await _pick_unit(priced_elsewhere, SEDE)
-    assert _texts(at_sede) == [_nb("Consulta na Unidade Sede: 30 min")]
+    assert _texts(at_sede) == []
 
 
-async def test_no_line_under_a_convenio_or_when_the_price_is_the_same():
-    under_plan = await _pick_unit(_differs(), CENTRO, flow_selected_insurance="Unimed")
-    assert _texts(under_plan) == []
-    particular = await _pick_unit(_differs(), CENTRO, flow_selected_insurance="Particular")
-    assert _texts(particular) == [_nb("Consulta na Unidade Centro: R$ 250,00 · 30 min")]
-    same_price = await _pick_unit(_longer_at_centro(), CENTRO)
-    assert _texts(same_price) == []
+async def test_the_duration_line_is_the_same_under_any_convenio_answer():
+    # No money in it, so the convenio answer no longer matters (it used to hide the price).
+    under_plan = await _pick_unit(_longer_at_centro(), CENTRO, flow_selected_insurance="Unimed")
+    assert _texts(under_plan) == [_nb("Consulta na Unidade Centro: 40 min")]
+    particular = await _pick_unit(_longer_at_centro(), CENTRO, flow_selected_insurance="Particular")
+    assert _texts(particular) == [_nb("Consulta na Unidade Centro: 40 min")]
+    same_time = await _pick_unit(_differs(), CENTRO, flow_selected_insurance="Particular")
+    assert _texts(same_time) == []
 
 
 async def test_the_line_is_not_repeated_for_the_unit_already_chosen():
@@ -558,8 +592,9 @@ async def test_two_doctors_at_the_same_unit_keep_their_own_values():
             _unit_tap(CENTRO),
             professionals=[ana, beto],
         )
-        assert _texts(picked) == [_nb(f"Consulta na Unidade Centro: {price} · {minutes} min")]
+        assert _texts(picked) == [_nb(f"Consulta na Unidade Centro: {minutes} min")]
         assert agenda.minutes == [("days", minutes)]
+        assert (await _recap_body(doctor, CENTRO)).endswith(f"Valor: {price}")
         confirm = await fr.route(
             _conversation(
                 flow_step=fr.STEP_AWAITING_CONFIRMATION,
@@ -618,13 +653,11 @@ def _details(doctor, unit):
     )
 
 
-def test_the_ai_details_message_prices_the_service_at_the_unit():
+def test_the_ai_details_message_has_no_price_at_any_unit():
     doctor = _differs()
-    assert "🏥 Serviço: Consulta — R$ 250,00" in _details(doctor, CENTRO)
-    assert "🏥 Serviço: Consulta — R$ 200,00" in _details(doctor, SEDE)
-    # No unit known and the price differs: no price at all (D3), never a range.
-    unknown = _details(doctor, None)
-    assert "🏥 Serviço: Consulta\n" in unknown and "R$" not in unknown
+    for unit in (CENTRO, SEDE, None):
+        details = _details(doctor, unit)
+        assert "🏥 Serviço: Consulta" in details and "R$" not in details
 
 
 async def test_the_ai_landing_on_a_day_scans_with_the_units_length():

@@ -171,6 +171,8 @@ async def _sync_agenda(session, tenant, appointment, edit: dict, window_before) 
         calendar,
         patient_name=edit.get("patient_name"),
         window_changed=_window(appointment) != window_before,
+        # TASK-088 Task 5: this is the PATIENT's edit - held to the doctor's buffer.
+        buffer_for_patient=True,
     )
 
 

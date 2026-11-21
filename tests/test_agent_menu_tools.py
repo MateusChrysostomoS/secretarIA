@@ -1130,7 +1130,7 @@ async def test_empty_booking_draft_returns_to_administrative_selection(
     from secretaria.ai.graph import BOOKING_DRAFT_SENTINEL_PREFIX
     from secretaria.services.flow_router import (
         STEP_AWAITING_ATTENDEE_CHOICE,
-        STEP_AWAITING_PROFESSIONAL,
+        STEP_AWAITING_CATALOG_SERVICE,
     )
 
     if multi:
@@ -1153,7 +1153,8 @@ async def test_empty_booking_draft_returns_to_administrative_selection(
         # a second time (the 2026-10-01 production report).
         assert conv.flow_step == (
             STEP_AWAITING_ATTENDEE_CHOICE if attendee is None else
-            STEP_AWAITING_PROFESSIONAL if multi else STEP_AWAITING_SERVICE
+            # TASK-088: the service is the first choice - the clinic's catalog, not the doctor list
+            STEP_AWAITING_CATALOG_SERVICE if multi else STEP_AWAITING_SERVICE
         )
         assert conv.flow_attendee_name == attendee
         assert conv.flow_selected_slot is None
@@ -1201,8 +1202,7 @@ async def test_empty_booking_draft_service_then_professional_keeps_valid_choice(
 ):
     from secretaria.ai.graph import BOOKING_DRAFT_SENTINEL_PREFIX
     from secretaria.services.flow_router import (
-        STEP_AWAITING_PROFESSIONAL,
-        STEP_AWAITING_SERVICE_CONFIRM,
+        STEP_AWAITING_DAY,
         STEP_AWAITING_SERVICE_PROFESSIONAL,
         route,
     )
@@ -1227,15 +1227,16 @@ async def test_empty_booking_draft_service_then_professional_keeps_valid_choice(
     )
     async with db() as session:
         conv = await session.get(Conversation, conversation.id)
-        assert conv.flow_step == STEP_AWAITING_PROFESSIONAL
+        # The patient had chosen the service: where he was is the doctors of THAT service.
+        assert conv.flow_step == STEP_AWAITING_SERVICE_PROFESSIONAL
         assert conv.flow_selected_type == "Consulta Geral"
         professionals = await tasks.list_active_professionals(session, tenant.id)
         snapshot = tasks._flow_tenant_snapshot(tenant, professionals, [], None)
         result = await route(conv, snapshot, None, "Dra. Ana", professionals=professionals)
 
-    assert result.flow_step == (
-        STEP_AWAITING_SERVICE_CONFIRM if compatible else STEP_AWAITING_SERVICE
-    )
+    # TASK-088 Task 8: the doctor tap goes straight on (no service card): the days for a doctor
+    # who still does the service (no calendar was handed in, so the picker says it is down).
+    assert result.flow_step == (STEP_AWAITING_DAY if compatible else STEP_AWAITING_SERVICE)
     assert result.flow_selected_type == ("Consulta Geral" if compatible else None)
     assert result.flow_selected_professional_id == ana.id
     assert _stub_calendar.day_scans == []
@@ -1245,7 +1246,7 @@ async def test_empty_booking_draft_discards_inactive_doctor_without_reading_cale
     db, _captured_bubbles, monkeypatch
 ):
     from secretaria.ai.graph import BOOKING_DRAFT_SENTINEL_PREFIX
-    from secretaria.services.flow_router import STEP_AWAITING_PROFESSIONAL
+    from secretaria.services.flow_router import STEP_AWAITING_CATALOG_SERVICE
 
     tenant, ana, bruno, patient, conversation = await _seed(db, selected=True)
     async with db() as session:
@@ -1266,7 +1267,7 @@ async def test_empty_booking_draft_discards_inactive_doctor_without_reading_cale
     )
     async with db() as session:
         conv = await session.get(Conversation, conversation.id)
-        assert conv.flow_step == STEP_AWAITING_PROFESSIONAL
+        assert conv.flow_step == STEP_AWAITING_CATALOG_SERVICE
         assert conv.flow_selected_professional_id is None
         assert conv.flow_attendee_name == "Atendido Teste"
 
@@ -1283,7 +1284,7 @@ async def test_empty_draft_insurance_survives_complete_attendee_flow(
         LABEL_ATTENDEE_OTHER,
         LABEL_ATTENDEE_SELF,
     )
-    from secretaria.services.flow_router import STEP_AWAITING_PROFESSIONAL, route
+    from secretaria.services.flow_router import STEP_AWAITING_CATALOG_SERVICE, route
 
     tenant, ana, bruno, patient, conversation = await _seed(db)
     async with db() as session:
@@ -1314,7 +1315,10 @@ async def test_empty_draft_insurance_survives_complete_attendee_flow(
         )
     async with db() as session:
         conv = await session.get(Conversation, conversation.id)
-        assert conv.flow_step == STEP_AWAITING_PROFESSIONAL
+        # TASK-088: pra-quem answered -> the booking's first list is the SERVICE catalog (the
+        # convênio the draft held rides along, to be checked once the unit is known).
+        assert conv.flow_step == STEP_AWAITING_CATALOG_SERVICE
+        assert conv.flow_selected_insurance == "Unimed"
         from secretaria.services.attendee import ATTENDEE_SELF
 
         assert conv.flow_attendee_name == ("Pessoa Teste" if other else ATTENDEE_SELF)

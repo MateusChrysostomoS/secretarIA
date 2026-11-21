@@ -113,9 +113,6 @@ ALLOWLIST: dict[tuple[str, str], str] = {
     ("ai/prompts.py", "_format_appointment_types"): (
         "formats RuntimeAppointmentType, already D3-resolved by tenant_config"
     ),
-    ("ai/scoped_help.py", "_service_price"): (
-        "no exception -> base; else entry_shown_terms (D3 sentence, never a number)"
-    ),
     ("ai/tools.py", "get_service_info"): (
         "RuntimeAppointmentType (resolved) first, then overridden by the chosen unit's terms"
     ),
@@ -128,7 +125,6 @@ ALLOWLIST: dict[tuple[str, str], str] = {
     ("services/flow_router.py", "_priced_entry"): (
         "flow_units.shown_terms; compares to base only to keep the same dict when equal"
     ),
-    ("services/flow_router.py", "_with_unit_terms_line"): "flow_units.shown_terms(...).price",
     ("services/payments/deposit_lifecycle.py", "_price_at_unit"): (
         "base for the no-exception case; the unit's own price via resolve_entry_at_unit"
     ),

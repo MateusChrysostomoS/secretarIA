@@ -666,12 +666,14 @@ _FLOWS_ON = {"enabled": True, "buttons": ["Serviços e Custo", "Horários", "Out
 _SERVICES = [{"name": "Consulta", "duration_min": 30, "is_active": True}]
 
 
-async def test_e2e_db_acceptance_marks_doctor_list(db):
+async def test_e2e_db_acceptance_decides_the_convenio_list(db):
+    """TASK-088: the doctors' stored plan lists decide which plans the convênio list offers for
+    the chosen doctor (it used to mark the doctor rows when the convênio came first)."""
     from secretaria.schemas.webhook import inbound_routing_text
     from secretaria.services.flow_router import (
-        INSURANCE_ACCEPTED_MARK,
+        STEP_AWAITING_CATALOG_SERVICE,
         STEP_AWAITING_INSURANCE,
-        STEP_AWAITING_PROFESSIONAL,
+        STEP_AWAITING_SERVICE_PROFESSIONAL,
         route,
     )
 
@@ -696,20 +698,34 @@ async def test_e2e_db_acceptance_marks_doctor_list(db):
     professionals = [ana, bruno]
     snapshot = _flow_tenant(tenant, professionals, insurance)
     after, conv = await _book_until_after_attendee(snapshot, professionals)
-    assert after.flow_step == STEP_AWAITING_INSURANCE
-    unimed_row = next(row for row in after.bubbles[0].rows if row[1] == "Unimed")
+    # The SERVICE first, then the doctor, then the convênio (TASK-088 Task 8: no card between).
+    assert after.flow_step == STEP_AWAITING_CATALOG_SERVICE
+    service_row = next(row for row in after.bubbles[0].rows if row[0] == "svc|Consulta")
     doctors = await route(
         conv(after),
         snapshot,
         None,
-        inbound_routing_text(unimed_row[1], unimed_row[0]),
+        inbound_routing_text(service_row[1], service_row[0]),
         professionals=professionals,
     )
-    assert doctors.flow_step == STEP_AWAITING_PROFESSIONAL
-    by_id = {row[0]: row[2] for row in doctors.bubbles[0].rows}
-    assert str(by_id[f"prof|{ana.id}"]).startswith(INSURANCE_ACCEPTED_MARK)
-    assert f"prof|{bruno.id}" in by_id  # listed...
-    assert not str(by_id[f"prof|{bruno.id}"] or "").startswith(INSURANCE_ACCEPTED_MARK)
+    assert doctors.flow_step == STEP_AWAITING_SERVICE_PROFESSIONAL
+    assert {row[0] for row in doctors.bubbles[0].rows} == {f"prof|{ana.id}", f"prof|{bruno.id}"}
+
+    async def plans_of(doctor):
+        row = next(r for r in doctors.bubbles[0].rows if r[0] == f"prof|{doctor.id}")
+        asked = await route(
+            conv(doctors),
+            snapshot,
+            None,
+            inbound_routing_text(row[1], row[0]),
+            professionals=professionals,
+        )
+        assert asked.flow_step == STEP_AWAITING_INSURANCE
+        # (without the list's back row - TASK-088 R18)
+        return [row[1] for row in asked.bubbles[0].rows if not row[0].startswith("dayback|")]
+
+    assert await plans_of(ana) == ["Unimed", "Particular", "Outro convênio"]
+    assert await plans_of(bruno) == ["Amil", "Particular", "Outro convênio"]
 
 
 async def test_e2e_clinic_with_only_non_catalog_legacy_plans_still_asks_insurance(db):
@@ -738,12 +754,22 @@ async def test_e2e_clinic_with_only_non_catalog_legacy_plans_still_asks_insuranc
         assert tenant.insurances == ["GEAP", "Cabesp"]
         insurance = await load_tenant_insurance(session, tenant.id)
 
+    from secretaria.schemas.webhook import inbound_routing_text
+    from secretaria.services.flow_router import route
+
     snapshot = _flow_tenant(tenant, [solo], insurance)
-    after, _conv = await _book_until_after_attendee(snapshot, [solo])
-    assert after.flow_step == STEP_AWAITING_INSURANCE, (
-        f"convênio step skipped: got {after.flow_step!r} although collect_insurance=True "
+    after, conv = await _book_until_after_attendee(snapshot, [solo])
+    # TASK-088: the service first (one doctor: his own list), then the convênio (no card).
+    row = next(r for r in after.bubbles[0].rows if r[0].startswith("svc|"))
+    asked = await route(
+        conv(after), snapshot, None, inbound_routing_text(row[1], row[0]), professionals=[solo]
+    )
+    assert asked.flow_step == STEP_AWAITING_INSURANCE, (
+        f"convênio step skipped: got {asked.flow_step!r} although collect_insurance=True "
         f"and tenants.insurances={tenant.insurances!r}"
     )
+    # Legacy names have no id to judge them by: listed as they are.
+    assert [r[1] for r in asked.bubbles[0].rows][:2] == ["GEAP", "Cabesp"]
 
 
 # --------------------------------------------------------------------------

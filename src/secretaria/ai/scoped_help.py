@@ -46,7 +46,6 @@ from sqlalchemy import select
 
 from secretaria.ai.chat_model import build_structured_model
 from secretaria.ai.pii import scrub_messages
-from secretaria.ai.prompts import PRICE_DEPENDS_ON_UNIT
 from secretaria.config import get_settings
 from secretaria.core.database import async_session_factory
 from secretaria.core.logging import get_logger
@@ -167,6 +166,7 @@ _SCOPED_RULES = (
     "diagnóstico ou triagem. Não minimize: não afirme que é seguro esperar "
     "ou que não é urgente. Se houver sinais explícitos de emergência, "
     "use action=escalate para sair desta ajuda limitada.\n"
+    "- Nunca cite preço: não informe valores; o valor aparece na confirmação final.\n"
     "- Você SÓ pode indicar opções da lista acima. Nunca invente, sugira ou "
     "mencione qualquer opção fora dela.\n"
     "- Se a descrição do paciente já permite escolher com confiança, use "
@@ -206,38 +206,16 @@ def _professional_options_block(professionals: list) -> str:
     return "\n".join(lines)
 
 
-def _service_price(service: dict, professional: Any | None) -> Any:
-    """The price the options block may show (TASK-085 D3: the unit is not chosen yet).
+def _service_options_block(services: list[dict]) -> str:
+    """The service options the model may choose from: name and description - NO money.
 
-    `professional` is the booking professional's router-shaped view (`_service_terms_view`).
-    Without a per-unit value for the service: the entry's own price, as always. With one: the
-    D3 rule - hidden when it differs between the units (a sentence, never a number), the unit's
-    own when the service is done at one unit only. The unit the patient already picked
-    (`chosen_unit_id`, set by `_service_terms_view`), when it is one where the professional does
-    this service: that unit's price (TASK-085 T8 review c) - as the service card shows it.
-    """
-    from secretaria.services import flow_units
-    from secretaria.services.service_catalog import entry_service_id
-    from secretaria.services.tenant_config import entry_shown_terms
-
-    shown = entry_shown_terms(professional, service)
-    if shown is None:
-        return service.get("price")
-    chosen = flow_units.find_unit(
-        professional, getattr(professional, "chosen_unit_id", None), entry_service_id(service)
-    )
-    if chosen is not None:
-        return flow_units.shown_terms(professional, service, chosen.id).price
-    return PRICE_DEPENDS_ON_UNIT if shown.price_hidden else shown.price
-
-
-def _service_options_block(services: list[dict], professional: Any | None = None) -> str:
+    TASK-088 R38 ("valor só no fim"): the model's one-line reason and its clarifying question
+    reach the patient in the middle of the flow, so it is handed no price at all - neither a
+    value nor the old "o valor depende da unidade" sentence (that one told it to say the price
+    later, the opposite of the rule). Money is said only on the final confirmation card."""
     lines = []
     for service in services:
         parts = [str(service.get("name", ""))]
-        price = _service_price(service, professional)
-        if price:
-            parts.append(str(price))
         description = service.get("description") or service.get("long_description")
         if description:
             parts.append(str(description))
@@ -257,15 +235,13 @@ def _professional_help_prompt(professionals: list, final_round: bool) -> str:
     )
 
 
-def _service_help_prompt(
-    services: list[dict], final_round: bool, professional: Any | None = None
-) -> str:
+def _service_help_prompt(services: list[dict], final_round: bool) -> str:
     return (
         "Você é a secretária de agendamento de uma clínica. Sua ÚNICA tarefa "
         "agora é ajudar o paciente a escolher o serviço certo da lista abaixo, "
         "a partir do que ele descreveu que precisa.\n\n"
         "Serviços disponíveis (os ÚNICOS que existem):\n"
-        f"{_service_options_block(services, professional)}\n\n"
+        f"{_service_options_block(services)}\n\n"
         f"{_SCOPED_RULES}{_FINAL_ROUND_RULE if final_round else ''}"
     )
 
@@ -384,54 +360,14 @@ async def run_service_help(
     when the multi-doctor branch is active, else the tenant's) — the ONLY
     options the model is shown. Empty catalog short-circuits to escalate.
 
-    TASK-085 D3: the service is chosen BEFORE the unit, so a price that differs between the
-    booking professional's units is not shown here. The router passes only the dicts, so their
-    per-unit values are read from the conversation (`_service_terms_view`); a failed read
-    propagates like the history read does (the router then hands the turn to the agent).
+    TASK-088 R38: no price reaches the model (see `_service_options_block`), so nothing is read
+    from the database here any more - the per-unit terms view this used to load is gone.
     """
     if not services:
         return ScopedHelpOutcome(kind="escalate")
-    professional = await _service_terms_view(conversation_id)
     return await _run(
-        _service_help_prompt(services, final_round, professional),
+        _service_help_prompt(services, final_round),
         conversation_id,
         patient_message,
         final_round,
     )
-
-
-async def _service_terms_view(conversation_id: UUID | None) -> Any | None:
-    """The booking professional's router-shaped view (units, marks, per-unit values), or None.
-
-    The booking professional is the one the conversation selected, else the clinic's only
-    active one - the professional whose list the router hands to `run_service_help`. None
-    without a conversation id (router unit tests, dev snapshots), or when there is no such
-    professional (a 2+ clinic before the choice reads the tenant's list: no per-unit value
-    applies). Every read is scoped to the conversation's own tenant.
-    """
-    if conversation_id is None:
-        return None
-    from secretaria.models import Conversation, Tenant
-    from secretaria.services.tenant_config import list_active_professionals
-    from secretaria.services.unit_booking import professional_terms_view
-
-    async with async_session_factory() as session:
-        conversation = await session.get(Conversation, conversation_id)
-        tenant = (
-            await session.get(Tenant, conversation.tenant_id) if conversation is not None else None
-        )
-        if tenant is None:
-            return None
-        roster = await list_active_professionals(session, tenant.id)
-        selected = conversation.flow_selected_professional_id
-        if selected is not None:
-            row = next((p for p in roster if p.id == selected), None)
-        else:
-            row = roster[0] if len(roster) == 1 else None
-        if row is None:
-            return None
-        view = await professional_terms_view(session, tenant, row)
-    # The unit the patient already picked (T8 review c); `_service_price` uses it only when it
-    # is one of THIS professional's units doing the service.
-    view.chosen_unit_id = conversation.flow_selected_unit_id
-    return view

@@ -68,6 +68,7 @@ from secretaria.ai.tools import (
     _slot_service,
     _tenant_config_ctx,
     _tenant_id_ctx,
+    buffered_free_slots,
     handback_message,
     held_busy_windows,
 )
@@ -75,6 +76,7 @@ from secretaria.ai.unit_scope import outside_unit_hours, resolve_tool_unit
 from secretaria.core.logging import get_logger
 from secretaria.plugins.base import PluginSpec
 from secretaria.plugins.registry import register
+from secretaria.services.availability import booking_buffer_minutes
 from secretaria.services.calendar import (
     build_event_description,
     build_patient_calendar_link,
@@ -284,11 +286,14 @@ async def list_free_slots_for_professional(
     target_day = date.fromisoformat(day)
     day_dt = datetime.combine(target_day, datetime.min.time())
     held = await held_busy_windows(professional.id)  # a code or a Pix pending is busy time
-    extra = {"extra_busy": held} if held else {}
-    if minutes:
-        extra["slot_minutes"] = minutes
-    slots = await cal.list_free_slots(
-        day=day_dt, max_slots=min(max(max_slots, 1), 10), **extra
+    slots = await buffered_free_slots(
+        cal,
+        day=day_dt,
+        max_slots=min(max(max_slots, 1), 10),
+        held=held,
+        # TASK-088 Task 5 (R31): THIS professional's buffer between consultations.
+        buffer_minutes=booking_buffer_minutes(professional),
+        slot_minutes=minutes,
     )
     return _with_professional_context({"slots": slots}, professional)
 
@@ -424,6 +429,7 @@ async def create_event_for_professional(
         tool_name="create_event_for_professional",
         appointment_type=canonical_type,
         professional_id=professional.id,
+        buffer_minutes=booking_buffer_minutes(professional),
     )
     event = await _create_booking_event(
         cal,

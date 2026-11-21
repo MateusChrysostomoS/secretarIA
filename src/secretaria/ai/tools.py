@@ -25,7 +25,12 @@ from pseudonymize_core import has_unresolved_tokens
 from secretaria.ai.formatter import whatsapp_markup
 from secretaria.config import get_settings
 from secretaria.core.logging import get_logger
-from secretaria.services.availability import slot_taken_at_confirm
+from secretaria.services.availability import (
+    booking_buffer_minutes,
+    buffer_taken_at_confirm,
+    buffered_free_slots,
+    slot_taken_at_confirm,
+)
 from secretaria.services.booking_dates import resolve_booking_day, time_has_passed_today
 from secretaria.services.booking_draft import BookingDraft
 from secretaria.services.booking_scope import (
@@ -1022,8 +1027,13 @@ async def _hand_back_if_slot_taken(
     tool_name: str,
     appointment_type: str | None,
     professional_id: UUID | None = None,
+    buffer_minutes: int = 0,
 ) -> None:
     """Hand the booking back to the flow when [start, end) was taken since it was offered.
+
+    TASK-088 Task 5: `buffer_minutes` (`booking_buffer_minutes` of the professional who owns
+    `cal`) also refuses a window inside the buffer of a consultation or of another
+    conversation's held time, exactly like a taken slot; 0 asks nothing more.
 
     The v1 booking tools write straight to the agenda after the patient's "sim" in text,
     and the free time the model read may be minutes old. Asked on `cal` - the agenda the
@@ -1037,14 +1047,26 @@ async def _hand_back_if_slot_taken(
 
     Shared by the three create_event*-shaped tools, like `_localize_window`.
     """
-    if not await slot_taken_at_confirm(
+    taken = await slot_taken_at_confirm(
         cal,
         start,
         end,
         source=tool_name,
         conversation_id=_conversation_id_ctx.get(),
         tenant_id=_tenant_id_ctx.get(),
-    ):
+    )
+    if not taken and buffer_minutes > 0:
+        taken = await buffer_taken_at_confirm(
+            cal,
+            start,
+            end,
+            buffer_minutes=buffer_minutes,
+            source=tool_name,
+            holds=await held_busy_windows(professional_id or _sole_professional_id()),
+            conversation_id=_conversation_id_ctx.get(),
+            tenant_id=_tenant_id_ctx.get(),
+        )
+    if not taken:
         return
     raise await _slot_taken_hand_back(cal, start, appointment_type, professional_id)
 
@@ -1052,11 +1074,16 @@ async def _hand_back_if_slot_taken(
 async def _slot_taken_hand_back(
     cal: CalendarService, start: datetime, appointment_type: str | None, professional_id
 ) -> "BookingDraftRequested":
-    """The hand-back both "taken" answers raise: the same service, doctor, convênio, DAY."""
+    """The hand-back both "taken" answers raise: the same service, doctor and DAY.
+
+    The convênio is NOT carried in the draft (R30): the draft's `insurance` reads as "the patient
+    named it this turn", and the machine's hand-back never did. With None the resolver falls back
+    to the conversation's own value as a STORED one (`named_now=False`), so an automatic
+    "Particular" does not survive a landing on another service / doctor / unit."""
     return BookingDraftRequested(
         appointment_type,
         professional_id,
-        await _conversation_insurance(),
+        None,
         day=start.astimezone(cal.tzinfo).date(),
         intro=SLOT_TAKEN_AT_CONFIRM_MESSAGE,
     )
@@ -1453,6 +1480,7 @@ async def list_free_slots(day: str, max_slots: int = 6, appointment_type: str = 
     if unit_error is not None:
         return unit_error
     minutes: int | None = None
+    owner = None  # the professional row, when this call already loaded it (no second read)
     if unit is not None:
         # TASK-085 D7 (T8 I1): at a unit with its own duration, the slots have that length.
         canonical, service_error = _slot_service(appointment_type, "list_free_slots")
@@ -1467,15 +1495,33 @@ async def list_free_slots(day: str, max_slots: int = 6, appointment_type: str = 
     target_day = date.fromisoformat(day)
     day_dt = datetime.combine(target_day, datetime.min.time())
     held = await held_busy_windows(_sole_professional_id())
-    extra = {"extra_busy": held} if held else {}
-    if minutes:
-        extra["slot_minutes"] = minutes
-    slots = await scoped_calendar(_get_calendar(), unit).list_free_slots(
+    slots = await buffered_free_slots(
+        scoped_calendar(_get_calendar(), unit),
         day=day_dt,
         max_slots=min(max(max_slots, 1), 10),
-        **extra,
+        held=held,
+        buffer_minutes=await _sole_buffer_minutes(owner),
+        slot_minutes=minutes,
     )
     return {"slots": slots}
+
+
+async def _sole_buffer_minutes(owner: Any | None = None) -> int:
+    """The buffer between consultations of this turn's single professional (0 = none, or not
+    readable: a READ tool then offers as before; the booking tools re-ask at the write).
+    `owner` is the professional row when the caller already loaded it: no second read."""
+    if owner is not None:
+        return booking_buffer_minutes(owner)
+    tenant_id, professional_id = _tenant_id_ctx.get(), _sole_professional_id()
+    if tenant_id is None or professional_id is None:
+        return 0
+    from secretaria.ai.unit_scope import sole_professional_row
+
+    try:
+        return booking_buffer_minutes(await sole_professional_row(tenant_id, professional_id))
+    except Exception as exc:  # noqa: BLE001 - a read tool: offered without the padding
+        logger.warning("agent_tool_buffer_lookup_failed", error_type=type(exc).__name__)
+        return 0
 
 
 async def _conversation_attendee_name() -> str | None:
@@ -1638,7 +1684,12 @@ async def create_event(
     )
     description = _with_notes(auto_description, description)
     await _hand_back_if_slot_taken(
-        cal, fallback_start, fallback_end, tool_name="create_event", appointment_type=canonical_type
+        cal,
+        fallback_start,
+        fallback_end,
+        tool_name="create_event",
+        appointment_type=canonical_type,
+        buffer_minutes=booking_buffer_minutes(owner),
     )
     event = await _create_booking_event(
         cal,

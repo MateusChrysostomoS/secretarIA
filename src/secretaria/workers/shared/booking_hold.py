@@ -26,6 +26,7 @@ from secretaria.models import (
     Conversation,
     FlowState,
     Patient,
+    Professional,
     Tenant,
 )
 from secretaria.models.deposit_release_offer import CARRY_CHECK_REFUNDED, CARRY_CHECK_UNKNOWN
@@ -39,9 +40,14 @@ from secretaria.services.appointment_status import (
     SOURCE_FLOW,
 )
 from secretaria.services.attendee import ATTENDEE_SELF
-from secretaria.services.availability import slot_taken_at_confirm
+from secretaria.services.availability import (
+    booking_buffer_minutes,
+    buffer_taken_at_confirm,
+    slot_taken_at_confirm,
+)
 from secretaria.services.booking_hold import (
     HeldSlot,
+    held_windows,
     latest_hold_in,
     live_hold_overlaps,
     release_in as release_hold_in,
@@ -57,6 +63,7 @@ from secretaria.services.calendar import (
 )
 from secretaria.services.flow_router import (
     SLOT_TAKEN_AT_CONFIRM_MESSAGE,
+    STEP_AWAITING_INSURANCE,
     WHEN_FORMAT,
     FlowRouterResult,
     booking_gate_scope,
@@ -199,12 +206,17 @@ class InsuranceRefusedAtPromotion(SlotTakenAtPromotion):
 
 # TASK-086 A19: what the patient reads when the convênio stopped being accepted between
 # "Confirmar" and the code. Plain words: nothing was booked, and the next step.
-INSURANCE_REFUSED_AT_CONFIRM_MESSAGE = (
+INSURANCE_REFUSED_AT_CONFIRM_LEAD = (
     "Não consegui confirmar o horário: a clínica não está atendendo mais esse convênio "
-    "nesta consulta. Vamos escolher o convênio de novo."
+    "nesta consulta."
 )
+INSURANCE_REFUSED_AT_CONFIRM_MESSAGE = (
+    f"{INSURANCE_REFUSED_AT_CONFIRM_LEAD} Vamos escolher o convênio de novo."
+)
+# TASK-088: the lead WITHOUT "Vamos escolher o convênio de novo." - it would promise a question
+# that the next sentence ("Digite *menu*...") says will not come.
 _INSURANCE_REFUSED_NO_REOFFER_MESSAGE = (
-    f"{INSURANCE_REFUSED_AT_CONFIRM_MESSAGE}\n\nDigite *menu* para começar outro agendamento."
+    f"{INSURANCE_REFUSED_AT_CONFIRM_LEAD}\n\nDigite *menu* para começar outro agendamento."
 )
 
 # Said only when the conversation cannot be re-read to rebuild the slot list (it was
@@ -621,14 +633,91 @@ async def _held_slot_unavailable(
         return True
     if calendar is None:
         return False
-    return await slot_taken_at_confirm(
+    if await slot_taken_at_confirm(
         calendar,
         held.start_at,
         held.end_at,
         source="booking_hold_promotion",
         conversation_id=reply.conversation_id,
         tenant_id=tenant.id,
+    ):
+        return True
+    # TASK-088 Task 5: and not inside the doctor's buffer of a consultation or of another
+    # conversation's Pix hold (the patient's own hold is excluded: it never pads itself).
+    minutes, others = await _held_buffer_rule(reply, tenant, held)
+    if minutes <= 0:
+        return False
+    return await buffer_taken_at_confirm(
+        calendar,
+        held.start_at,
+        held.end_at,
+        buffer_minutes=minutes,
+        source="booking_hold_promotion",
+        # "Marcar outra": the appointment being replaced never pads its replacement.
+        ignore_event_id=await _replaced_event_id(reply, tenant),
+        holds=others,
+        conversation_id=reply.conversation_id,
+        tenant_id=tenant.id,
     )
+
+
+async def _replaced_event_id(reply: _ReplyContext, tenant: Tenant) -> str | None:
+    """The calendar event id of the appointment this conversation's booking replaces ("Marcar
+    outra consulta"), or None. It is cancelled only when the booking is written, so until then
+    it sits in the agenda and must not pad its own replacement. Tenant-scoped; fail-open
+    (None, logged with the error type only) like every confirm recheck."""
+    try:
+        async with async_session_factory() as session:
+            conversation = await session.get(Conversation, reply.conversation_id)
+            replaced_id = (
+                conversation.flow_replaces_appointment_id if conversation is not None else None
+            )
+            if replaced_id is None:
+                return None
+            appointment = await session.get(Appointment, replaced_id)
+            if appointment is None or appointment.tenant_id != tenant.id:
+                return None
+            return str(appointment.google_event_id or "") or None
+    except Exception as exc:  # noqa: BLE001 - fail-open
+        logger.warning(
+            "booking_hold_replaced_event_lookup_failed",
+            error_type=type(exc).__name__,
+            conversation_id=str(reply.conversation_id),
+            tenant_id=str(tenant.id),
+        )
+        return None
+
+
+async def _held_buffer_rule(
+    reply: _ReplyContext, tenant: Tenant, held: HeldSlot
+) -> tuple[int, list[tuple[datetime, datetime]]]:
+    """(the held booking's doctor's buffer in minutes, OTHER conversations' held windows).
+
+    (0, []) without a buffer - and then nothing else is read - or when the doctor cannot be read:
+    fail-open, like every confirm recheck (logged with the error type only).
+    """
+    if held.professional_id is None:
+        return 0, []
+    try:
+        async with async_session_factory() as session:
+            professional = await session.get(Professional, held.professional_id)
+        if professional is None or professional.tenant_id != tenant.id:
+            return 0, []
+        minutes = booking_buffer_minutes(professional)
+        if minutes <= 0:
+            return 0, []
+        others = await held_windows(
+            tenant.id, held.professional_id, exclude_conversation=reply.conversation_id
+        )
+        return minutes, others
+    except Exception as exc:  # noqa: BLE001 - fail-open, like `slot_taken_at_confirm`
+        logger.warning(
+            "booking_hold_buffer_lookup_failed",
+            error_type=type(exc).__name__,
+            conversation_id=str(reply.conversation_id),
+            tenant_id=str(tenant.id),
+        )
+        return 0, []
 
 
 async def _held_insurance_refused(reply: _ReplyContext, tenant: Tenant, held: HeldSlot) -> bool:
@@ -681,10 +770,10 @@ async def _insurance_refused_reoffer(
     """The convênio question again, for the doctor, service and attendee the hold carried.
 
     Built through the flow's public entry for "service already chosen"
-    (`flow_router.enter_guided_booking` with no convênio), which asks the convênio when the
-    clinic collects it - the same step and carries a booking with a known service gets. The
-    unit and the time are NOT kept: the unit list that follows is filtered by the new
-    convênio, and the day comes after it. The doctor rides along only when the roster would
+    (`flow_router.enter_guided_booking` with no convênio): the unit when the doctor has several,
+    then the convênio when the clinic collects it (the list of what is accepted at that unit, or
+    Particular with its line), then the day - the order of every booking since TASK-088. The
+    unit and the time are NOT kept. The doctor rides along only when the roster would
     not imply it (as `_slot_taken_reoffer`), and a "Marcar outra" marker is kept so the next
     booking still replaces the original. No conversation to rebuild from -> the plain line.
     """
@@ -711,7 +800,14 @@ async def _insurance_refused_reoffer(
         )
     if replaces is not None and result.appointment is None:
         result.flow_replaces_appointment_id = replaces
-    result.bubbles = [TextBubble(body=INSURANCE_REFUSED_AT_CONFIRM_MESSAGE), *result.bubbles]
+    # "Vamos escolher o convênio de novo" only in front of the list; with nothing accepted the
+    # booking goes on as Particular (the day step's own line says so) and there is no choice.
+    notice = (
+        INSURANCE_REFUSED_AT_CONFIRM_MESSAGE
+        if result.flow_step == STEP_AWAITING_INSURANCE
+        else INSURANCE_REFUSED_AT_CONFIRM_LEAD
+    )
+    result.bubbles = [TextBubble(body=notice), *result.bubbles]
     return InsuranceRefusedAtPromotion(reoffer=result)
 
 
@@ -767,6 +863,7 @@ async def _slot_taken_reoffer(
                 None if held.professional_id == implied else held.professional_id
             ),
             "flow_selected_insurance": held.insurance,
+            "flow_insurance_auto": getattr(held, "insurance_auto", None),
             # TASK-083: the same unit, so the day picker that follows lists its hours.
             "flow_selected_unit_id": held.unit_id,
             "flow_attendee_name": held.attendee_name or ATTENDEE_SELF,

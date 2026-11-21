@@ -27,7 +27,12 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta
 from typing import TYPE_CHECKING
 
-from secretaria.services.availability import Window, days_with_free_slots, free_slots_for_day
+from secretaria.services.availability import (
+    Window,
+    days_with_free_slots,
+    free_slots_for_day,
+    offer_consultation_windows,
+)
 from secretaria.services.booking_dates import WEEKDAY_SHORT
 
 if TYPE_CHECKING:
@@ -192,6 +197,7 @@ async def scan_free_windows(
     holds: Sequence[Window] = (),
     max_windows: int = MAX_WINDOWS,
     not_before: datetime | None = None,
+    buffer_minutes: int = 0,
 ) -> WindowScan:
     """Free windows on `calendar` over `span`, earliest first, holds subtracted.
 
@@ -199,23 +205,39 @@ async def scan_free_windows(
     (a fully booked or closed agenda costs a single calendar read and no more), then each of
     those days is read slot by slot - sequentially, because the Google client is not safe to
     share across threads - and the scan stops as soon as `max_windows` is exceeded.
+    `buffer_minutes` (`booking_buffer_minutes`): the consultation windows of the whole span
+    are read ONCE and shared by the day scan and every per-day read; 0 reads nothing extra.
     Raises `CalendarUnavailableError` exactly like the calendar does; the caller decides.
     """
     tz = calendar.tzinfo
+    first = datetime(span.first.year, span.first.month, span.first.day, tzinfo=tz)
+    consultations = None
+    if buffer_minutes > 0:
+        consultations = await offer_consultation_windows(
+            calendar, first, first + timedelta(days=span.days), buffer_minutes=buffer_minutes
+        )
     free_days = await days_with_free_slots(
         calendar,
-        start=datetime(span.first.year, span.first.month, span.first.day, tzinfo=tz),
+        start=first,
         window_days=span.days,
         duration_minutes=duration_minutes,
         holds=holds,
         not_before=not_before,
+        buffer_minutes=buffer_minutes,
+        consultations=consultations,
     )
     scan = WindowScan()
     for day in free_days:
         if not span.first <= day <= span.last:
             continue
         starts = await free_slots_for_day(
-            calendar, day=day, duration_minutes=duration_minutes, holds=holds, not_before=not_before
+            calendar,
+            day=day,
+            duration_minutes=duration_minutes,
+            holds=holds,
+            not_before=not_before,
+            buffer_minutes=buffer_minutes,
+            consultations=consultations,
         )
         for window in slots_to_windows(starts, duration_minutes=duration_minutes):
             if len(scan.windows) >= max_windows:

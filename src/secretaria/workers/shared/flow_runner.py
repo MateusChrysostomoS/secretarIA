@@ -48,6 +48,7 @@ from secretaria.services.flow_router import (
     STEP_AWAITING_ATTENDEE_AUTH,
     STEP_EDIT_ATT_AUTH,
     FlowRouterResult,
+    calendar_owner_changed,
     is_generic_menu_result,
     is_main_menu,
     main_menu_buttons,
@@ -64,6 +65,7 @@ from secretaria.services.patient_context import (
 from secretaria.services.payments import deposit_lifecycle, old_slot, service_change
 from secretaria.services.pii_pseudonymization import remember_attendee_name
 from secretaria.services.professional_edit_outbox import record_professional_edit
+from secretaria.services.tenant_config import resolve_professional_calendar
 from secretaria.workers.shared.appointment_edit_apply import (
     AppliedEdit,
     _finish_edit,
@@ -115,6 +117,31 @@ from secretaria.workers.shared.service_change_actions import service_change_bubb
 logger = get_logger(__name__)
 
 
+async def _picked_doctor_calendar(
+    tenant: Tenant, tenant_config, professional_id
+) -> CalendarService | None:
+    """The calendar of the doctor a turn has just picked - resolved exactly as the orchestrator
+    does for the STORED doctor of the next turn (`resolve_professional_calendar`, the same
+    function and the same tenant-scoped row), and degraded the same way: a failed or unknown
+    doctor is None, which the router answers like any missing professional calendar (never the
+    clinic's agenda). TASK-088 R41."""
+    try:
+        async with async_session_factory() as session:
+            row = await session.get(Professional, professional_id)
+            if row is None or row.tenant_id != tenant.id or not row.is_active:
+                return None
+            return await resolve_professional_calendar(
+                session, tenant, row, tenant_config=tenant_config
+            )
+    except Exception as exc:  # noqa: BLE001 - the next turn would degrade the same way
+        logger.warning(
+            "worker_professional_calendar_failed",
+            error_type=type(exc).__name__,
+            professional_id=str(professional_id),
+        )
+        return None
+
+
 async def _run_flow(
     reply: _ReplyContext,
     conv_snapshot: SimpleNamespace,
@@ -161,11 +188,11 @@ async def _run_flow(
     # The booking gate for THIS turn (workers/shared/draft_resolution.py explains the
     # arming rule and the production bug it pins).
     gate = _turn_booking_gate(reply, tenant, redis=redis)
-    try:
-        result = await route(
+    async def _route(on_calendar) -> FlowRouterResult:
+        return await route(
             conv_snapshot,
             tenant_snapshot,
-            calendar,
+            on_calendar,
             reply.inbound_body,
             patient_name,
             upcoming_appointments=upcoming_appointments,
@@ -173,6 +200,41 @@ async def _run_flow(
             gate=gate,
             edit_context=edit_context,
         )
+
+    try:
+        result = await _route(calendar)
+        # TASK-088 R41: a tap that PICKS the doctor in this very turn (the clinic catalog with one
+        # doctor offering the service, a doctor of a service) now goes straight to the days, but
+        # `calendar` above was resolved from the doctor stored BEFORE the turn - the clinic's. Draw
+        # the list again on the picked doctor's agenda, resolved as the NEXT turn would. Never for
+        # a manage turn (its owner is fixed), and `calendar_owner_changed` is False for a turn that
+        # started on a help step (it can call the LLM - never two calls in one turn).
+        if (
+            not manage_calendar_owned
+            and tenant is not None
+            and calendar_owner_changed(conv_snapshot, result)
+        ):
+            picked = result.agenda_owner_id
+            logger.info(
+                "flow_turn_rerun_on_picked_doctor_calendar",
+                conversation_id=str(reply.conversation_id),
+                professional_id=str(picked),
+            )
+            picked_calendar = await _picked_doctor_calendar(tenant, tenant_config, picked)
+            try:
+                result = await _route(picked_calendar)
+            except Exception as exc:  # noqa: BLE001 - degrade like a doctor with no calendar
+                # The re-run is NEW work (R41): a failed read on the doctor's agenda must not drop
+                # the whole turn - and the tap that picked the doctor - to the AI. Same degrade
+                # as a doctor whose calendar cannot be resolved: no calendar, which the router
+                # answers as "calendar unavailable" (never the clinic's agenda).
+                logger.warning(
+                    "worker_picked_doctor_rerun_failed",
+                    error_type=type(exc).__name__,
+                    conversation_id=str(reply.conversation_id),
+                    professional_id=str(picked),
+                )
+                result = await _route(None)
     except Exception as exc:
         logger.warning(
             "worker_flow_router_failed",
@@ -222,6 +284,7 @@ async def _waived_booking_not_written(
             booking.get("professional_id") or result.flow_selected_professional_id
         ),
         flow_selected_insurance=booking.get("insurance") or result.flow_selected_insurance,
+        flow_insurance_auto=result.flow_insurance_auto,
         flow_attendee_name=booking.get("attendee_name") or result.flow_attendee_name,
     )
     logger.error(
@@ -345,6 +408,7 @@ async def _apply_flow_result(
                     conv.flow_selected_slot = result.flow_selected_slot
                     conv.flow_selected_professional_id = result.flow_selected_professional_id
                     conv.flow_selected_insurance = result.flow_selected_insurance
+                    conv.flow_insurance_auto = result.flow_insurance_auto
                     conv.flow_selected_unit_id = result.flow_selected_unit_id
                     conv.flow_managing_appointment_id = result.flow_managing_appointment_id
                     conv.flow_attendee_name = result.flow_attendee_name

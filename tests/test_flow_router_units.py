@@ -546,6 +546,8 @@ async def test_the_portal_holds_the_slot_with_the_unit():
             flow_selected_day="2099-01-05",
             flow_selected_slot="2099-01-05T09:00",
             flow_selected_unit_id=centro.id,
+            flow_selected_insurance="Particular",
+            flow_insurance_auto=True,
         ),
         _tenant(),
         agenda,
@@ -556,6 +558,8 @@ async def test_the_portal_holds_the_slot_with_the_unit():
     )
     assert held.flow_state is FlowState.AWAITING_EMAIL_CODE
     assert held.booking_hold is not None
+    assert held.flow_selected_insurance == "Particular"
+    assert held.flow_insurance_auto is True
     assert gate.decided[0]["unit_id"] == centro.id
     assert agenda.log.created == []  # nothing written before the code
 
@@ -965,7 +969,7 @@ async def test_zero_units_sets_notify_no_unit_and_returns_to_doctor_list():
     prof_rows = [row[0] for row in bubble.rows if row[0].startswith("prof|")]
     assert prof_rows == [f"prof|{bruno.id}"]  # only who really does it; never Ana again
     assert agenda.log.day_hours == []
-    # No dead end: the other doctor's tap opens the service card with that doctor.
+    # No dead end: the other doctor's tap goes straight on with that doctor (TASK-088: no card).
     picked = await fr.route(
         _conversation(
             flow_step=fr.STEP_AWAITING_PROFESSIONAL,
@@ -976,7 +980,7 @@ async def test_zero_units_sets_notify_no_unit_and_returns_to_doctor_list():
         inbound_routing_text("Dr. Bruno", f"prof|{bruno.id}"),
         professionals=[ana, bruno, carla],
     )
-    assert picked.flow_step == fr.STEP_AWAITING_SERVICE_CONFIRM
+    assert picked.flow_step == fr.STEP_AWAITING_DAY
     assert picked.flow_selected_professional_id == bruno.id
     assert picked.notify_no_unit is None
 
@@ -1048,8 +1052,11 @@ async def test_service_picked_first_then_doctor_filters_units():
         inbound_routing_text("Dra. Ana", f"prof|{ana.id}"),
         professionals=[ana, bruno],
     )
-    assert card.flow_step == fr.STEP_AWAITING_SERVICE_CONFIRM
+    # TASK-088 Task 8: the doctor tap goes straight to the units that do the service.
+    assert card.flow_step == STEP_AWAITING_UNIT
     assert card.flow_selected_professional_id == ana.id
+    assert _unit_row_ids(card) == [f"unit|{sul.id}", f"unit|{norte.id}"]
+    # A chat parked on the retired card ("Sim") lands on the same list.
     units = await fr.route(
         _conversation(flow_selected_professional_id=ana.id),
         _svc_tenant(),
@@ -1238,7 +1245,7 @@ async def test_the_booking_writes_at_the_picked_unit_of_the_service():
 # --------------------------------------------------------------------------
 
 SUL_CONFIRM_BODY = (
-    "O serviço Consulta feito por Dra. Ana é feito apenas na unidade Zona Sul, em Av. B, 20. "
+    "O serviço Consulta feito por Dra. Ana é feito *apenas na unidade Zona Sul*, em Av. B, 20. "
     "Você confirma essa unidade?"
 )
 
@@ -1257,7 +1264,7 @@ def _confirm_bubble(result) -> fr.MenuBubble:
 
 async def test_confirm_message_exact_text_and_buttons():
     assert UNIT_CONFIRM_BODY == (
-        "O serviço {servico} feito por {medico} é feito apenas na unidade {unidade}, "
+        "O serviço {servico} feito por {medico} é feito *apenas na unidade {unidade}*, "
         "em {endereco}. Você confirma essa unidade?"
     )
     doctor, _sul = _confirm_doctor()
@@ -1284,9 +1291,27 @@ async def test_confirm_message_exact_text_and_buttons():
         _conversation(), _svc_tenant(), _Agenda(), fr.LABEL_BOOK_SERVICE, professionals=[no_address]
     )
     assert _confirm_bubble(plain).body == (
-        "O serviço Consulta feito por Dra. Ana é feito apenas na unidade Zona Sul. "
+        "O serviço Consulta feito por Dra. Ana é feito *apenas na unidade Zona Sul*. "
         "Você confirma essa unidade?"
     )
+
+
+def test_unit_confirm_body_highlights_only_unit():
+    """TASK-088 C: "apenas na unidade X" is WhatsApp bold; the closing question is untouched."""
+    from secretaria.services import flow_units
+
+    doctor, _sul = _confirm_doctor()
+    centro = UnitOption(
+        id=uuid4(), name="Unidade Centro", address="Rua A, 10.", business_hours=SUL_HOURS
+    )
+    bare = UnitOption(id=uuid4(), name="Unidade Centro", address=None, business_hours=SUL_HOURS)
+    with_address = flow_units.unit_confirm_body("Consulta", doctor, centro)
+    without_address = flow_units.unit_confirm_body("Consulta", doctor, bare)
+    assert "é feito *apenas na unidade Unidade Centro*, em Rua A, 10." in with_address
+    assert "é feito *apenas na unidade Unidade Centro*." in without_address
+    for body in (with_address, without_address):
+        assert body.count("*") == 2
+        assert body.endswith("Você confirma essa unidade?")
 
 
 async def test_yes_selects_unit_and_opens_day_picker():

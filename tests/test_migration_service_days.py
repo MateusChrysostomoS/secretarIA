@@ -34,10 +34,15 @@ def _base_migration():
 
 
 def test_single_head_is_this_migration_on_top_of_the_previous_head():
+    # The chain has ONE head and this migration is in its history on top of its own previous head.
+    # It does not pin WHICH revision is the head: later tasks (TASK-088 added d4b7a9c2e6f1) stack
+    # their own migration on top of this one.
     config = Config(str(ROOT / "alembic.ini"))
     config.set_main_option("script_location", str(ROOT / "migrations"))
     scripts = ScriptDirectory.from_config(config)
-    assert scripts.get_heads() == [REVISION]
+    heads = scripts.get_heads()
+    assert len(heads) == 1
+    assert REVISION in {r.revision for r in scripts.walk_revisions(base="base", head=heads[0])}
     assert _migration().down_revision == DOWN_REVISION
 
 

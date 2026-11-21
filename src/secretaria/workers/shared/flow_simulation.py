@@ -28,7 +28,7 @@ from zoneinfo import ZoneInfo
 from secretaria.models import FlowState
 from secretaria.schemas.webhook import inbound_routing_text
 from secretaria.services.calendar import CalendarService
-from secretaria.services.flow_router import LABEL_BOOK, route
+from secretaria.services.flow_router import LABEL_BOOK, calendar_owner_changed, route
 from secretaria.workers.shared.bubbles import _bubble_history_body, _bubble_interactive
 
 SIMULATED_EVENT_ID = "simulation"
@@ -41,9 +41,17 @@ STATE_FIELDS = (
     "flow_selected_day",
     "flow_selected_slot",
     "flow_selected_professional_id",
+    "flow_selected_unit_id",
     "flow_selected_insurance",
+    "flow_insurance_auto",
     "flow_managing_appointment_id",
     "flow_attendee_name",
+)
+
+UUID_STATE_FIELDS = (
+    "flow_selected_professional_id",
+    "flow_selected_unit_id",
+    "flow_managing_appointment_id",
 )
 
 
@@ -85,7 +93,7 @@ def initial_state() -> dict[str, Any]:
 def _conversation(state: dict[str, Any]) -> SimpleNamespace:
     data = dict(state)
     data["flow_state"] = FlowState(data.get("flow_state") or FlowState.IDLE.value)
-    for key in ("flow_selected_professional_id", "flow_managing_appointment_id"):
+    for key in UUID_STATE_FIELDS:
         if data.get(key):
             data[key] = UUID(str(data[key]))
     fields = {key: data.get(key) for key in STATE_FIELDS}
@@ -95,7 +103,7 @@ def _conversation(state: dict[str, Any]) -> SimpleNamespace:
 def _state_from(result) -> dict[str, Any]:
     state = {key: getattr(result, key, None) for key in STATE_FIELDS}
     state["flow_state"] = result.flow_state.value
-    for key in ("flow_selected_professional_id", "flow_managing_appointment_id"):
+    for key in UUID_STATE_FIELDS:
         if state.get(key) is not None:
             state[key] = str(state[key])
     return state
@@ -166,16 +174,23 @@ async def simulate_turn(
 
     conversation = _conversation(current)
     selected = current.get("flow_selected_professional_id")
-    result = await route(
-        conversation,
-        tenant,
-        calendar_for(selected),
-        inbound,
-        SIMULATION_PATIENT,
-        upcoming_appointments=[],
-        professionals=professionals,
-        gate=None,
-    )
+    async def _route(professional_id):
+        return await route(
+            conversation,
+            tenant,
+            calendar_for(professional_id),
+            inbound,
+            SIMULATION_PATIENT,
+            upcoming_appointments=[],
+            professionals=professionals,
+            gate=None,
+        )
+
+    result = await _route(selected)
+    if calendar_owner_changed(conversation, result):
+        # TASK-088 R41: the tap picked the doctor and went straight to the days - draw them on the
+        # PICKED doctor's agenda, as the real worker does (help steps never reach here).
+        result = await _route(str(result.agenda_owner_id))
     bubbles = [_render(b) for b in result.bubbles]
     finished = result.appointment is not None
     note = note_for(result.action, result.flow_step)

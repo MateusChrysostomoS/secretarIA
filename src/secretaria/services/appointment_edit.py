@@ -187,11 +187,6 @@ EDIT_INSURANCE_NOT_ACCEPTED = (
     "médico, o serviço, a unidade e o convênio da sua consulta. Escolha de novo o que você "
     "quer mudar."
 )
-# A unit list (or a service picked at the booking's unit) where no unit takes the convênio.
-EDIT_INSURANCE_NOT_AT_UNITS = (
-    "Esse médico não atende o convênio da sua consulta para essa escolha em nenhuma unidade "
-    "disponível. Para trocar, fale com a clínica."
-)
 # The description of a service row the doctor does not take the booking's convênio for (the
 # booking flow's own words for a doctor/service that does not take it: a mark, not a filter).
 EDIT_ROW_INSURANCE_REFUSED = "não atende este convênio"

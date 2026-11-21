@@ -212,6 +212,53 @@ async def test_create_and_block_write_the_local_agenda(client: AsyncClient, db, 
     assert appt.appointment_type == "Bloqueado" and appt.google_event_id.startswith("loc_")
 
 
+async def test_the_clinics_own_agenda_ignores_the_doctors_buffer(
+    client: AsyncClient, db, acting
+):
+    """TASK-088 §B (Task 5): the buffer limits only what a PATIENT is offered or confirms. The
+    clinic's own agenda (this hub) takes an appointment right next to another one."""
+    from zoneinfo import ZoneInfo
+
+    from secretaria.models import Professional
+    from secretaria.services import availability
+
+    tenant = await _clinic(db, acting)
+    ana = await seed_professional(db, tenant, "Dra. Ana")
+    async with db() as session:
+        row = await session.get(Professional, ana.id)
+        row.buffer_minutes = 30
+        await session.commit()
+    start = tomorrow_at(10)
+
+    # A patient's booking with Dra. Ana at 10:00 (made the way the bot makes it) ...
+    cal = agenda(tenant.id, ana.id)
+    event = await cal.create_event(start, start + timedelta(minutes=30), "Consulta")
+    async with db() as session:
+        patient = Patient(id=uuid4(), tenant_id=tenant.id, wa_id="5511988887777", name="Rui",
+                          channel=CHANNEL_WHATSAPP)
+        session.add(patient)
+        await session.flush()
+        session.add(Appointment(
+            tenant_id=tenant.id, patient_id=patient.id, professional_id=ana.id,
+            google_event_id=event["id"], appointment_type="Consulta", start_at=start,
+            end_at=start + timedelta(minutes=30), phone="5511988887777",
+            status=AppointmentStatus.SCHEDULED,
+        ))
+        await session.commit()
+    # ... and the clinic's hub puts another one right after it: accepted.
+    adjacent = await _create(client, start + timedelta(minutes=30), professional_id=str(ana.id))
+    assert adjacent.status_code == 201, adjacent.text
+
+    # The same agenda read the way a PATIENT is offered times: the buffer is in force there.
+    zone = ZoneInfo("America/Sao_Paulo")
+    day = start.astimezone(zone).date()
+    offered = await availability.free_slots_for_day(
+        cal, day=day, duration_minutes=30, buffer_minutes=30
+    )
+    labels = [slot.strftime("%H:%M") for slot in offered]
+    assert "09:30" not in labels and "09:00" in labels
+
+
 async def test_cancel_frees_the_slot(client: AsyncClient, db, acting):
     tenant = await _clinic(db, acting)
     start = tomorrow_at(10)

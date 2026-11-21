@@ -377,13 +377,18 @@ async def test_the_portal_is_asked_only_after_the_code_and_the_hold_is_not_kept_
     asks the Portal patient like anyone else."""
     async with db() as session:
         world = await _world(session, kind, channel="brain_message")
+        conversation = await session.get(Conversation, world.conversation.id)
+        conversation.flow_state = FlowState.AWAITING_EMAIL_CODE
+        conversation.flow_selected_insurance = "Particular"
+        conversation.flow_insurance_auto = True
+        await session.commit()
     held = await holds.place_hold(
         tenant_id=world.tenant_id,
         conversation_id=world.conversation.id,
         patient_id=world.patient.id,
         professional_id=None,
         appointment_type="Consulta",
-        insurance=None,
+        insurance="Particular",
         start_at=SLOT_START,
         end_at=SLOT_END,
     )
@@ -406,6 +411,8 @@ async def test_the_portal_is_asked_only_after_the_code_and_the_hold_is_not_kept_
     assert isinstance(bubble, TextBubble) and not hasattr(bubble, "labels")
     assert bubble.body == pdata.ask_text(kind, PROVIDER[kind])
     assert result.flow_selected_type == "Consulta"
+    assert result.flow_selected_insurance == "Particular"
+    assert result.flow_insurance_auto is True
     assert result.flow_selected_slot == "2030-03-04T10:00"  # the clinic's local 10:00, replayable
     assert await _holds(db) == [] and await _deposits(db) == []
 

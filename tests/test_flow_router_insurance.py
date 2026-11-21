@@ -148,12 +148,14 @@ async def test_insurance_step_asked_on_every_topology_when_configured(profession
     assert res.flow_step == STEP_AWAITING_INSURANCE
     bubble = res.bubbles[0]
     assert isinstance(bubble, SlotsBubble)
-    assert [row[1] for row in bubble.rows] == [
+    # (TASK-088 R18: the list also ends with its back row - checked apart from the plans.)
+    assert [row[1] for row in bubble.rows if not row[0].startswith("dayback|")] == [
         "Unimed",
         "Amil",
         LABEL_INSURANCE_PARTICULAR,
         LABEL_INSURANCE_OTHER,
     ]
+    assert bubble.rows[-1][0].startswith("dayback|")
 
 
 @pytest.mark.parametrize("professional_count", [0, 1, 2])
@@ -351,7 +353,7 @@ async def test_the_list_row_is_the_plans_name_only():
         {"id": "p2", "name": "Outro Plano"},  # a snapshot that predates `mechanism`
     ]
     res = await _confirm_service(tenant, _professionals(1))
-    rows = res.bubbles[0].rows
+    rows = [row for row in res.bubbles[0].rows if not row[0].startswith("dayback|")]
     assert rows[0] == ("ins|Exemplo", "Exemplo")
     assert rows[1] == ("ins|Outro Plano", "Outro Plano")
     assert "Reembolso" not in repr(rows) and "Pagamento" not in repr(rows)

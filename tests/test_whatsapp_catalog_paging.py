@@ -251,7 +251,8 @@ async def test_a_service_on_page_three_books_from_its_tap():
         _tap(third, title),
         professionals=[],
     )
-    assert picked.flow_step == fr.STEP_AWAITING_SERVICE_CONFIRM
+    # TASK-088 Task 8: the tap goes straight on (no service card).
+    assert picked.flow_step == fr.STEP_AWAITING_DAY
     assert picked.flow_selected_type == "Serviço 17"
 
 
@@ -397,7 +398,7 @@ async def test_a_fragment_never_selects_a_service(typed):
 async def test_a_typed_exact_service_name_still_selects_as_on_main():
     tenant = _tenant(_services(0, names=SEARCH_NAMES))
     result = await _type(tenant, "mapeamento de retina")
-    assert result.flow_step == fr.STEP_AWAITING_SERVICE_CONFIRM
+    assert result.flow_step == fr.STEP_AWAITING_DAY
     assert result.flow_selected_type == "Mapeamento de Retina"
 
 

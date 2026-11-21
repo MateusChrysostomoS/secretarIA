@@ -574,7 +574,7 @@ async def test_payment_after_code_slot_taken_meanwhile_offers_the_retry(db, env,
 # ---- worker path 3: the Pix that could not be delivered (`_abort_deposit_request`) -----------
 
 
-async def _undeliverable_pix(db, env):
+async def _undeliverable_pix(db, env, *, insurance=None, insurance_auto=None):
     """A Pix created fine (the account is marked healthy) whose message could not be delivered."""
     env.provider.refuse = False
     async with db() as session:
@@ -586,7 +586,7 @@ async def _undeliverable_pix(db, env):
         quote=QUOTE,
         professional_id=None,
         appointment_type="Consulta",
-        insurance=None,
+        insurance=insurance,
         attendee_name=None,
         start_at=SLOT_START,
         end_at=SLOT_END,
@@ -595,6 +595,8 @@ async def _undeliverable_pix(db, env):
     async with db() as session:
         conversation = await session.get(Conversation, world.conversation.id)
         conversation.flow_state = FlowState.AWAITING_DEPOSIT
+        conversation.flow_selected_insurance = insurance
+        conversation.flow_insurance_auto = insurance_auto
         await session.commit()
         tenant = await session.get(type(world.tenant), world.tenant_id)
     reply = tasks._ReplyContext(
@@ -680,7 +682,9 @@ async def test_abort_deposit_request_offers_a_human_when_the_booking_cannot_be_w
     told a booking exists, and the chat is NOT handed over before the patient chooses."""
     from secretaria.workers.shared import booking_hold as worker_holds
 
-    world, abort = await _undeliverable_pix(db, env)
+    world, abort = await _undeliverable_pix(
+        db, env, insurance="Particular", insurance_auto=True
+    )
 
     async def no_calendar(*args, **kwargs):
         return None
@@ -690,6 +694,8 @@ async def test_abort_deposit_request_offers_a_human_when_the_booking_cannot_be_w
     result = await abort()
 
     _assert_human_offer(result)
+    assert result.flow_selected_insurance == "Particular"
+    assert result.flow_insurance_auto is True
     assert await _rows(db, Appointment) == []
     conversation = await _conversation(db, world)
     assert conversation.handover_state != HandoverState.HUMAN_ACTIVE

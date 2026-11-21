@@ -154,6 +154,7 @@ async def _handle_deposit_wait(
                 flow_selected_slot=conversation.flow_selected_slot,
                 flow_selected_professional_id=conversation.flow_selected_professional_id,
                 flow_selected_insurance=conversation.flow_selected_insurance,
+                flow_insurance_auto=getattr(conversation, "flow_insurance_auto", None),
                 flow_attendee_name=conversation.flow_attendee_name,
                 # TASK-083: "Trocar horário" keeps the unit the patient chose.
                 flow_selected_unit_id=getattr(conversation, "flow_selected_unit_id", None),
@@ -381,6 +382,7 @@ def _payer_data_request(held, tenant: Tenant, kind: str, provider: str | None) -
         flow_selected_slot=local.strftime("%Y-%m-%dT%H:%M"),
         flow_selected_professional_id=held.professional_id,
         flow_selected_insurance=held.insurance,
+        flow_insurance_auto=getattr(held, "insurance_auto", None),
         flow_attendee_name=held.attendee_name,
         flow_selected_unit_id=getattr(held, "unit_id", None),
     )
@@ -551,6 +553,7 @@ async def _payment_after_code(
         flow_selected_type=held.appointment_type,
         flow_selected_professional_id=held.professional_id,
         flow_selected_insurance=held.insurance,
+        flow_insurance_auto=getattr(held, "insurance_auto", None),
         flow_attendee_name=held.attendee_name,
         flow_selected_unit_id=getattr(held, "unit_id", None),
         deposit_request={

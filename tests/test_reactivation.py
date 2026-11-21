@@ -230,15 +230,16 @@ async def test_resume_awaiting_service_reshows_list():
     assert isinstance(result.bubbles[0], SlotsBubble)
 
 
-async def test_resume_service_confirm_reshows_detail():
+async def test_resume_service_confirm_goes_on_without_the_retired_card():
+    # TASK-088 Task 8: a chat parked on the retired service card is taken to what comes after it.
     conv = _conversation(
         flow_state=FlowState.SERVICE_CATALOG,
         flow_step=STEP_AWAITING_SERVICE_CONFIRM,
         flow_selected_type=SERVICE_NAME,
     )
-    result = await resume_bubbles(conv, _tenant(), None)
-    assert result.flow_step == STEP_AWAITING_SERVICE_CONFIRM
-    assert isinstance(result.bubbles[0], ButtonBubble)
+    result = await resume_bubbles(conv, _tenant(), _FakeCalendar())
+    assert result.flow_step == STEP_AWAITING_DAY
+    assert not [b for b in result.bubbles if isinstance(b, ButtonBubble)]
 
 
 async def test_resume_service_confirm_unknown_type_falls_back_to_list():

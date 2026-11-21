@@ -592,6 +592,8 @@ _PAYLOAD_ROW_PREFIXES: tuple[str, ...] = (
     "dayback|",
     "insmore|",
     "unit|",
+    "unitpart|",
+    "unitmore|",
     "svcmore|",
     "profmore|",
 )

@@ -20,10 +20,10 @@ from uuid import uuid4  # noqa: E402
 
 import pytest  # noqa: E402
 
-from secretaria.ai.formatter import TextBubble  # noqa: E402
-from secretaria.services import booking_draft as bd, flow_router as fr  # noqa: E402
+from secretaria.ai.formatter import SlotsBubble, TextBubble  # noqa: E402
+from secretaria.services import flow_router as fr  # noqa: E402
 from secretaria.services.booking_draft import BookingDraft, draft_from_record  # noqa: E402
-from secretaria.services.flow_units import STEP_AWAITING_UNIT_CONFIRM  # noqa: E402
+from secretaria.services.flow_units import STEP_AWAITING_UNIT  # noqa: E402
 from secretaria.services.insurance_acceptance import AcceptanceExceptions  # noqa: E402
 from secretaria.services.unit_booking import UnitOption  # noqa: E402
 from tests.test_booking_draft_resolver import (  # noqa: E402
@@ -40,6 +40,7 @@ TEN = dt.time(10, 0)
 CONSULTA = uuid4()
 RETORNO = uuid4()
 PLAN = "plan-unimed"
+PLAN_B = "plan-bradesco"
 HOURS = {"thursday": [{"start": "08:00", "end": "12:00"}]}
 SERVICES = [
     {
@@ -66,11 +67,19 @@ def _clinic(mode="shared", refused=None, **kw):
         appointment_types=[dict(entry) for entry in SERVICES],
         collect_insurance=True,
         insurance_mode=mode,
-        insurances=["Unimed"],
-        insurance_plans=[{"id": PLAN, "name": "Unimed"}],
+        # TASK-088: a SECOND plan the matrix never refuses, so a refused Unimed still has a list to
+        # be asked again from (with nothing else accepted the booking goes Particular instead -
+        # `test_a_refused_combo_with_no_other_plan_goes_particular_and_says_so`).
+        insurances=["Unimed", "Bradesco"],
+        insurance_plans=[{"id": PLAN, "name": "Unimed"}, {"id": PLAN_B, "name": "Bradesco"}],
         insurance_refused=refused,
         **kw,
     )
+
+
+def _takes_both(*doctors):
+    """`independent` mode: the doctor's OWN list decides - these doctors take both plans."""
+    return {str(doctor.id): [PLAN, PLAN_B] for doctor in doctors}
 
 
 def _shared(*cells):
@@ -92,10 +101,13 @@ def _unit(name="Centro"):
 
 
 def _assert_convenio_step(res, *, service="Consulta"):
+    """The convênio asked again (TASK-088): the list of what is accepted - the refused plan is
+    not in it - with the refusal line as its body."""
     assert res.landing_step == fr.STEP_AWAITING_INSURANCE
-    first = res.result.bubbles[0]
-    assert isinstance(first, TextBubble)
-    assert first.body == bd.DRAFT_PLAN_NOT_ACCEPTED_PREFIX
+    [list_bubble] = [b for b in res.result.bubbles if isinstance(b, SlotsBubble)]
+    assert list_bubble.body in (fr.INSURANCE_REFUSED_LIST, fr.INSURANCE_REFUSED_LIST_UNIT)
+    ids = [row[0] for row in list_bubble.rows]
+    assert "ins|Unimed" not in ids and "ins|Bradesco" in ids
     assert res.result.flow_selected_type == service
     # The refused convênio is asked again, never kept behind the question.
     assert res.result.flow_selected_insurance is None
@@ -140,7 +152,11 @@ async def test_refused_combo_lands_on_the_convenio_step_not_the_card(mode):
     sole = _sole()
     cell = (str(CONSULTA), None, PLAN)
     refused = _shared(cell) if mode == "shared" else _independent(sole, cell)
-    res = await _resolve(FULL, tenant=_clinic(mode, refused), pros=[sole])
+    res = await _resolve(
+        FULL,
+        tenant=_clinic(mode, refused, insurance_accepted_by=_takes_both(sole)),
+        pros=[sole],
+    )
     _assert_convenio_step(res)
     assert "insurance" not in res.accepted
 
@@ -148,8 +164,13 @@ async def test_refused_combo_lands_on_the_convenio_step_not_the_card(mode):
 async def test_independent_matrix_of_another_doctor_does_not_refuse():
     sole, other = _sole(), _sole()
     refused = _independent(other, (str(CONSULTA), None, PLAN))
-    res = await _resolve(FULL, tenant=_clinic("independent", refused), pros=[sole])
+    res = await _resolve(
+        FULL,
+        tenant=_clinic("independent", refused, insurance_accepted_by=_takes_both(sole)),
+        pros=[sole],
+    )
     assert res.landing_step == fr.STEP_AWAITING_CONFIRMATION
+    assert res.result.flow_selected_insurance == "Unimed"
 
 
 async def test_a_recorded_convenio_is_checked_too():
@@ -185,26 +206,50 @@ async def test_the_only_unit_refuses_lands_on_the_convenio_step(mode):
     sole = _with_units(_sole(), centro)
     cell = (str(CONSULTA), str(centro.id), PLAN)
     refused = _shared(cell) if mode == "shared" else _independent(sole, cell)
-    res = await _resolve(FULL, tenant=_clinic(mode, refused), pros=[sole])
+    res = await _resolve(
+        FULL,
+        tenant=_clinic(mode, refused, insurance_accepted_by=_takes_both(sole)),
+        pros=[sole],
+    )
     _assert_convenio_step(res)
 
 
-async def test_unit_unknown_and_refused_everywhere_lands_on_the_convenio_step():
+async def test_unit_unknown_and_refused_everywhere_asks_the_unit_first():
+    # TASK-088: the unit comes first, whatever the convênio; the refusal is judged at the pick.
     centro, sul = _unit("Centro"), _unit("Sul")
     sole = _with_units(_sole(), centro, sul)
     refused = _shared((str(CONSULTA), str(centro.id), PLAN), (str(CONSULTA), str(sul.id), PLAN))
     res = await _resolve(FULL, tenant=_clinic(refused=refused), pros=[sole])
-    _assert_convenio_step(res)
+    assert res.landing_step == STEP_AWAITING_UNIT
+    picked = await _resolve(
+        FULL,
+        conv=_conv(flow_selected_unit_id=sul.id),
+        tenant=_clinic(refused=refused),
+        pros=[sole],
+    )
+    _assert_convenio_step(picked)
+
+
+async def test_a_refused_combo_with_no_other_plan_goes_particular_and_says_so():
+    """A clinic whose only plan is refused: no list to choose from - Particular, with the line."""
+    sole = _sole()
+    refused = _shared((str(CONSULTA), None, PLAN), (str(CONSULTA), None, PLAN_B))
+    res = await _resolve(FULL, tenant=_clinic(refused=refused), pros=[sole])
+    assert res.landing_step == fr.STEP_AWAITING_CONFIRMATION
+    assert res.result.flow_selected_insurance == fr.LABEL_INSURANCE_PARTICULAR
+    first = res.result.bubbles[0]
+    assert isinstance(first, TextBubble) and first.body == fr.INSURANCE_REFUSED_PARTICULAR
 
 
 async def test_unit_unknown_and_accepted_somewhere_asks_the_unit():
-    # Integrated with T4a's unit filter: Centro refuses the plan, so the only unit left is Sul
-    # and the flow asks to confirm it (the convênio-specific confirm card), never the convênio.
+    # TASK-088: the unit comes BEFORE the convênio and is never narrowed by it (the old T4a unit
+    # filter / convênio-specific confirm card are gone from this path): Centro refuses the plan,
+    # but both units are listed - the plan is judged at the unit the patient picks.
     centro, sul = _unit("Centro"), _unit("Sul")
     sole = _with_units(_sole(), centro, sul)
     refused = _shared((str(CONSULTA), str(centro.id), PLAN))
     res = await _resolve(FULL, tenant=_clinic(refused=refused), pros=[sole])
-    assert res.landing_step == STEP_AWAITING_UNIT_CONFIRM
+    assert res.landing_step == STEP_AWAITING_UNIT
 
 
 async def test_a_picked_unit_that_refuses_lands_on_the_convenio_step():
@@ -236,7 +281,7 @@ async def test_multi_doctor_refusal_keeps_the_doctor():
     )
     res = await _resolve(
         draft,
-        tenant=_clinic("independent", refused, insurance_accepted_by={}),
+        tenant=_clinic("independent", refused, insurance_accepted_by=_takes_both(ana, beto)),
         pros=[ana, beto],
     )
     _assert_convenio_step(res)
@@ -246,7 +291,7 @@ async def test_multi_doctor_refusal_keeps_the_doctor():
         BookingDraft(
             service="Consulta", professional_id=beto.id, insurance="unimed", day=DAY, time=TEN
         ),
-        tenant=_clinic("independent", refused, insurance_accepted_by={}),
+        tenant=_clinic("independent", refused, insurance_accepted_by=_takes_both(ana, beto)),
         pros=[ana, beto],
     )
     assert other.landing_step == fr.STEP_AWAITING_CONFIRMATION

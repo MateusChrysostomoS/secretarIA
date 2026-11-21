@@ -737,6 +737,7 @@ async def _route_inbound_turn(
                 conversation.flow_selected_type = None
                 conversation.flow_selected_professional_id = None
                 conversation.flow_selected_insurance = None
+                conversation.flow_insurance_auto = None
                 conversation.flow_attendee_name = None
             # `before` optout / exhausted: the service, doctor, convênio and attendee stay for the
             # Sim / Não card (`deposit_turn._handle_payer_data`), so an accepted offer alerts the
@@ -831,6 +832,7 @@ async def _route_inbound_turn(
             conversation.flow_selected_slot = None
             conversation.flow_selected_professional_id = None
             conversation.flow_selected_insurance = None
+            conversation.flow_insurance_auto = None
             conversation.flow_managing_appointment_id = None
             conversation.flow_attendee_name = None
             conversation.flow_draft = None

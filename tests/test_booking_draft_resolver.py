@@ -285,15 +285,18 @@ async def test_a_recorded_doctor_who_does_not_offer_the_new_service_gives_way():
 async def test_a_service_two_doctors_offer_asks_the_doctor_and_keeps_the_service():
     ana, beto = _doctor("Dra. Ana", ["Consulta"]), _doctor("Dr. Beto", ["Consulta"])
     res = await _resolve(BookingDraft(service="Consulta"), pros=[ana, beto])
-    assert res.landing_step == fr.STEP_AWAITING_PROFESSIONAL
+    # TASK-088: the doctors of THAT service (the new order's second step), service kept.
+    assert res.landing_step == fr.STEP_AWAITING_SERVICE_PROFESSIONAL
     assert res.result.flow_selected_type == "Consulta"
     assert res.result.flow_selected_professional_id is None
 
 
-async def test_an_unknown_doctor_is_dropped_and_the_doctor_list_shown():
+async def test_an_unknown_doctor_is_dropped_and_the_service_asked_first():
     ana, beto = _doctor("Dra. Ana", ["Consulta"]), _doctor("Dr. Beto", ["Consulta"])
     res = await _resolve(BookingDraft(professional_id=uuid4()), pros=[ana, beto])
-    assert res.landing_step == fr.STEP_AWAITING_PROFESSIONAL
+    # TASK-088: nothing but an unknown doctor - the SERVICE is the first question now (the
+    # clinic's catalog); the doctor comes after it.
+    assert res.landing_step == fr.STEP_AWAITING_CATALOG_SERVICE
     assert res.dropped == {"professional": "unknown_professional"}
 
 
@@ -330,7 +333,7 @@ async def test_another_tenants_roster_and_catalog_are_never_used():
         asked=asked,
     )
     assert res.dropped == {"professional": "unknown_professional", "service": "not_in_catalog"}
-    assert res.landing_step == fr.STEP_AWAITING_PROFESSIONAL
+    assert res.landing_step == fr.STEP_AWAITING_CATALOG_SERVICE
     assert res.result.flow_selected_professional_id is None
     assert asked == []
 
@@ -411,7 +414,7 @@ async def test_the_insurance_answer_with_a_service_but_no_doctor_lists_the_docto
         flow_selected_type="Consulta",
     )
     res = await fr._handle_insurance(conv, _collecting(), "Unimed", professionals=[ana, beto])
-    assert res.flow_step == fr.STEP_AWAITING_PROFESSIONAL
+    assert res.flow_step == fr.STEP_AWAITING_SERVICE_PROFESSIONAL
     assert res.flow_selected_type == "Consulta"
     assert res.flow_selected_insurance == "Unimed"
 
@@ -796,7 +799,7 @@ async def test_the_ai_draft_asks_the_sim_nao_and_never_uses_a_unit_outside_the_f
     [bubble] = res.result.bubbles
     assert isinstance(bubble, fr.MenuBubble)
     assert bubble.body == (
-        "O serviço Consulta feito por Dra. Única é feito apenas na unidade Zona Sul, "
+        "O serviço Consulta feito por Dra. Única é feito *apenas na unidade Zona Sul*, "
         "em Av. B, 20. Você confirma essa unidade?"
     )
     assert bubble.labels == [fr.LABEL_YES, fr.LABEL_NO]

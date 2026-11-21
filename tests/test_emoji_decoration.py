@@ -314,11 +314,10 @@ async def test_tapping_a_decorated_service_row_advances_the_flow():
         flow_managing_appointment_id=None,
     )
     tapped = fr._service_row_title(_SHORT)
-    res = await fr.route(conv, _tenant(), None, tapped)
-    # It reached the service's own detail card, not the LLM fallback.
+    from tests.test_flow_router import _FakeCalendar  # noqa: PLC0415
+
+    res = await fr.route(conv, _tenant(), _FakeCalendar(), tapped)
+    # It reached the next step (TASK-088 Task 8: no service card), not the LLM fallback.
     assert res.action == "reply"
-    assert res.flow_step == fr.STEP_AWAITING_SERVICE_CONFIRM
+    assert res.flow_step == fr.STEP_AWAITING_DAY
     assert res.flow_selected_type == _SHORT
-    # ...and that card offers the decorated confirm/decline pair.
-    assert res.bubbles[0].confirm_label == fr.LABEL_BOOK_SERVICE
-    assert res.bubbles[0].cancel_label == fr.LABEL_OTHER_SERVICE

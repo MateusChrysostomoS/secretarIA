@@ -81,15 +81,19 @@ from secretaria.services.attendee import (
 from secretaria.services.availability import (
     at_or_after,
     available_day_starts,
+    booking_buffer_minutes,
     booking_notice_floor,
     booking_notice_hours,
+    buffer_taken_at_confirm,
     held_slots,
+    offer_consultation_windows,
+    padded,
     slot_scan_limit,
     slot_taken_at_confirm,
     without_holds,
 )
 from secretaria.services.booking_dates import WEEKDAY_SHORT, short_day_label, short_day_phrase
-from secretaria.services.booking_details import is_convenio, price_text, service_price_text
+from secretaria.services.booking_details import service_price_text
 from secretaria.services.booking_hold import BookingGate
 from secretaria.services.booking_scope import (
     canonical_service_name,
@@ -117,6 +121,7 @@ from secretaria.services.patient_context import as_utc
 from secretaria.services.payments import payer_data
 from secretaria.services.payments.deposit_lifecycle import BEFORE_BLOCKED_TEXT
 from secretaria.services.payments.failure_reason import coerce as coerce_failure_reason
+from secretaria.services.payments.money import format_brl, parse_brl_to_cents
 from secretaria.services.pending_identity import BOOKING_SLOT_TAKEN_MESSAGE
 from secretaria.services.sensitive_claim_guard import unbacked_claim
 from secretaria.services.service_catalog import (
@@ -208,6 +213,29 @@ PLAN_REFUSED_AT_CONFIRM_LEAD = (
     "Nada foi agendado."
 )
 PLAN_REFUSED_AT_CONFIRM = PLAN_REFUSED_AT_CONFIRM_LEAD + " Escolha outro convênio ou Particular:"
+# TASK-088 (owner, 2026-11-20): the convênio is asked LAST - after service, doctor and unit -
+# and its list holds only the plans that combination accepts. Nothing accepted: no list, the
+# booking goes on as Particular with ONE short line before the days. The "unit" variants are for
+# a clinic whose doctor attends at units; without any, there is no "nessa unidade" to say.
+INSURANCE_NONE_ACCEPTED_UNIT = "Para esse serviço nessa unidade, o atendimento é particular."
+INSURANCE_NONE_ACCEPTED = "Para esse serviço, o atendimento é particular."
+# A convênio that arrived BEFORE the step (AI draft, a parked chat) and the combination refuses
+# it: never swapped for Particular in silence - the filtered list with this line on top, or,
+# with nothing else accepted, Particular saying so.
+INSURANCE_REFUSED_LIST_UNIT = (
+    "Nessa unidade o convênio que você informou não é aceito para esse serviço. "
+    "Escolha uma opção:"
+)
+INSURANCE_REFUSED_LIST = (
+    "O convênio que você informou não é aceito para esse serviço. Escolha uma opção:"
+)
+INSURANCE_REFUSED_PARTICULAR_UNIT = (
+    "Nessa unidade esse convênio não é aceito para o serviço; seguimos como Particular."
+)
+INSURANCE_REFUSED_PARTICULAR = (
+    "Esse convênio não é aceito para o serviço; seguimos como Particular."
+)
+INSURANCE_QUESTION = "Você vai usar convênio? Escolha uma opção:"
 # Structured reasons for `insurance_step_skipped` (see _insurance_step_skip_reason).
 # Count-only observability: which CONFIGURATION silenced the step, never which
 # plan a patient picked.
@@ -378,6 +406,7 @@ STEP_AWAITING_PROFESSIONAL = "awaiting_professional"
 STEP_AWAITING_SERVICE = "awaiting_service"
 STEP_AWAITING_SERVICE_CONFIRM = "awaiting_service_confirm"
 STEP_AWAITING_INSURANCE = "awaiting_insurance"
+STEP_AWAITING_NO_PLAN_AT_UNIT = "awaiting_no_plan_at_unit"
 STEP_AWAITING_DAY = "awaiting_day"
 STEP_AWAITING_SLOT = "awaiting_slot"
 STEP_AWAITING_CONFIRMATION = "awaiting_confirmation"
@@ -402,17 +431,25 @@ ATTENDEE_STEPS = (
 ATTENDEE_NEXT_BOOK = "__attendee_next_book__"
 ATTENDEE_NEXT_CATALOG = "__attendee_next_catalog__"
 
+STEP_AWAITING_SERVICE_PROFESSIONAL = "awaiting_service_professional"
 # The steps an AI booking draft may wait on (`Conversation.flow_draft`, TASK-030): the
 # pra-quem steps (P2) and, by the owner's 2026-10-03 ruling, the convênio, doctor and
 # service questions (P3). The patient's answer to any of them resumes the draft
 # (`_attendee_step`, `_resume_parked_draft`); every other step drops it (`_carry_draft`).
+# TASK-088 (booking order service -> doctor -> unit -> convênio -> day): the service-first
+# lists (the clinic's catalog, the doctors of a service) and the unit question are questions
+# the resolver asks now, so a draft holding a day or a time waits on them too.
 DRAFT_WAIT_STEPS = (
     *ATTENDEE_STEPS,
     STEP_AWAITING_INSURANCE,
+    STEP_AWAITING_NO_PLAN_AT_UNIT,
     STEP_AWAITING_PROFESSIONAL,
     STEP_AWAITING_SERVICE,
+    STEP_AWAITING_CATALOG_SERVICE,
+    STEP_AWAITING_SERVICE_PROFESSIONAL,
+    flow_units.STEP_AWAITING_UNIT,
+    flow_units.STEP_AWAITING_UNIT_CONFIRM,
 )
-STEP_AWAITING_SERVICE_PROFESSIONAL = "awaiting_service_professional"
 # Scoped-help ("Não sei") steps, still within SERVICE_CATALOG. The *_FINAL
 # variant marks the last allowed exchange: entered after the node's single
 # clarifying question, and a clarify outcome there escalates instead - the
@@ -539,6 +576,13 @@ LABEL_OTHER_DATE = decorate(EMOJI_SCHEDULE, "Outra data")
 # tapped. Both labels are kept parallel and short so neither can drift back over.
 LABEL_ANOTHER_DAY = decorate(EMOJI_BACK, "Outro dia")
 LABEL_ANOTHER_SERVICE = decorate(EMOJI_BACK, "Outro serviço")
+# TASK-088: the day picker's way back to the convênio list when it was asked in this booking.
+# NOT "Outro convênio": the router compares labels without their emoji, and that is the list's
+# own "Outro convênio" row ("ins|outro"). 18 characters with the arrow, well under 24.
+# It overlaps the OTHER way too: the "not accepted" card's own button is "Trocar convênio"
+# (`LABEL_PLAN_CHANGE_INSURANCE`) - the same words, without the arrow. The two never share a
+# screen (they answer different steps) and both mean "ask the convênio again".
+LABEL_ANOTHER_INSURANCE = decorate(EMOJI_BACK, "Trocar convênio")
 
 # Where the picker's back-control row goes back to. Passed into
 # `enter_day_picker` by whoever opens it and echoed in the row id, so the tap
@@ -551,6 +595,12 @@ BACK_TARGET_SERVICE = "service"
 BACK_TARGET_PROFESSIONAL = "professional"
 # TASK-083: the unit list ("⬅️ Outra unidade"), for a professional with units to choose from.
 BACK_TARGET_UNIT = flow_units.BACK_TARGET_UNIT
+# TASK-088: the convênio list, one step back from the days when the patient was asked it.
+BACK_TARGET_INSURANCE = "insurance"
+# TASK-088 (fix round 1): "Outro serviço" of the REBOOKING after a doctor's cancellation - the
+# candidate doctor's own service list, as it always was. The booking's "service" back row is the
+# clinic catalog on a multi-doctor clinic (the service is the first thing it chose).
+BACK_TARGET_DOCTOR_SERVICES = "doctorservice"
 
 
 def _day_back_label(back_target: str | None) -> str:
@@ -564,7 +614,11 @@ def _day_back_label(back_target: str | None) -> str:
     """
     if back_target == BACK_TARGET_UNIT:
         return flow_units.LABEL_ANOTHER_UNIT
-    return LABEL_ANOTHER_SERVICE if back_target == BACK_TARGET_SERVICE else LABEL_BACK
+    if back_target == BACK_TARGET_INSURANCE:
+        return LABEL_ANOTHER_INSURANCE
+    if back_target in (BACK_TARGET_SERVICE, BACK_TARGET_DOCTOR_SERVICES):
+        return LABEL_ANOTHER_SERVICE
+    return LABEL_BACK
 
 
 def _is_day_back(body: str | None, back_target: str | None) -> bool:
@@ -573,9 +627,32 @@ def _is_day_back(body: str | None, back_target: str | None) -> bool:
     target is the unit list, and the row's payload says where it goes (TASK-083)."""
     if _control_match(body, _day_back_label(back_target)):
         return True
-    booking_targets = (BACK_TARGET_SERVICE, BACK_TARGET_UNIT)
+    booking_targets = (
+        BACK_TARGET_SERVICE,
+        BACK_TARGET_UNIT,
+        BACK_TARGET_INSURANCE,
+        BACK_TARGET_DOCTOR_SERVICES,
+    )
     return back_target in booking_targets and any(
         _control_match(body, _day_back_label(target)) for target in booking_targets
+    )
+
+
+def _back_target_of(body: str | None) -> str:
+    """Where a back row's tap goes: its payload (`dayback|unit` -> "unit"), else the destination
+    its label names, else the service (the oldest and safest destination)."""
+    payload = _row_payload(body)
+    targets = (
+        BACK_TARGET_UNIT,
+        BACK_TARGET_INSURANCE,
+        BACK_TARGET_SERVICE,
+        BACK_TARGET_DOCTOR_SERVICES,
+    )
+    if payload in targets:
+        return str(payload)
+    return next(
+        (target for target in targets if _control_match(body, _day_back_label(target))),
+        BACK_TARGET_SERVICE,
     )
 
 
@@ -731,6 +808,164 @@ def booking_gate_scope(gate: BookingGate | None) -> Iterator[None]:
         _ACTIVE_GATE.reset(token)
 
 
+# --------------------------------------------------------------------------
+# TASK-088 section B (Task 5): the doctor's buffer between consultations
+# --------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class BufferRule:
+    """The buffer the day and slot lists apply, and the booking they must not pad.
+
+    `minutes` is `booking_buffer_minutes` of the professional who OWNS the agenda being read;
+    None = derive it from the conversation's booking owner (`_booking_professional`).
+    `moved_event_id` is the `google_event_id` of the booking being moved (reschedule, "Alterar
+    dados"): its own old window never pads its new time. A new booking ignores nothing.
+    """
+
+    minutes: int | None = None
+    moved_event_id: str | None = None
+
+
+# The booking being moved, for the reschedule / edit pickers (the same reason as `_ACTIVE_GATE`:
+# the pickers sit under a dozen entry points that do not all hold the appointment). Set and
+# reset by the reschedule and "Alterar dados" entries, never by the first-booking branch.
+_MOVING: ContextVar[BufferRule | None] = ContextVar("flow_router_moving", default=None)
+
+
+@contextmanager
+def moving_booking_scope(rule: BufferRule | None) -> Iterator[None]:
+    """Publish `rule` (the booking being moved) for the pickers of the block; ALWAYS reset."""
+    token = _MOVING.set(rule)
+    try:
+        yield
+    finally:
+        _MOVING.reset(token)
+
+
+def moving_event_scope(event_id: str | None):
+    """`moving_booking_scope` for "Alterar dados": only the moved event is known up front (the
+    doctor - hence the buffer - follows the draft and is read off the carrier)."""
+    return moving_booking_scope(BufferRule(moved_event_id=event_id or None))
+
+
+# The event of the appointment a "Marcar outra consulta" booking REPLACES (it is only cancelled at
+# the confirmation, so until then it sits in the agenda): the replacement's own pickers and
+# rechecks never let it pad them (SPEC designer decision 3 - the same rule as a reschedule).
+# The router does no DB I/O: `route()` reads it off `upcoming_appointments` (the worker loads
+# them when the conversation carries the marker) and publishes it here for the block.
+_REPLACED_EVENT: ContextVar[str | None] = ContextVar("flow_router_replaced_event", default=None)
+
+
+@contextmanager
+def replacing_booking_scope(event_id: str | None) -> Iterator[None]:
+    """Publish the replaced appointment's calendar event id for the block; ALWAYS reset."""
+    token = _REPLACED_EVENT.set(event_id or None)
+    try:
+        yield
+    finally:
+        _REPLACED_EVENT.reset(token)
+
+
+def replaced_event_id(
+    conversation: Any, upcoming_appointments: list[dict] | None
+) -> str | None:
+    """The `google_event_id` of the appointment `conversation` replaces, or None (no marker, or
+    the appointment is not among `upcoming_appointments`)."""
+    replaced = getattr(conversation, "flow_replaces_appointment_id", None)
+    if replaced is None:
+        return None
+    for appt in upcoming_appointments or []:
+        if str(appt.get("id")) == str(replaced):
+            return str(appt.get("google_event_id") or "") or None
+    return None
+
+
+def _booking_buffer(professional: Any | None) -> BufferRule:
+    """The rule of a NEW booking with `professional`: nothing moves - except the appointment a
+    "Marcar outra" booking replaces, which never pads its replacement."""
+    return BufferRule(
+        minutes=booking_buffer_minutes(professional), moved_event_id=_REPLACED_EVENT.get()
+    )
+
+
+def _appointment_owner(appt: dict | None, professionals: list | None) -> Any | None:
+    """The doctor (snapshot row) who owns `appt`, or None when it cannot be read."""
+    parsed = _appointment_owner_and_unit_id(appt, professionals) if appt else None
+    return parsed[0] if parsed is not None else None
+
+
+def _appointment_buffer(appt: dict | None, professionals: list | None) -> BufferRule:
+    """The rule of rescheduling `appt`: the buffer of the doctor who owns it, and its own event
+    never pads itself (R31, R32). No readable appointment: no rule from here (the conversation's
+    booking owner decides)."""
+    if not appt:
+        return BufferRule()
+    owner = _appointment_owner(appt, professionals)
+    return BufferRule(
+        minutes=booking_buffer_minutes(owner),
+        moved_event_id=str(appt.get("google_event_id") or "") or None,
+    )
+
+
+def _picker_buffer(
+    conversation: Any, professionals: list | None, branch: DayBranch, rule: BufferRule | None
+) -> tuple[int, str | None]:
+    """(buffer minutes, moved event id) a day / slot list of `branch` applies.
+
+    An explicit `rule` wins; the reschedule and edit branches read the booking being moved off
+    the scope their entry opened (`moving_booking_scope`); a rule without minutes - and the
+    first-booking branch - takes the buffer of `_booking_professional` (the doctor whose agenda
+    the picker reads). The clinic's own agenda (hub) never gets here.
+    """
+    if rule is None and branch is not BOOKING_DAY_BRANCH:
+        rule = _MOVING.get()
+    if rule is None:
+        rule = BufferRule()
+    minutes = rule.minutes
+    if minutes is None:
+        minutes = booking_buffer_minutes(_booking_professional(conversation, professionals))
+    moved_event_id = rule.moved_event_id
+    if moved_event_id is None and branch is BOOKING_DAY_BRANCH:
+        moved_event_id = _REPLACED_EVENT.get()
+    return max(minutes, 0), moved_event_id
+
+
+async def _inside_buffer(
+    calendar: CalendarService,
+    start: datetime,
+    end: datetime,
+    professional: Any | None,
+    *,
+    source: str,
+    conversation_id: object = None,
+    professional_id: UUID | None = None,
+    ignore_event_id: str | None = None,
+) -> bool:
+    """True when the chosen window is inside the buffer of `professional` (refused like a slot
+    taken between the list and the tap, R35). Asked right after `slot_taken_at_confirm`, on the
+    SAME agenda; `ignore_event_id` is the booking being moved; the holds passed on are OTHER
+    conversations' only (R33). No buffer: False, with no read at all."""
+    minutes = booking_buffer_minutes(professional)
+    if minutes <= 0:
+        return False
+    try:
+        holds = await _hold_windows(professional_id)
+    except Exception as exc:  # noqa: BLE001 - fail-open, like every confirm recheck
+        logger.warning("booking_buffer_holds_failed", error_type=type(exc).__name__)
+        holds = []
+    return await buffer_taken_at_confirm(
+        calendar,
+        start,
+        end,
+        buffer_minutes=minutes,
+        source=source,
+        ignore_event_id=ignore_event_id,
+        holds=holds,
+        conversation_id=conversation_id,
+    )
+
+
 @dataclass
 class FlowRouterResult:
     """The router's decision for one inbound turn.
@@ -779,6 +1014,7 @@ class FlowRouterResult:
     # them explicitly.
     flow_selected_professional_id: UUID | None = None
     flow_selected_insurance: str | None = None
+    flow_insurance_auto: bool | None = None
     # TASK-083 spec §8: the unit the booking happens at (`flow_units`). Carried by
     # `_carry_unit` only on the steps after it was chosen (day, slot, confirmation), so it is
     # dropped exactly when the patient goes back to the service/doctor lists or the booking ends.
@@ -802,6 +1038,20 @@ class FlowRouterResult:
     # worker (workers/shared/draft_resolution.py::_resume_booking_draft) re-runs the
     # resolver over the draft instead of showing this result's list. Never persisted.
     resume_draft: bool = False
+    # TASK-088 R41: the professional whose AGENDA the booking day picker was just drawn on (the
+    # state's explicit selection; None on a clinic where none is stored, whose calendar is the
+    # tenant's). Set by `_ask_day` on every result that reached `enter_day_picker` (the days, the
+    # calendar view, the "no days" menu, "calendar unavailable"), so a result built on the wrong
+    # agenda is recognisable whatever it turned out to be (`calendar_owner_changed`). A temporary
+    # signal for the worker, like `resume_draft`: never persisted (`_apply_flow_result` copies
+    # named fields only).
+    agenda_owner_id: UUID | None = None
+    # True when this result DELIBERATELY leaves `flow_selected_insurance` empty (TASK-088: the
+    # automatic Particular dropped on "back"), so `_carry_insurance` does not copy the old answer
+    # back onto it. Never persisted.
+    insurance_dropped: bool = False
+    # The previously selected unit no longer applies. Do not copy it back into this result.
+    unit_dropped: bool = False
     # On an action="calendar_unavailable" result of a booking whose deposit was DROPPED
     # (TASK-071 Plan 3 review fix, 2026-10-29): the worker keeps the clinic's calendar alert but
     # offers a person (Sim / Não) instead of handing over. Never persisted.
@@ -953,6 +1203,39 @@ EDIT_DAY_BRANCH = DayBranch(
 # Every step that the day branch owns, per branch — used by `_catalog_step` /
 # `_manage_step` to dispatch the retry/escape renders to the same handler.
 _BOOKING_DAY_STEPS = (STEP_AWAITING_DAY, STEP_AWAITING_DAY_RETRY, STEP_AWAITING_DAY_ESCAPE)
+
+# TASK-088 R41: the steps that can call the LLM (the scoped help nodes). A tap that selects the
+# doctor in the same turn goes straight to the days now (no service card in between), so the worker
+# hands `route()` the calendar of the doctor stored BEFORE the turn - the clinic's - and runs it
+# again on the picked doctor's (`calendar_owner_changed`).
+LLM_HELP_STEPS = frozenset(
+    {
+        STEP_PROFESSIONAL_HELP,
+        STEP_PROFESSIONAL_HELP_FINAL,
+        STEP_SERVICE_HELP,
+        STEP_SERVICE_HELP_FINAL,
+    }
+)
+
+
+def calendar_owner_changed(conversation: Any, result: FlowRouterResult) -> bool:
+    """Whether `result` was drawn on another doctor's agenda than the one the turn picked (R41).
+
+    True when the booking day picker was reached (`agenda_owner_id` is set by `_ask_day` on every
+    result that got there - days, calendar view, no days at all, calendar unavailable) on behalf
+    of a professional the conversation had NOT stored yet: the turn's calendar was the previous
+    owner's (the clinic's), so the result - whatever it says - must be drawn again. Never for a turn
+    that started on a help step (it can call the LLM: it is never run twice - and it never needs
+    to be, see the worker). A parked AI draft does not exempt it: the resolver only uses this
+    result as its fallback, and a resumed draft builds its own agendas. Pure."""
+    owner = result.agenda_owner_id
+    return (
+        owner is not None
+        and owner != _selected_professional_id(conversation)
+        and getattr(conversation, "flow_step", None) not in LLM_HELP_STEPS
+    )
+
+
 _MANAGE_DAY_STEPS = (STEP_MANAGE_DAY, STEP_MANAGE_DAY_RETRY, STEP_MANAGE_DAY_ESCAPE)
 _EDIT_DAY_STEPS = (STEP_EDIT_DAY, STEP_EDIT_DAY_RETRY, STEP_EDIT_DAY_ESCAPE)
 
@@ -975,6 +1258,7 @@ class _DayPickerState:
     flow_selected_day: str | None = None
     flow_selected_professional_id: UUID | None = None
     flow_selected_insurance: str | None = None
+    flow_insurance_auto: bool | None = None
     flow_managing_appointment_id: UUID | None = None
     flow_attendee_name: str | None = None
     flow_edit_draft: dict | None = None
@@ -1048,14 +1332,19 @@ def _is_multi_professional(professionals: list | None) -> bool:
 
 
 def menu_buttons_for(tenant: Tenant, multi_professional: bool) -> list[str]:
-    """Effective menu labels: the fixed multi-doctor trio, or the tenant's own.
+    """Effective menu labels: the fixed multi-doctor pair, or the tenant's own.
 
     Shared with workers/tasks.py (the greeting card doubles as the menu when
     flows are enabled, and the reactivation-reset path re-renders it) so every
     surface shows the same effective menu.
+
+    TASK-088: "Escolher médico" left the multi-doctor menu - the booking starts with
+    the SERVICE, and the doctor comes after it. The label stays RECOGNISED
+    (`BTN_CHOOSE_PROFESSIONAL`, `_menu_choice_multi`, greeting's name guard): a typed one,
+    or a tap on an older card that still shows it, opens the same service-first booking.
     """
     if multi_professional:
-        return [BTN_CHOOSE_PROFESSIONAL, BTN_CHOOSE_SERVICE, LABEL_OTHER]
+        return [BTN_CHOOSE_SERVICE, LABEL_OTHER]
     return menu_buttons(tenant)
 
 
@@ -1063,9 +1352,9 @@ def main_menu_buttons(has_upcoming: bool = False) -> list[str]:
     """The buttons RENDERED under the main menu: [🗓️ Agendar, Outro], for every clinic.
 
     Owner, 2026-10-05: the booking flow now starts with "Essa consulta é pra
-    você?" → convênio → médico → serviço, so the old entries ("Escolher
-    médico"/"Escolher serviço", or a clinic's own "Serviços e Custo") offered
-    a choice the flow itself makes later. Only what is DRAWN changes:
+    você?" (then, since TASK-088, serviço → médico → unidade → convênio), so the
+    old entries ("Escolher médico"/"Escolher serviço", or a clinic's own
+    "Serviços e Custo") offered a choice the flow itself makes later. Only what is DRAWN changes:
     `menu_buttons_for` keeps the full vocabulary, so a typed old label (or a
     tap on an older card still on screen) routes exactly as before. Both
     labels are matched in `route()` ahead of the multi-doctor and index
@@ -1610,7 +1899,7 @@ def _carry_attendee(conversation: Conversation, result: FlowRouterResult) -> Flo
 
     `_apply_flow_result` writes every flow field unconditionally, and the
     attendee is chosen FIRST - before a dozen builders (professional list,
-    service detail, day picker...) that know nothing about it. Rather than
+    unit step, day picker...) that know nothing about it. Rather than
     thread it through each of them, the two public entries apply this once.
 
     Leaves alone: a result that already names an attendee, the attendee steps
@@ -1629,25 +1918,34 @@ def _carry_attendee(conversation: Conversation, result: FlowRouterResult) -> Flo
 def _carry_insurance(conversation: Conversation, result: FlowRouterResult) -> FlowRouterResult:
     """Keep the convênio answer on every result that stays inside the booking.
 
-    Same reason as `_carry_attendee`: since the owner's 2026-09-23 order the
-    convênio is asked FIRST (convênio -> profissional -> serviço -> dia ->
-    horário), so the doctor list, the service list, the detail card and the
-    scoped-help nodes that follow all know nothing about it - yet
-    `_apply_flow_result` writes `flow_selected_insurance` unconditionally.
+    Same reason as `_carry_attendee`: a convênio can be known BEFORE the booking reaches its
+    question (an AI draft that named it, a chat parked on the retired first question, a
+    booking whose convênio list is reopened), so the service list, the doctor list, the unit
+    step and the scoped-help nodes that come first must not lose it - `_apply_flow_result`
+    writes `flow_selected_insurance` unconditionally. (TASK-088: in the button flow the
+    convênio is asked LAST, after the unit - `_insurance_gate` - and judged there.)
 
-    A validated answer may arrive from the LLM before pra-quem, so it also
-    survives those steps. Leaves alone: a result that already names one,
-    the convênio question itself, and anything
-    leaving the booking - so the answer is dropped exactly when its booking
-    ends.
+    A patient can open the convênio picker explicitly to change Particular. Keep their choice
+    until they give a different answer, so returning from that picker does not erase it.
     """
-    if (
-        result.flow_selected_insurance is not None
-        or result.flow_step == STEP_AWAITING_INSURANCE
-    ):
+    if result.insurance_dropped:
         return result
-    if result.flow_state in (FlowState.SERVICE_CATALOG, FlowState.LLM):
-        result.flow_selected_insurance = _selected_insurance(conversation)
+    selected = _selected_insurance(conversation)
+    if (
+        result.flow_selected_insurance is None
+        and result.flow_state in (FlowState.SERVICE_CATALOG, FlowState.LLM)
+        and (
+            result.flow_step != STEP_AWAITING_INSURANCE
+            or _chosen_particular(conversation)
+        )
+    ):
+        result.flow_selected_insurance = selected
+    if (
+        selected is not None
+        and result.flow_selected_insurance == selected
+        and result.flow_insurance_auto is None
+    ):
+        result.flow_insurance_auto = getattr(conversation, "flow_insurance_auto", None)
     return result
 
 
@@ -1758,6 +2056,7 @@ def _carry_unit(conversation: Conversation, result: FlowRouterResult) -> FlowRou
     selected = flow_units.selected_unit_id(conversation)
     if (
         selected is None
+        or result.unit_dropped
         or result.flow_selected_unit_id is not None
         or result.appointment is not None
         or result.flow_step == flow_units.STEP_AWAITING_UNIT
@@ -1963,6 +2262,7 @@ def _preserve(conversation: Conversation, action: str) -> FlowRouterResult:
         flow_selected_slot=conversation.flow_selected_slot,
         flow_selected_professional_id=_selected_professional_id(conversation),
         flow_selected_insurance=_selected_insurance(conversation),
+        flow_insurance_auto=getattr(conversation, "flow_insurance_auto", None),
         flow_managing_appointment_id=_selected_managing_appointment_id(conversation),
         flow_attendee_name=_attendee_name(conversation),
         flow_selected_unit_id=flow_units.selected_unit_id(conversation),
@@ -1983,6 +2283,7 @@ def _delegate_llm_keeping_draft(conversation: Conversation) -> FlowRouterResult:
         flow_selected_day=getattr(conversation, "flow_selected_day", None),
         flow_selected_professional_id=_selected_professional_id(conversation),
         flow_selected_insurance=_selected_insurance(conversation),
+        flow_insurance_auto=getattr(conversation, "flow_insurance_auto", None),
         flow_attendee_name=_attendee_name(conversation),
         flow_selected_unit_id=flow_units.selected_unit_id(conversation),
     )
@@ -2084,7 +2385,10 @@ async def route(
     See `_ACTIVE_GATE` for why the gate travels this way rather than as an
     argument on every function between here and the slot picker.
     """
-    with booking_gate_scope(gate):
+    with (
+        booking_gate_scope(gate),
+        replacing_booking_scope(replaced_event_id(conversation, upcoming_appointments)),
+    ):
         result = await _route(
             conversation,
             tenant,
@@ -2270,19 +2574,20 @@ async def _route(
 def _menu_choice_multi(
     conversation: Conversation, tenant: Tenant, body: str, professionals: list
 ) -> FlowRouterResult:
-    """Menu interaction for a multi-doctor tenant (fixed 3-button menu).
+    """Menu interaction for a multi-doctor tenant (fixed 2-button menu).
 
-    "Escolher médico" opens the tappable doctor list; "Escolher serviço" opens
-    the clinic's unified service catalog and lets the picked service narrow
-    the doctors (`_enter_clinic_service_catalog`) - both fully deterministic;
-    "Outro" hands off exactly like today.
+    "Escolher serviço" opens the clinic's unified service catalog and lets the picked
+    service narrow the doctors (`_enter_clinic_service_catalog`) - fully deterministic;
+    "Outro" hands off exactly like today. TASK-088: the old "Escolher médico" door is
+    gone from the menu, but a typed one (or a tap on an older card) is NOT an error: it
+    opens the very same service-first booking.
     """
     labels = menu_buttons_for(tenant, True)
-    if _label_match(body, labels[0]):
+    if _label_match(body, BTN_CHOOSE_PROFESSIONAL):
         return _ask_attendee_first(ATTENDEE_NEXT_BOOK, tenant, professionals)
-    if _label_match(body, labels[1]):
+    if _label_match(body, labels[0]):
         return _ask_attendee_first(ATTENDEE_NEXT_CATALOG, tenant, professionals)
-    if _label_match(body, labels[2]):
+    if _label_match(body, labels[1]):
         return _enter_other(conversation)
     if conversation.flow_state == FlowState.MENU:
         # Free text at the menu -> the patient wants something custom.
@@ -2338,18 +2643,15 @@ def enter_booking(tenant: Tenant, professionals: list | None = None) -> FlowRout
 def _booking_entry(
     next_step: str | None, tenant: Tenant, professionals: list | None
 ) -> FlowRouterResult:
-    """The first list a booking entry would show, used to spot a dead end early.
+    """The first list a booking opens: the SERVICE (TASK-088, owner 2026-11-20).
 
-    "Escolher serviço" on a clinic whose doctors offer NO service at all keeps
-    its old answer ("não há serviços" + the menu) instead of a doctor list
-    where every tap would dead-end - that was the one thing the retired
-    service-first entry did that the doctor list does not.
+    Both multi-doctor menu entries ("Escolher serviço" and the retired "Escolher médico",
+    `next_step`) open the same thing: the clinic's unified service catalog, whose pick then
+    narrows the doctors. A clinic with ONE active doctor opens his own service list - no
+    doctor step. Also the early dead-end check: a clinic whose doctors offer no service at
+    all answers "não há serviços" + the menu here, never a list whose every tap dead-ends.
     """
-    if (
-        next_step == ATTENDEE_NEXT_CATALOG
-        and _is_multi_professional(professionals)
-        and not _clinic_service_catalog(tenant, professionals or [])
-    ):
+    if _is_multi_professional(professionals):
         return _enter_clinic_service_catalog(tenant, professionals or [])
     return _start_booking(tenant, professionals)
 
@@ -2361,35 +2663,23 @@ def _booking_continuation(
     *,
     insurance: str | None = None,
 ) -> FlowRouterResult:
-    """What a booking entry opens once pra-quem is answered: the convênio first.
+    """What a booking entry opens once pra-quem is answered: the service, never the convênio.
 
-    The owner fixed the order on 2026-09-23 - convênio -> profissional ->
-    serviço -> dia -> horário - so the convênio answer can MARK which doctors
-    take the patient's plan on the list that follows. Both multi-doctor menu
-    entries (`next_step`: "Escolher médico" / "Escolher serviço") therefore
-    open the same sequence; the old service-first branch chose the service
-    before the doctor, which that order retires (its handlers stay only for
-    conversations already parked mid-way when this shipped).
+    The order is now pra-quem -> serviço -> médico -> unidade -> convênio -> dia -> horário
+    (owner, 2026-11-20): the convênio only means something once service, doctor and unit are
+    known, so it is asked later, from the day step's choke point (`_ask_day` ->
+    `_insurance_gate`) and only when the clinic collects it. It used to be the first
+    question (owner, 2026-09-23), filtering nothing and only marking doctors.
 
-    Asked only when the clinic collects it (`_insurance_step_skip_reason`) AND
-    the entry really opens a booking: in front of "não há serviços" it would be
-    a question whose every answer dead-ends.
+    `insurance` is an answer that ALREADY exists (an AI draft that landed with one, a parked
+    chat): it rides along and is checked against the combination when the booking gets
+    there - kept when accepted, asked again (never swapped for Particular in silence) when not.
     """
     entry = _booking_entry(next_step, tenant, professionals)
     if entry.flow_state != FlowState.SERVICE_CATALOG:
         return entry
     if insurance is not None:
-        entry = _start_booking(tenant, professionals, insurance=insurance)
         entry.flow_selected_insurance = insurance
-        return entry
-    skip_reason = _insurance_step_skip_reason(tenant)
-    if skip_reason is None:
-        return _enter_insurance(tenant)
-    logger.info(
-        "insurance_step_skipped",
-        reason=skip_reason,
-        professional_count=len(professionals or []),
-    )
     return entry
 
 
@@ -2464,12 +2754,17 @@ def _resume_parked_draft(conversation: Conversation, result: FlowRouterResult) -
     draft and re-runs the resolver over FRESH data; on any failure it keeps `result`. A
     result still ON the convênio step ("Outro convênio" asks for the name, an empty answer
     re-asks) has not answered yet and keeps waiting.
+
+    TASK-088: so does any result that stays on the step the patient is already on (a "Ver mais"
+    page, a re-asked list) - it moved nowhere, and re-running the draft would draw the list
+    again from its first page.
     """
     if (
         _has_draft(conversation)
         and result.action == "reply"
         and result.flow_state is FlowState.SERVICE_CATALOG
         and result.flow_step != STEP_AWAITING_INSURANCE
+        and result.flow_step != getattr(conversation, "flow_step", None)
     ):
         result.resume_draft = True
     return result
@@ -2534,25 +2829,17 @@ def _attendee_step(
 def _start_booking(
     tenant: Tenant, professionals: list | None = None, *, insurance: str | None = None
 ) -> FlowRouterResult:
-    """What a direct "Agendar" tap opened before the pra-quem question existed.
+    """The service list of a clinic with ONE active doctor (an empty roster lands here too).
 
-    Mirrors `_enter_menu_choice`'s index-0 branch (single-doctor: straight to
-    the service catalog) and `_menu_choice_multi`'s "Escolher médico" branch
-    (multi-doctor: the tappable doctor list first) - same empty-state replies
-    as those existing paths, reused as-is. `route()`'s IDLE dispatch calls
-    this BEFORE the multi-doctor check (like LABEL_RESCHEDULE/LABEL_CANCEL_APPT
-    above), so "Agendar" works identically on single- and multi-doctor tenants.
+    TASK-088: only for a roster of one (or none), where it renders the doctor's own service list
+    (decision recorded in docs/CHECKPOINT_convenio_catalogo.md: "show every doctor" over a roster
+    of one is a list of one). Both callers - `_booking_entry` and the AI draft resolver
+    (`booking_draft`) - send a multi-doctor clinic to the clinic's service catalog
+    (`_enter_clinic_service_catalog`) instead, so this never lists the doctors.
 
-    `insurance` is the patient's convênio answer, when it was already given:
-    it only MARKS the doctors who take that plan - every doctor is listed.
-
-    A clinic with ONE active professional keeps skipping the doctor list
-    (decision recorded in docs/CHECKPOINT_convenio_catalogo.md): "show every
-    doctor" over a roster of one is a list of one, and the extra tap would buy
-    the patient nothing the service list does not already show.
+    `insurance` is the patient's convênio answer, when it was already given: it only MARKS the
+    services the doctor does not take that plan for.
     """
-    if _is_multi_professional(professionals):
-        return _enter_professional_list(tenant, professionals or [], insurance=insurance)
     services = active_appointment_types(tenant)
     if not services:
         return FlowRouterResult(
@@ -2938,7 +3225,12 @@ def _enter_professional_list(
     page: int = 0,
     service_name: str | None = None,
 ) -> FlowRouterResult:
-    """Render the tappable doctor list ("Escolher médico").
+    """Render the tappable doctor list (the doctors the booking can still choose from).
+
+    TASK-088: there is no "Escolher médico" door any more; this list is reached from the
+    callers that hold a doctor-first booking (the AI draft's legacy landing, a rebooking
+    after a doctor's cancellation, a parked chat) - the service-first order lists the doctors
+    of the chosen service through `_enter_service_professional_list`.
 
     Each row carries the professional's specialty as the WhatsApp list-row
     description — the "apresentação dos médicos" made tappable — prefixed with
@@ -3043,12 +3335,11 @@ def _enter_clinic_service_catalog(
 ) -> FlowRouterResult:
     """Render the clinic-wide service list ("Escolher serviço").
 
-    Deliberately WITHOUT the "Não sei" scoped-help row the doctor-first list
-    carries: that node's hand-back re-enters at `_enter_service_detail`, which
-    assumes the professional is already known — true after "Escolher médico",
-    false here. Wiring help into this branch needs its own pair of steps and
-    is out of this round's scope; the row is omitted rather than shipped
-    pointing at the wrong re-entry.
+    Deliberately WITHOUT the "Não sei" scoped-help row the doctor's own service list
+    carries: that node's hand-back (`_handle_service_help` -> `_continue_with_service`)
+    assumes the doctor of the list it was asked on, and the clinic catalog has none yet.
+    Wiring help into this branch needs its own pair of steps and is out of scope; the row is
+    omitted rather than shipped pointing at the wrong re-entry.
 
     Up to MAX_LIST_ROWS services fit one page; a longer catalogue pages (`page`,
     TASK-082 S4).
@@ -3094,24 +3385,25 @@ def _enter_service_professional_list(
     insurance: str | None = None,
     page: int = 0,
 ) -> FlowRouterResult:
-    """EVERY active doctor, with the service already stored - and marked.
+    """The doctors who DO `service_name`, with the service already stored.
 
-    Only reached by a conversation that chose its service first (the retired
-    service-first branch, parked mid-way when the convênio-first order
-    shipped). It used to list only the doctors offering `service_name`; the
-    owner's rule is now "show everyone, mark who takes the plan", so the list
-    is the whole roster. A tap on a doctor who does not offer the service is
-    already handled downstream (`_handle_service_professional` falls back to
-    that doctor's own services).
+    The second step of the booking since TASK-088 (service -> doctor -> unit -> convênio):
+    the patient picked the service, and the list is the doctors that offer it - showing one
+    who does not would only lead to a tap that falls back to that doctor's own services.
+    (It used to list the whole roster, marking who took the patient's plan; the convênio is
+    not known at this point any more.) `insurance` only matters to a conversation that
+    already carries an answer (an AI draft, a parked chat) and marks the rows as before.
+    An empty match - the catalog changed under the patient - lists everyone, as before.
 
-    The tap lands on STEP_AWAITING_SERVICE_PROFESSIONAL, which re-enters the
-    normal flow at that service's own detail card — never back at the service
+    The tap lands on STEP_AWAITING_SERVICE_PROFESSIONAL, which goes on with that service
+    (`_continue_with_service`: the unit, the convênio, the days) — never back at the service
     list, which the patient has already answered.
 
     Pages like every doctor list (`page`, TASK-082 S4).
     """
+    offering = _professionals_offering(tenant, professionals, service_name) or list(professionals)
     shown, more = professional_page(
-        professionals, page, fixed_rows=0, event="flow_service_professional_list_truncated"
+        offering, page, fixed_rows=0, event="flow_service_professional_list_truncated"
     )
     rows, plan = _professional_rows(tenant, shown, insurance, service_name=service_name)
     rows.extend((row_id, title, None) for row_id, title in more)
@@ -3125,9 +3417,16 @@ def _enter_service_professional_list(
                 section_title="Profissionais",
                 source=OptionSource(
                     kind="professional",
-                    scope=_matrix_professional_scope(tenant, insurance, None, service_name),
+                    # `pool`: when not everyone does the service, only these doctors - on the
+                    # Portal's later pages too (a full roster keeps the scope it always had).
+                    scope=_matrix_professional_scope(
+                        tenant,
+                        insurance,
+                        offering if len(offering) != len(professionals) else None,
+                        service_name,
+                    ),
                     items=portal_professional_rows(
-                        tenant, professionals, insurance, service_name=service_name
+                        tenant, offering, insurance, service_name=service_name
                     ),
                 ),
             )
@@ -3138,14 +3437,61 @@ def _enter_service_professional_list(
     )
 
 
-def _handle_catalog_service(
-    conversation: Conversation, tenant: Tenant, body: str, professionals: list
+async def _continue_with_service(
+    conversation: Conversation,
+    tenant: Tenant,
+    calendar: CalendarService | None,
+    service: dict,
+    professionals: list | None,
+    *,
+    professional: Any | None = None,
+    services: list[dict] | None = None,
+) -> FlowRouterResult:
+    """The service was tapped: straight to the next step (TASK-088).
+
+    The "Deseja agendar esse serviço?" card (name, price, long description, Sim / Outro serviço)
+    is gone from the path - the price now waits for the final confirmation and the description
+    is not repeated. What is left to ask after a service is what `_ask_day` asks, in the owner's
+    order: the unit (when the doctor has several), then the convênio (when the clinic collects
+    it), then the days. The doctor, when the service was tapped from a list that does not carry
+    one (the clinic catalog with a single doctor offering it, the doctors of a service), is
+    `professional`; else the conversation's own - a single-doctor clinic never stores one.
+
+    The pick is in a throwaway `_DayPickerState`, not on the conversation yet - the same carrier
+    the unit pick uses - so `_ask_day` reads the NEW service (and drops nothing the card used to
+    drop: no unit, no day, the convênio the patient already gave rides along to be judged at the
+    combination). `calendar` is the agenda as the worker resolved it; `_ask_day` scopes it."""
+    state = _DayPickerState(
+        id=getattr(conversation, "id", None),
+        flow_selected_type=str(service.get("name", "")),
+        flow_selected_professional_id=(
+            professional.id if professional is not None else _selected_professional_id(conversation)
+        ),
+        flow_selected_insurance=_selected_insurance(conversation),
+        flow_insurance_auto=getattr(conversation, "flow_insurance_auto", None),
+        flow_attendee_name=_attendee_name(conversation),
+    )
+    changed = (
+        _norm(state.flow_selected_type) != _norm(conversation.flow_selected_type)
+        or state.flow_selected_professional_id != _selected_professional_id(conversation)
+        or flow_units.selected_unit_id(conversation) is not None
+    )
+    return await _ask_day_after_choice(
+        state, tenant, calendar, services, professionals, changed=changed
+    )
+
+
+async def _handle_catalog_service(
+    conversation: Conversation,
+    tenant: Tenant,
+    body: str,
+    professionals: list,
+    calendar: CalendarService | None = None,
 ) -> FlowRouterResult:
     """Resolve a clinic-catalog pick, then let the SERVICE narrow the doctors.
 
-    Exactly one professional offers it -> straight to that service's detail
-    card with the doctor already selected (the same card the doctor-first
-    branch reaches, so both branches converge one step later). Two or more ->
+    Exactly one professional offers it -> straight on (unit / convênio / days) with the doctor
+    already selected - TASK-088: no service card in between. Two or more ->
     the filtered doctor list. None -> the catalog changed under us mid-flow;
     a fixed reply plus the menu, never the LLM.
     """
@@ -3160,9 +3506,15 @@ def _handle_catalog_service(
     offering = _professionals_offering(tenant, professionals, service_name)
     if len(offering) == 1:
         professional = offering[0]
-        result = _enter_service_detail(service, conversation, tenant, professional)
-        result.flow_selected_professional_id = professional.id
-        return result
+        return await _continue_with_service(
+            conversation,
+            tenant,
+            calendar,
+            service,
+            professionals,
+            professional=professional,
+            services=professional_appointment_types(professional, tenant),
+        )
     if not offering:
         logger.warning("flow_catalog_service_without_professional")
         return FlowRouterResult(
@@ -3180,18 +3532,20 @@ def _handle_catalog_service(
     )
 
 
-def _handle_service_professional(
+async def _handle_service_professional(
     conversation: Conversation,
     tenant: Tenant,
     body: str,
     professionals: list,
+    calendar: CalendarService | None = None,
 ) -> FlowRouterResult:
-    """Doctor tap inside the service-first branch: straight to the detail card.
+    """Doctor tap inside the service-first branch: straight on (unit / convênio / days).
 
     The service was already chosen (`flow_selected_type`), so this must NOT
     re-render that doctor's whole service list the way
-    `_enter_professional_services` does — that would ask a question the
-    patient has already answered. A "Ver mais profissionais" tap pages the list
+    `_enter_professional_services` does - that would ask a question the
+    patient has already answered. TASK-088: nor does it draw the service card any more.
+    A "Ver mais profissionais" tap pages the list
     (TASK-082 S4); anything that names no doctor goes to the model, as before.
     """
     more = catalog_more_page(body, LABEL_MORE_PROFESSIONALS)
@@ -3209,18 +3563,23 @@ def _handle_service_professional(
     professional = _match_professional(professionals or [], body)
     if professional is None:
         return _preserve(conversation, "delegate_llm")
-    service = _match_service(
-        professional_appointment_types(professional, tenant), conversation.flow_selected_type
-    )
+    doctor_services = professional_appointment_types(professional, tenant)
+    service = _match_service(doctor_services, conversation.flow_selected_type)
     if service is None:
         # Deactivated between the two taps: fall back to that doctor's own
         # list rather than booking a service they no longer offer.
         return _enter_professional_services(
             professional, tenant, insurance=_selected_insurance(conversation)
         )
-    result = _enter_service_detail(service, conversation, tenant, professional)
-    result.flow_selected_professional_id = professional.id
-    return result
+    return await _continue_with_service(
+        conversation,
+        tenant,
+        calendar,
+        service,
+        professionals,
+        professional=professional,
+        services=doctor_services,
+    )
 
 
 def _professional_greeting_body(professional: Any) -> str:
@@ -3343,7 +3702,8 @@ def _enter_professional_services(
 
 
 # --------------------------------------------------------------------------
-# Convênio step - asked FIRST since 2026-09-23; never filters, only marks
+# Convênio step - asked LAST since 2026-11-20 (TASK-088): after service, doctor and unit,
+# listing only the plans that combination accepts (it was the FIRST question, marking doctors)
 # --------------------------------------------------------------------------
 
 
@@ -3381,10 +3741,10 @@ def _insurance_step_skip_reason(tenant: Tenant) -> str | None:
 
     `collect_insurance` and the clinic's plans are CLINIC-wide settings (the
     hub edits them once for the whole clinic) and the answer never filters
-    doctors, services or slots - it only marks, on the doctor list, who takes
-    the plan. So the step depends on the clinic's configuration and NOTHING
-    else: zero, one and many active professionals all get the same question,
-    at the start of the booking.
+    doctors, services or slots. So the step depends on the clinic's
+    configuration and NOTHING else: zero, one and many active professionals all
+    get the same question - since TASK-088 right before the days, once service,
+    doctor and unit are known (`_insurance_gate`).
 
     It used to additionally require `flow_selected_professional_id`, which only
     a multi-doctor tenant ever sets (`_enter_professional_services`). A clinic
@@ -3416,22 +3776,24 @@ def _match_insurance_plan(tenant: Tenant, body: str | None) -> str | None:
 
 match_insurance_plan = _match_insurance_plan
 
-def insurance_page(plans: list, page: int) -> tuple[list, int | None]:
+def insurance_page(plans: list, page: int, *, reserved: int = 0) -> tuple[list, int | None]:
     """The plans one convênio-list page shows, and the next page's cursor (None = last).
 
     Up to MAX_INSURANCE_PLAN_ROWS plans fit one page with Particular + Outro. Past that,
     every page shows INSURANCE_PAGE_SIZE plans and keeps one row for "Ver mais
     convênios", so no plan is ever cut (Instituto Gicovate, 2026-10-27: 9 plans and the
     ninth, Unimed, never appeared). A cursor past the end restarts at the first page.
+
+    `reserved` (TASK-088): rows the list carries besides those - the booking's back row
+    ("Outro serviço" / "Outra unidade") - so the page still ends within WhatsApp's ten.
     """
-    if len(plans) <= MAX_INSURANCE_PLAN_ROWS:
+    if len(plans) <= MAX_INSURANCE_PLAN_ROWS - reserved:
         return list(plans), None
-    pages = -(-len(plans) // INSURANCE_PAGE_SIZE)
+    size = INSURANCE_PAGE_SIZE - reserved
+    pages = -(-len(plans) // size)
     page = page if 0 <= page < pages else 0
-    start = page * INSURANCE_PAGE_SIZE
-    return list(plans[start : start + INSURANCE_PAGE_SIZE]), (
-        page + 1 if page + 1 < pages else None
-    )
+    start = page * size
+    return list(plans[start : start + size]), (page + 1 if page + 1 < pages else None)
 
 
 def catalog_page(items: list, page: int, *, fixed_rows: int) -> tuple[list, int | None]:
@@ -3522,40 +3884,149 @@ def insurance_more_page(body: str | None) -> int | None:
     return _more_page(_row_payload(body))
 
 
+def _insurance_unit(professional: Any | None, service_id: UUID | None, unit_id: Any) -> Any | None:
+    """The unit the convênio is judged at: the picked one, else the doctor's only (implied) one.
+
+    None when the doctor has none, or has several and the patient has not chosen yet (the list
+    then falls back to "accepted at some unit of the service")."""
+    if professional is None:
+        return None
+    state = _DayPickerState(flow_selected_unit_id=unit_id)
+    return flow_units.effective_unit(state, professional, service_id)
+
+
+def plans_accepted_for(
+    tenant: Tenant, plans: list, professional: Any, service_id: UUID | None, unit: Any | None
+) -> list:
+    """The plans of `plans` accepted for (`service_id`, `professional`, `unit`) - TASK-088.
+
+    Two rules, both already the product's: the doctor takes the plan under the clinic's
+    `insurance_mode` (`_accepts_plan`) AND the convênio matrix does not refuse the cell
+    (`is_accepted`). With a `unit` that exact cell is asked; without one (a doctor with no
+    unit link: the "no unit" slice; a doctor with units not yet chosen: accepted at some unit
+    that does the service). A plan without an id (a legacy name) is kept - nothing can judge
+    it. Without a service the matrix has nothing to say, only the doctor's own list does."""
+    exc = snapshot_exceptions(tenant)
+    judge = service_id is not None and has_exceptions(exc)
+    accepted = []
+    for plan in plans:
+        plan_id = plan.get("id")
+        if not plan_id:
+            accepted.append(plan)
+            continue
+        plan_id = str(plan_id)
+        if not _accepts_plan(tenant, professional, plan_id):
+            continue
+        if judge:
+            if unit is not None:
+                taken = is_accepted(exc, professional.id, service_id, unit.id, plan_id)
+            else:
+                taken = not refuses_everywhere(exc, professional, service_id, plan_id)
+            if not taken:
+                continue
+        accepted.append(plan)
+    return accepted
+
+
+def insurance_plans_for_booking(
+    tenant: Tenant,
+    plans: list,
+    professionals: list | None,
+    service_name: str | None,
+    professional_id: Any = None,
+    unit_id: Any = None,
+) -> list:
+    """The convênio list of a booking whose combination is known (TASK-088), as one function.
+
+    The router builds page 1 with it and `services/list_options.py` rebuilds every later
+    Portal page from the stored scope with the SAME call, so the two never differ. Doctor =
+    the chosen one, else the clinic's only one. Doctor or service unknown: the older "accepted
+    somewhere for the service" filter (`insurance_plans_for_service`), which an AI draft that
+    landed on the question before the doctor still uses."""
+    roster = list(professionals or [])
+    if professional_id is not None:
+        doctor = _find_professional_by_id(roster, professional_id)
+    else:
+        doctor = roster[0] if len(roster) == 1 else None
+    if doctor is None or not service_name:
+        return insurance_plans_for_service(
+            tenant, plans, professionals, service_name, professional_id
+        )
+    service_id = _doctor_service_id(tenant, doctor, service_name)[1]
+    return plans_accepted_for(
+        tenant, plans, doctor, service_id, _insurance_unit(doctor, service_id, unit_id)
+    )
+
+
 def _enter_insurance(
     tenant: Tenant,
     conversation: Conversation | None = None,
     *,
     page: int = 0,
     professionals: list | None = None,
+    unit_id: Any = None,
+    notice: str | None = None,
+    with_back: bool = True,
 ) -> FlowRouterResult:
-    """Render the convênio list: the clinic's plans + Particular + Outro.
+    """Render the convênio list: the plans the booking accepts + Particular (+ Outro) + back.
 
-    `conversation` is None at the START of a booking (the owner's order: the
-    convênio is the first question after pra-quem), and names the booking in
-    progress otherwise - a booking begun before that order shipped, or an LLM
-    hand-back with the service already chosen - whose service/doctor must ride
-    along to the day picker. `page` is the "Ver mais convênios" cursor
-    (`insurance_page`).
+    TASK-088 (owner, 2026-11-20): this is the LAST choice before the days. `conversation`
+    names the booking in progress - service, doctor and (`unit_id`, else the conversation's
+    pick) unit are known, so the list holds ONLY the plans accepted for that combination
+    (`insurance_plans_for_booking`). The fixed rows: Particular always; "Outro convênio" only
+    when at least one plan is accepted (with none, the owner's rule is "Particular direct" -
+    `_insurance_gate` never renders this - and "Outro" would reopen the doubt). The unit rides
+    along so the answer lands on the day picker of that unit, and the stored scope says which
+    combination the list is for, so the Portal's later pages and taps see the same plans.
 
-    TASK-086 (A3, SPEC E6): when the service is already known (the second case) and the clinic
-    has refused cells, only the plans accepted somewhere for it are listed
-    (`insurance_plans_for_service`, by the chosen doctor or by any doctor offering it); the
-    stored scope says so, so the Portal's later pages and taps see the same list. The main path
-    (no service yet) lists every plan, as before.
+    `conversation` is None at the legacy START of a booking (every plan, scope empty) and, with
+    no doctor to judge by (an AI draft that landed with the service only), the list keeps the
+    older "accepted somewhere for the service" filter. `page` is the "Ver mais convênios" cursor
+    (`insurance_page`). `notice` replaces the question line (a convênio that arrived early and
+    the combination refuses; a line a caller wants on top).
+
+    Back row (R18): a booking whose service is known ends the list with the way back - the unit
+    list when the patient had one to choose from, else the service step he came from. Its
+    ("Outra unidade" / "Outro serviço") payload is the day picker's own (`dayback|...`), so the
+    Portal card carries it as a pinned row. `with_back=False` is for a caller that is not the
+    booking (the reschedule's list, which has no booking step to go back to).
     """
     plans = _tenant_insurance_plans(tenant)
     scope: dict = {}
     service_name = getattr(conversation, "flow_selected_type", None) if conversation else None
-    if service_name and professionals and has_exceptions(snapshot_exceptions(tenant)):
-        professional_id = _selected_professional_id(conversation)
-        plans = insurance_plans_for_service(
-            tenant, plans, professionals, service_name, professional_id
-        )
-        scope = {"service": service_name, "unit_marks": True}
-        if professional_id is not None:
-            scope["professional_id"] = str(professional_id)
-    shown, next_page = insurance_page(plans, page)
+    doctor = unit = None
+    back_target = BACK_TARGET_SERVICE
+    if service_name and conversation is not None:
+        doctor = _booking_professional(conversation, professionals)
+        if doctor is not None:
+            service_id = _doctor_service_id(tenant, doctor, service_name)[1]
+            back_target = _back_target_for(flow_units.unit_choice(doctor, service_id))
+            unit = _insurance_unit(
+                doctor, service_id, unit_id or flow_units.selected_unit_id(conversation)
+            )
+            plans = plans_accepted_for(tenant, plans, doctor, service_id, unit)
+            scope = {"service": service_name, "professional_id": str(doctor.id)}
+            if has_exceptions(snapshot_exceptions(tenant)):
+                # The matrix is cell-by-cell: later Portal pages need the unit and every
+                # doctor's units (`list_options.needs_unit_options`). Without a refused cell
+                # the doctor's own list is all that decides, so the scope stays that small.
+                scope["unit_marks"] = True
+                if unit is not None:
+                    scope["unit_id"] = str(unit.id)
+        elif professionals and has_exceptions(snapshot_exceptions(tenant)):
+            professional_id = _selected_professional_id(conversation)
+            plans = insurance_plans_for_service(
+                tenant, plans, professionals, service_name, professional_id
+            )
+            scope = {"service": service_name, "unit_marks": True}
+            if professional_id is not None:
+                scope["professional_id"] = str(professional_id)
+    back_row: list[tuple[str, str]] = (
+        [(f"{ROW_DAY_BACK_PREFIX}{back_target}", _day_back_label(back_target))]
+        if with_back and service_name and conversation is not None
+        else []
+    )
+    shown, next_page = insurance_page(plans, page, reserved=len(back_row))
     # Title only (TASK-085 R D-R12): the per-plan payment text under each convênio was removed
     # (owner: "TIRE ISSO"); the clinic's own note is still never shown before the choice.
     rows: list[tuple] = [
@@ -3563,13 +4034,19 @@ def _enter_insurance(
     ]
     rows.extend(insurance_more_row(next_page))
     rows.append(("ins|particular", LABEL_INSURANCE_PARTICULAR))
-    rows.append(("ins|outro", LABEL_INSURANCE_OTHER))
+    pinned = list(INSURANCE_PINNED_ROWS)
+    if plans:
+        rows.append(("ins|outro", LABEL_INSURANCE_OTHER))
+    else:
+        pinned = pinned[:1]
+    rows.extend(back_row)
+    pinned.extend((row_id, title, None) for row_id, title in back_row)
     # The Portal pages the WHOLE catalogue itself (no "Ver mais convênios" row there).
     source = OptionSource(
         kind="insurance",
         scope=scope,
         items=portal_insurance_rows(plans),
-        pinned=list(INSURANCE_PINNED_ROWS),
+        pinned=pinned,
         has_clinic_notes=insurance_plans_have_clinic_notes(plans),
     )
     logger.info(
@@ -3579,12 +4056,13 @@ def _enter_insurance(
         # which one this patient is about to choose.
         plan_count=len(plans),
         booking_started=conversation is None,
+        combination_known=doctor is not None,
     )
     return FlowRouterResult(
         action="reply",
         bubbles=[
             SlotsBubble(
-                body="Você vai usar convênio? Escolha uma opção:",
+                body=notice or INSURANCE_QUESTION,
                 rows=rows,
                 button_label="Ver convênios",
                 section_title="Convênios",
@@ -3597,7 +4075,256 @@ def _enter_insurance(
         flow_selected_professional_id=(
             _selected_professional_id(conversation) if conversation else None
         ),
+        flow_selected_unit_id=unit.id if unit is not None else None,
     )
+
+
+def particular_survives(
+    tenant: Tenant,
+    insurance: str | None,
+    *,
+    named_now: bool = False,
+    recorded: Any | None = None,
+    professionals: list | None = None,
+    opens_choice: bool = False,
+    landing_type: str | None = None,
+    landing_owner: Any | None = None,
+    landing_unit: Any | None = None,
+) -> bool:
+    """Keep a chosen Particular. Recheck an automatic one when the combination changes."""
+    if (
+        not _label_match(insurance, LABEL_INSURANCE_PARTICULAR)
+        or named_now
+        or not _insurance_is_automatic(recorded)
+        or _insurance_step_skip_reason(tenant) is not None
+    ):
+        return True
+    recorded_type = getattr(recorded, "flow_selected_type", None)
+    if (
+        opens_choice
+        or recorded is None
+        or not landing_type
+        or not recorded_type
+        or recorded_type in (ATTENDEE_NEXT_BOOK, ATTENDEE_NEXT_CATALOG)
+        or _norm(recorded_type) != _norm(landing_type)
+    ):
+        return False
+    recorded_owner_id = _selected_professional_id(recorded)
+    if recorded_owner_id is None:
+        recorded_owner_id = getattr(_booking_professional(recorded, professionals), "id", None)
+    if recorded_owner_id != getattr(landing_owner, "id", None):
+        return False
+    # The recorded unit is the one used by the old gate, even if it has since been removed.
+    return flow_units.selected_unit_id(recorded) == getattr(landing_unit, "id", None)
+
+
+def _accepted_plans(
+    tenant: Tenant, professional: Any | None, entry: dict | None, unit: Any | None
+) -> list:
+    """The clinic's plans the booking accepts: (service of `entry`, `professional`, `unit`).
+
+    ONE function for the three that need it - the convênio gate (`_insurance_gate`), the day
+    picker's back row (`_day_back_target`) and the AI draft's landing (`booking_draft`) - so the
+    question the patient is asked and the way back to it can never disagree. Without a doctor
+    there is nobody to judge by: every plan."""
+    plans = _tenant_insurance_plans(tenant)
+    if professional is None:
+        return plans
+    return plans_accepted_for(
+        tenant, plans, professional, entry_service_id(entry) if entry is not None else None, unit
+    )
+
+
+def _day_back_target(
+    tenant: Tenant,
+    professional: Any | None,
+    entry: dict | None,
+    unit: Any | None,
+    choice: flow_units.UnitChoice,
+) -> str:
+    """Where the day and slot pickers' back row goes (R18): the convênio list when the patient
+    was asked it in this booking (the clinic collects it and the combination accepts at least
+    one plan - otherwise Particular was set without a question), else the unit list when he had
+    one to choose from, else the service step."""
+    if _insurance_step_skip_reason(tenant) is None and _accepted_plans(
+        tenant, professional, entry, unit
+    ):
+        return BACK_TARGET_INSURANCE
+    return _back_target_for(choice)
+
+
+@dataclass
+class _InsuranceGate:
+    """What to ask next, or whether to assign Particular and open the days."""
+
+    ask: FlowRouterResult | None = None
+    offer_units: FlowRouterResult | None = None
+    particular: bool = False
+    notice: str | None = None
+
+
+def _insurance_alternative_units(
+    tenant: Tenant, professional: Any, entry: dict, origin: Any
+) -> list[tuple[Any, list[dict]]]:
+    """Other bookable units for this service and doctor, with their accepted plans."""
+    service_id = entry_service_id(entry)
+    alternatives = []
+    for unit in flow_units.units_for_service(professional, service_id):
+        if unit.id == origin.id:
+            continue
+        plans = _accepted_plans(tenant, professional, entry, unit)
+        if plans:
+            alternatives.append((unit, plans))
+    return alternatives
+
+
+def _enter_no_plan_at_unit(
+    conversation: Conversation, unit: Any, *, refused_known: bool, prefix: str | None = None
+) -> FlowRouterResult:
+    notice = (
+        flow_units.UNIT_INSURANCE_REFUSED if refused_known else flow_units.UNIT_INSURANCE_NONE
+    )
+    fields = _day_branch_fields(conversation, BOOKING_DAY_BRANCH)
+    fields.update(
+        flow_selected_unit_id=unit.id, flow_selected_insurance=None, flow_insurance_auto=None
+    )
+    bubbles = [TextBubble(body=prefix)] if prefix else []
+    bubbles.append(
+        ButtonBubble(
+            body=f"{notice} Você pode ver outras unidades ou seguir como particular aqui.",
+            confirm_label=flow_units.LABEL_UNITS_WITH_INSURANCE,
+            cancel_label=flow_units.LABEL_CONTINUE_PARTICULAR,
+        )
+    )
+    return FlowRouterResult(
+        action="reply",
+        bubbles=bubbles,
+        flow_state=FlowState.SERVICE_CATALOG,
+        flow_step=STEP_AWAITING_NO_PLAN_AT_UNIT,
+        insurance_dropped=True,
+        **fields,
+    )
+
+
+def _insurance_gate(
+    conversation: Conversation,
+    tenant: Tenant,
+    professionals: list | None,
+    professional: Any | None,
+    entry: dict | None,
+    unit: Any | None,
+    prefix: str | None = None,
+    unit_asked: bool = False,
+) -> _InsuranceGate:
+    """The convênio point of the booking: after the unit, before the days (TASK-088 R5/R8).
+
+    Only where the clinic collects it (`_insurance_step_skip_reason`). The combination is
+    (service, doctor, unit); the plans it accepts are `plans_accepted_for`.
+
+    * no answer yet: some accepted -> the filtered list; NONE accepted -> offer other units
+      if they accept plans, otherwise Particular with a short line before the days;
+    * an answer already there (an AI draft, a parked chat): Particular, a typed plan or a
+      plan the combination accepts is kept and the days open; a plan it refuses is NEVER
+      swapped for Particular in silence - the filtered list with a line on top, or, with
+      nothing else accepted, Particular saying so (`INSURANCE_REFUSED_PARTICULAR*`).
+
+    Logs counts and booleans only - never a plan's name.
+    """
+    reason = _insurance_step_skip_reason(tenant)
+    if reason is not None:
+        logger.info(
+            "insurance_step_skipped",
+            reason=reason,
+            conversation_id=str(getattr(conversation, "id", None)),
+            professional_count=len(professionals or []),
+        )
+        return _InsuranceGate()
+    known = _selected_insurance(conversation)
+    accepted = _accepted_plans(tenant, professional, entry, unit)
+    refused_known = False
+    # Only describe the absence of confirmed plans at a unit the patient actually chose.
+    where_unit = unit is not None and unit_asked
+    if known:
+        plan = _selected_plan(tenant, known)
+        if plan is None:
+            # Unlisted plans are kept on the ordinary path ("Outro convênio") while the
+            # combination accepts some plan, and Particular is always kept.
+            if accepted or _label_match(known, LABEL_INSURANCE_PARTICULAR):
+                return _InsuranceGate()
+            if not where_unit:
+                # Nothing is accepted and no unit was asked (no units, or only one): the
+                # typed name is not kept in silence either - Particular, saying so (the same
+                # line as a catalog plan the combination refuses).
+                refused_known = True
+            # At a chosen unit without confirmed plans, offer the alternatives without claiming
+            # that the clinic explicitly refused the patient's unlisted plan (`refused_known`
+            # stays False there).
+        elif any(str(each.get("id")) == str(plan["id"]) for each in accepted):
+            return _InsuranceGate()
+        else:
+            refused_known = True
+    if not accepted:
+        if where_unit and entry is not None and (alternatives := _insurance_alternative_units(
+            tenant, professional, entry, unit
+        )):
+            logger.info("insurance_step_units_offered", other_units_with_plans=len(alternatives))
+            return _InsuranceGate(
+                offer_units=_enter_no_plan_at_unit(
+                    conversation, unit, refused_known=refused_known, prefix=prefix
+                )
+            )
+        logger.info(
+            "insurance_step_particular_direct",
+            conversation_id=str(getattr(conversation, "id", None)),
+            refused_known=refused_known,
+        )
+        if refused_known:
+            line = INSURANCE_REFUSED_PARTICULAR_UNIT if where_unit else INSURANCE_REFUSED_PARTICULAR
+        else:
+            line = INSURANCE_NONE_ACCEPTED_UNIT if where_unit else INSURANCE_NONE_ACCEPTED
+        return _InsuranceGate(particular=True, notice=line)
+    question = INSURANCE_QUESTION
+    if refused_known:
+        question = INSURANCE_REFUSED_LIST_UNIT if where_unit else INSURANCE_REFUSED_LIST
+    notice = f"{prefix} {question}" if prefix else (question if refused_known else None)
+    ask = _enter_insurance(
+        tenant,
+        conversation,
+        professionals=professionals,
+        unit_id=unit.id if unit is not None else None,
+        notice=notice,
+    )
+    return _InsuranceGate(ask=ask)
+
+
+_STALE_PARTICULAR = "particular"
+_STALE_OTHER = "other"
+
+
+def _stale_unit_control(body: str | None) -> str | None:
+    """What the unit cards / lists left behind look like when tapped at the convênio list.
+
+    WhatsApp keeps every old button on screen and the Portal accepts the ids it offered
+    recently, so the "Seguir particular" / "Unidades c/ convênio" of the no-plan card, the
+    unit rows (`unit|<uuid>`, `unitpart|<uuid>`, `unitmore|<n>`) can all arrive here, where
+    they are not a plan name. Returns `_STALE_PARTICULAR` for "Seguir particular", `_STALE_OTHER`
+    for the other controls and any title carrying a unit id, else None (an ordinary answer)."""
+    if not body:
+        return None
+    if _control_match(body, flow_units.LABEL_CONTINUE_PARTICULAR):
+        return _STALE_PARTICULAR
+    if _control_match(body, flow_units.LABEL_UNITS_WITH_INSURANCE) or _control_match(
+        body, flow_units.LABEL_MORE_UNITS
+    ):
+        return _STALE_OTHER
+    payload = _row_payload(body)
+    if payload is not None:
+        try:
+            UUID(payload)
+        except ValueError:
+            return None
+        return _STALE_OTHER
+    return None
 
 
 async def _handle_insurance(
@@ -3608,7 +4335,7 @@ async def _handle_insurance(
     services: list[dict] | None = None,
     professionals: list | None = None,
 ) -> FlowRouterResult:
-    """Record the convênio answer, then continue the booking. Never filters.
+    """Record the convênio answer, then continue the booking.
 
     Tapping "Outro convênio" asks for the plan's name and stays on this step;
     a listed plan's tap, "Particular" ("não tenho" counts as Particular), or a
@@ -3617,12 +4344,14 @@ async def _handle_insurance(
     a sentence is NOT a plan name: it gets one model turn on this same step
     (owner, 2026-10-07, TASK-038 - "qual o endereço?" used to be stored here).
 
-    What comes next depends on whether the service is already chosen:
-    normally it is NOT (the convênio is the first question), so the answer
-    opens the doctor list - every doctor, the ones who take the plan marked -
-    or, on a single-doctor clinic, the service list. A booking that already
-    has its service (begun before the convênio-first order shipped, or an LLM
-    hand-back) goes straight to the day picker, as it always did.
+    What comes next (TASK-088): the convênio is the LAST choice, so the service (and the
+    doctor, and the unit) are known and the answer opens the days of that unit - `_ask_day`
+    checks the answer against the combination once more. Only a booking that does not have
+    its service yet (a chat parked on the retired first question, an AI draft that asked the
+    convênio before anything else) keeps the answer and goes on from where it is: the doctor's
+    own services when the doctor is already chosen, the doctors of the chosen service when only
+    the service is, else the service-first entry (`_booking_entry`: the clinic catalog, or the
+    sole doctor's list) - and the answer is judged later, at the day step.
     """
     more = insurance_more_page(body)
     if more is not None:
@@ -3635,8 +4364,31 @@ async def _handle_insurance(
             flow_step=STEP_AWAITING_INSURANCE,
             flow_selected_type=conversation.flow_selected_type,
             flow_selected_professional_id=_selected_professional_id(conversation),
+            flow_selected_unit_id=flow_units.selected_unit_id(conversation),
         )
-    matched = _match_insurance_plan(tenant, body)
+    stale_unit_control = _stale_unit_control(body)
+    if stale_unit_control is not None:
+        matched = None
+        if stale_unit_control == _STALE_PARTICULAR and _row_payload(body) == str(
+            flow_units.selected_unit_id(conversation)
+        ):
+            # The "Seguir particular" of the unit the patient is AT: his answer, honoured.
+            matched = LABEL_INSURANCE_PARTICULAR
+        else:
+            # A control of a card or list left behind (the old button WhatsApp keeps on screen,
+            # a row the Portal still accepts): never an insurance name, and Particular at a unit
+            # that is not clearly this one is not safe - the current list is asked again.
+            logger.info(
+                "insurance_stale_unit_control",
+                conversation_id=str(getattr(conversation, "id", None)),
+            )
+            if conversation.flow_selected_type:
+                return await _ask_day(
+                    conversation, tenant, calendar, services, professionals, reask_insurance=True
+                )
+            return _enter_insurance(tenant, conversation, professionals=professionals)
+    else:
+        matched = _match_insurance_plan(tenant, body)
     if matched is None and _says_no_insurance(body):
         matched = LABEL_INSURANCE_PARTICULAR
     if matched is None and _reads_as_conversation(body):
@@ -3649,6 +4401,13 @@ async def _handle_insurance(
     if stored is None:
         # No text at all (e.g. a media message): re-ask here, rather than walk
         # on with no answer and ask the same question again at "Sim, agendar".
+        if conversation.flow_selected_type:
+            # TASK-088: the same decision as the first time (`_insurance_gate`) - the list, or
+            # Particular with its line when the combination now accepts nothing - never a list
+            # that holds only Particular.
+            return await _ask_day(
+                conversation, tenant, calendar, services, professionals, reask_insurance=True
+            )
         return _enter_insurance(tenant, conversation, professionals=professionals)
     logger.info(
         "insurance_selected",
@@ -3667,24 +4426,27 @@ async def _handle_insurance(
         # nothing configured ends in the clinic alert, returned as-is.
         result = _enter_professional_services(selected, tenant, insurance=stored)
     elif conversation.flow_selected_type and multi and selected is None:
-        # The service is known but not the doctor (an AI draft whose service two or more
-        # doctors offer): the doctor list with the service kept, so the tap lands on that
-        # service's card (STEP_AWAITING_PROFESSIONAL with a stored type).
-        result = _enter_professional_list(
+        # The service is known but not the doctor (a chat parked by an older AI draft whose
+        # service two or more doctors offer): the doctors of THAT service, the new order's own
+        # second step (TASK-088), with the service kept.
+        result = _enter_service_professional_list(
             tenant,
             professionals or [],
+            str(conversation.flow_selected_type),
             insurance=stored,
-            service_name=conversation.flow_selected_type,
         )
-        result.flow_selected_type = conversation.flow_selected_type
     elif not conversation.flow_selected_type:
-        result = _start_booking(tenant, professionals, insurance=stored)
-        if result.flow_state != FlowState.SERVICE_CATALOG:
+        # A chat parked on the retired first question (no service yet): the answer is kept
+        # and judged later, at the day step; the booking itself takes the NEW order - the
+        # service first (SPEC A: "cai no fluxo novo na próxima escolha").
+        result = _booking_entry(None, tenant, professionals)
+        if result.flow_state != FlowState.SERVICE_CATALOG and not multi:
             # The button flow never asks the convênio in front of a clinic with
             # no services (`_booking_continuation`), so a dead end here means a
-            # typeless LLM hand-back (`enter_guided_booking` with no catalog):
-            # it books typeless, straight to the day, exactly as it did before
-            # the convênio moved to the front.
+            # typeless LLM hand-back (`enter_guided_booking` with no catalog) on a clinic
+            # with ONE doctor: it books typeless, straight to the day, exactly as it did
+            # before the convênio moved to the front. With several doctors there is nobody to
+            # book with and no service: the "no services" answer and the menu, as is.
             result = None
     if result is None:
         state = _DayPickerState(
@@ -3692,13 +4454,26 @@ async def _handle_insurance(
             flow_selected_type=conversation.flow_selected_type,
             flow_selected_professional_id=_selected_professional_id(conversation),
             flow_selected_insurance=stored,
+            flow_insurance_auto=False,
             flow_attendee_name=_attendee_name(conversation),
+            # The unit chosen BEFORE this question (the new order) - the days are its days.
+            flow_selected_unit_id=flow_units.selected_unit_id(conversation),
         )
-        result = await _ask_day(state, tenant, calendar, services, professionals)
-    if result.flow_state is FlowState.SERVICE_CATALOG:
-        # Only a result still inside the booking carries it; a dead end (no
-        # services, no availability) resets on purpose and must not resurrect it.
+        result = await _ask_day(
+            state, tenant, calendar, services, professionals, announce_unit=True
+        )
+    if (
+        result.flow_state is FlowState.SERVICE_CATALOG
+        and result.flow_selected_insurance is None
+        and result.flow_step != STEP_AWAITING_INSURANCE
+    ):
+        # Only a result still inside the booking carries it; a dead end (no services, no
+        # availability) resets on purpose and must not resurrect it. A day step that already
+        # named the answer (Particular, when the plan is not accepted there) or asked it again
+        # (the refused plan was dropped on purpose) keeps its own.
         result.flow_selected_insurance = stored
+    if result.flow_selected_insurance is not None and result.flow_insurance_auto is None:
+        result.flow_insurance_auto = False
     return result
 
 
@@ -3726,6 +4501,7 @@ def _enter_professional_help(conversation: Conversation) -> FlowRouterResult:
         flow_state=FlowState.SERVICE_CATALOG,
         flow_step=STEP_PROFESSIONAL_HELP,
         flow_selected_insurance=_selected_insurance(conversation),
+        flow_insurance_auto=getattr(conversation, "flow_insurance_auto", None),
     )
 
 
@@ -3738,6 +4514,7 @@ def _enter_service_help(conversation: Conversation) -> FlowRouterResult:
         flow_step=STEP_SERVICE_HELP,
         flow_selected_professional_id=_selected_professional_id(conversation),
         flow_selected_insurance=_selected_insurance(conversation),
+        flow_insurance_auto=getattr(conversation, "flow_insurance_auto", None),
     )
 
 
@@ -3801,6 +4578,7 @@ async def _handle_professional_help(
             flow_state=FlowState.SERVICE_CATALOG,
             flow_step=STEP_PROFESSIONAL_HELP_FINAL,
             flow_selected_insurance=_selected_insurance(conversation),
+            flow_insurance_auto=getattr(conversation, "flow_insurance_auto", None),
         )
     return _delegate_llm_keeping_draft(conversation)
 
@@ -3810,7 +4588,9 @@ async def _handle_service_help(
     tenant: Tenant,
     body: str,
     services: list[dict],
-    professional: Any | None = None,
+    *,
+    calendar: CalendarService | None = None,
+    professionals: list | None = None,
 ) -> FlowRouterResult:
     final_round = conversation.flow_step == STEP_SERVICE_HELP_FINAL
     # Same accounting as _handle_professional_help above.
@@ -3823,17 +4603,11 @@ async def _handle_service_help(
     try:
         outcome = await run_service_help(
             conversation_id=getattr(conversation, "id", None),
-            # TASK-085 D3: the model reads the prices the service card would show - a price
-            # that differs between the doctor's units is not given to it before the unit; once
-            # the unit is picked (and does the service), that unit's price (T8 review c).
-            services=[
-                _priced_entry(
-                    service,
-                    professional,
-                    _service_card_unit_id(conversation, professional, service),
-                )
-                for service in services
-            ],
+            # TASK-088 R38 ("valor só no fim"): the model gets NO price - its one-line reason and
+            # its clarifying question reach the patient in the middle of the flow, and a convênio
+            # patient must never be told the Particular value. Money is said only on the final
+            # confirmation card.
+            services=[{**service, "price": None} for service in services],
             patient_message=body,
             final_round=final_round,
         )
@@ -3843,8 +4617,16 @@ async def _handle_service_help(
     if outcome.kind == "pick":
         service = _match_service(services, outcome.choice)
         if service is not None:
+            # TASK-088: the validated pick goes straight on - no service card.
             return _with_pick_message(
-                _enter_service_detail(service, conversation, tenant, professional),
+                await _continue_with_service(
+                    conversation,
+                    tenant,
+                    calendar,
+                    service,
+                    professionals,
+                    services=services,
+                ),
                 outcome.message,
             )
         logger.warning("flow_service_help_pick_unresolved")
@@ -3857,6 +4639,7 @@ async def _handle_service_help(
             flow_step=STEP_SERVICE_HELP_FINAL,
             flow_selected_professional_id=_selected_professional_id(conversation),
             flow_selected_insurance=_selected_insurance(conversation),
+            flow_insurance_auto=getattr(conversation, "flow_insurance_auto", None),
         )
     return _delegate_llm_keeping_draft(conversation)
 
@@ -3895,21 +4678,23 @@ async def _catalog_step(
     unscoped_calendar = calendar
     # Follow-up §6.1: only the units that do the booking's service count, everywhere below.
     service_id = _booking_service_id(conversation, tenant, services, booking_owner)
-    # TASK-086: the convênio narrows the units the patient is offered (`_ask_day` asks the same).
-    unit_choice = flow_units.unit_choice(
-        booking_owner, service_id, **_plan_kwargs(tenant, _selected_insurance(conversation))
-    )
+    # TASK-088: the units are the service's, whatever the convênio (`_ask_day` asks the same).
+    unit_choice = flow_units.unit_choice(booking_owner, service_id)
     booking_unit = flow_units.effective_unit(conversation, booking_owner, service_id)
     # TASK-087: every list below is also without the service's blocked days at that unit, and a
     # blocked day typed on the day step is refused in plain words (`day_check`).
     service_entry = _booking_service_entry(conversation, tenant, services, booking_owner)
     calendar = _service_scoped(calendar, booking_owner, service_entry, booking_unit)
     day_check = _service_day_check(booking_owner, service_entry, booking_unit)
-    back_target = _back_target_for(unit_choice)
+    back_target = _day_back_target(tenant, booking_owner, service_entry, booking_unit, unit_choice)
 
+    if step == STEP_AWAITING_NO_PLAN_AT_UNIT:
+        return await _handle_unit_insurance_choice(
+            conversation, tenant, unscoped_calendar, body, services, professionals
+        )
     if step == flow_units.STEP_AWAITING_UNIT:
         return await _handle_unit_step(
-            conversation, tenant, calendar, body, services, professionals
+            conversation, tenant, unscoped_calendar, body, services, professionals
         )
     if step == flow_units.STEP_AWAITING_UNIT_CONFIRM:
         return await _handle_unit_confirm_step(
@@ -3919,18 +4704,29 @@ async def _catalog_step(
         booking_owner, flow_units.selected_unit_id(conversation), service_id
     )
     picked_gone = flow_units.selected_unit_id(conversation) is not None and picked is None
-    if step in UNIT_KEEP_STEPS and unit_choice.kind in ("list", "confirm") and picked is None:
+    automatic_unit_changed = _automatic_insurance_unit_changed(conversation, booking_unit)
+    if (
+        step in UNIT_KEEP_STEPS
+        and unit_choice.kind in ("list", "confirm")
+        and picked is None
+        and not automatic_unit_changed
+    ):
         # Never a day, time or booking without the unit (a link added mid-booking, a unit
         # deactivated, a hand-back that skipped the question, a unit picked for another
         # service): ask it first.
         return _enter_unit_choice(conversation, booking_owner, unit_choice)
     if (
         step in UNIT_KEEP_STEPS
-        and (picked_gone or (unit_choice.kind == "none" and not unit_choice.by_plan))
-        and flow_units.bookable_units(booking_owner)
+        and (
+            automatic_unit_changed
+            or (
+                (picked_gone or unit_choice.kind == "none")
+                and flow_units.bookable_units(booking_owner)
+            )
+        )
     ):
-        # (A `by_plan` "none" - the matrix changed after the unit was picked - is not a unit
-        # gone: the booking goes on and the final guard in `_handle_confirmation` refuses it.)
+        # (`unit_choice` above is asked without the convênio - the unit comes first since
+        # TASK-088 - so a "none" here is never `by_plan`: it really is a unit gone.)
         # Final wave M1: the picked unit is gone and ONE is left. Its day and time were chosen
         # within the gone unit's hours, so never carry them over silently: the days again,
         # within the unit left (`_ask_day` records it as the pick). No unit left for the
@@ -3941,7 +4737,7 @@ async def _catalog_step(
             unscoped_calendar,
             services,
             professionals,
-            prefix=flow_units.UNIT_GONE_NOTICE,
+            prefix=flow_units.UNIT_GONE_NOTICE if picked_gone else None,
         )
 
     if step == STEP_AWAITING_PROFESSIONAL:
@@ -3968,10 +4764,12 @@ async def _catalog_step(
         if conversation.flow_selected_type:
             # A service may already be chosen when an empty LLM handback
             # reopens the professional list. Recheck the doctor's catalogue
-            # before continuing to the selected service's detail card.
+            # before continuing with the selected service.
             return _resume_parked_draft(
                 conversation,
-                _handle_service_professional(conversation, tenant, body, roster),
+                await _handle_service_professional(
+                    conversation, tenant, body, roster, unscoped_calendar
+                ),
             )
         return _resume_parked_draft(
             conversation,
@@ -3981,13 +4779,40 @@ async def _catalog_step(
         )
 
     if step == STEP_AWAITING_PLAN_REFUSED:
+        if _label_match(body, LABEL_PLAN_CHANGE_INSURANCE):
+            # The convênio asked again for what is booked so far: the unit (cleared by the card)
+            # first, then the list - or Particular with its line, by the one gate (`_ask_day`).
+            return await _ask_day(
+                _DayPickerState(
+                    id=getattr(conversation, "id", None),
+                    flow_selected_type=conversation.flow_selected_type,
+                    flow_selected_professional_id=_selected_professional_id(conversation),
+                    flow_attendee_name=_attendee_name(conversation),
+                ),
+                tenant,
+                calendar,
+                services,
+                professionals,
+            )
         return _handle_plan_refused(conversation, tenant, body, professionals)
 
     if step == STEP_AWAITING_CATALOG_SERVICE:
-        return _handle_catalog_service(conversation, tenant, body, professionals or [])
+        # TASK-088: the clinic catalog and the doctors of a service are the AI draft's questions
+        # too - the answer resumes a parked draft like the service / doctor taps do.
+        return _resume_parked_draft(
+            conversation,
+            await _handle_catalog_service(
+                conversation, tenant, body, professionals or [], unscoped_calendar
+            ),
+        )
 
     if step == STEP_AWAITING_SERVICE_PROFESSIONAL:
-        return _handle_service_professional(conversation, tenant, body, professionals or [])
+        return _resume_parked_draft(
+            conversation,
+            await _handle_service_professional(
+                conversation, tenant, body, professionals or [], unscoped_calendar
+            ),
+        )
 
     if step in (STEP_PROFESSIONAL_HELP, STEP_PROFESSIONAL_HELP_FINAL):
         return await _handle_professional_help(conversation, tenant, body, professionals or [])
@@ -4014,43 +4839,38 @@ async def _catalog_step(
         service = _match_service(services, body)
         if service is None:
             return _preserve(conversation, "delegate_llm")
-        refused_service_id = _matrix_refused_service(
-            tenant, booking_owner, service, _selected_insurance(conversation)
-        )
-        if refused_service_id is not None:
-            # TASK-086 A4: a "não atende este convênio" row was tapped - its ways on, not its card.
-            return _enter_plan_refused(
+        # TASK-088: no service card - the pick goes straight to the next step, whatever convênio
+        # arrived early: the convênio gate (`_ask_day`) judges it with service, doctor and unit
+        # known - the filtered list with a line, or Particular saying so - exactly like a clinic
+        # with several doctors. (The "não atende este convênio" card of `_enter_plan_refused`
+        # is no longer offered here; a chat already parked on it still answers it.)
+        return _resume_parked_draft(
+            conversation,
+            await _continue_with_service(
                 conversation,
                 tenant,
+                unscoped_calendar,
+                service,
                 professionals,
-                booking_owner,
-                str(service.get("name", "")),
-                refused_service_id,
-            )
-        return _resume_parked_draft(
-            conversation, _enter_service_detail(service, conversation, tenant, booking_owner)
+                services=services,
+            ),
         )
 
     if step in (STEP_SERVICE_HELP, STEP_SERVICE_HELP_FINAL):
-        return await _handle_service_help(conversation, tenant, body, services, booking_owner)
+        return await _handle_service_help(
+            conversation,
+            tenant,
+            body,
+            services,
+            calendar=unscoped_calendar,
+            professionals=professionals,
+        )
 
     if step == STEP_AWAITING_SERVICE_CONFIRM:
         if _norm(body) == _norm(LABEL_BOOK_SERVICE):
-            skip_reason = _insurance_step_skip_reason(tenant)
-            if skip_reason is None and not _selected_insurance(conversation):
-                # The convênio is normally answered at the START of the
-                # booking. Still unanswered here means a path that entered
-                # after that point (a booking parked mid-way when the order
-                # changed, the LLM's doctor hand-back): ask it now rather than
-                # lose information the clinic collects on every other booking.
-                return _enter_insurance(tenant, conversation, professionals=professionals)
-            if skip_reason is not None:
-                logger.info(
-                    "insurance_step_skipped",
-                    reason=skip_reason,
-                    conversation_id=str(getattr(conversation, "id", None)),
-                    professional_count=len(professionals or []),
-                )
+            # TASK-088: the convênio is no longer asked here - it comes after the unit, from
+            # the day step's own choke point, where service, doctor and unit are known
+            # (`_ask_day` -> `_insurance_gate`), for every path that reaches the days.
             return await _ask_day(conversation, tenant, calendar, services, professionals)
         if _norm(body) == _norm(LABEL_OTHER_SERVICE):
             return FlowRouterResult(
@@ -4071,6 +4891,12 @@ async def _catalog_step(
         return _preserve(conversation, "delegate_llm")
 
     if step == STEP_AWAITING_INSURANCE:
+        if _is_day_back(body, BACK_TARGET_SERVICE):
+            # The list's back row (R18): one step back, never an "answer" - so a parked AI draft
+            # is NOT resumed (it would land on this very question again).
+            return _handle_day_back(
+                conversation, tenant, services, professionals, _back_target_of(body)
+            )
         answered = await _handle_insurance(
             conversation, tenant, body, calendar, services, professionals
         )
@@ -4109,6 +4935,9 @@ async def _catalog_step(
             body,
             professional=_recap_professional(conversation, tenant, professionals),
             unit=booking_unit,
+            money_lines=_money_lines(
+                booking_price_line(conversation, service_entry, booking_owner, booking_unit)
+            ),
         )
 
     if step == STEP_AWAITING_CONFIRMATION:
@@ -4131,85 +4960,6 @@ async def _catalog_step(
 
     # Unknown step -> let the LLM recover, keep state.
     return _preserve(conversation, "delegate_llm")
-
-
-def _service_detail_text(
-    service: dict,
-    tenant: Tenant,
-    insurance: str | None = None,
-    *,
-    professional: Any | None = None,
-    unit_id: UUID | None = None,
-) -> str:
-    """The service card body. Under a convênio the particular price is left out
-    and the plan is named instead ("Primeira Consulta — convênio Unimed").
-
-    TASK-085 D3/R2: the card comes BEFORE the unit, so the price is `professional`'s at
-    `unit_id` (a unit already picked for this service), at the only unit doing the service, or -
-    when it differs between the units - not on the card at all (no price line, exactly like a
-    service without a price). Without exceptions the card is today's."""
-    name = str(service.get("name", "Consulta"))
-    price = service_price_text(_priced_entry(service, professional, unit_id), insurance)
-    long_description = service.get("long_description") or service.get("description")
-    if price:
-        headline = f"{name} {price}"
-    elif is_convenio(insurance):
-        headline = f"{name} — convênio {str(insurance).strip()}"
-    else:
-        headline = name
-    parts = [headline]
-    if long_description:
-        parts.append(str(long_description))
-    parts.append("Deseja agendar esse serviço?")
-    return "\n\n".join(parts)
-
-
-def _service_card_unit_id(
-    conversation: Any, professional: Any | None, service: dict
-) -> UUID | None:
-    """The unit the service card may price at: the conversation's pick, only when it is one
-    where `professional` does THIS service (else None - the card follows D3)."""
-    unit = flow_units.find_unit(
-        professional, flow_units.selected_unit_id(conversation), entry_service_id(service)
-    )
-    return unit.id if unit is not None else None
-
-
-def _enter_service_detail(
-    service: dict,
-    conversation: Conversation,
-    tenant: Tenant,
-    professional: Any | None = None,
-) -> FlowRouterResult:
-    """The matched service's detail + Sim/Outro serviço confirm card.
-
-    Factored out of `_catalog_step`'s STEP_AWAITING_SERVICE branch because the
-    scoped service-help node (`_handle_service_help`) re-enters the
-    deterministic flow through this exact result after a validated pick —
-    mirroring how `_enter_professional_services` serves both the tap and the
-    LLM hand-backs. `professional` is whose `service` entry it is (TASK-085: its per-unit
-    prices decide what the card shows); None prices it as stored.
-    """
-    return FlowRouterResult(
-        action="reply",
-        bubbles=[
-            ButtonBubble(
-                body=_service_detail_text(
-                    service,
-                    tenant,
-                    _selected_insurance(conversation),
-                    professional=professional,
-                    unit_id=_service_card_unit_id(conversation, professional, service),
-                ),
-                confirm_label=LABEL_BOOK_SERVICE,
-                cancel_label=LABEL_OTHER_SERVICE,
-            )
-        ],
-        flow_state=FlowState.SERVICE_CATALOG,
-        flow_step=STEP_AWAITING_SERVICE_CONFIRM,
-        flow_selected_type=str(service.get("name", "")),
-        flow_selected_professional_id=_selected_professional_id(conversation),
-    )
 
 
 # --------------------------------------------------------------------------
@@ -4323,6 +5073,7 @@ def _day_branch_fields(conversation: Conversation, branch: DayBranch) -> dict:
         "flow_selected_type": conversation.flow_selected_type,
         "flow_selected_professional_id": _selected_professional_id(conversation),
         "flow_selected_insurance": _selected_insurance(conversation),
+        "flow_insurance_auto": getattr(conversation, "flow_insurance_auto", None),
         "flow_selected_unit_id": flow_units.selected_unit_id(conversation),
     }
 
@@ -4358,8 +5109,14 @@ async def enter_day_picker(
     professionals: list | None = None,
     anchor: datetime | None = None,
     calendar_view: bool = False,
+    buffer_rule: BufferRule | None = None,
 ) -> FlowRouterResult:
     """Render the tappable day list: only days that actually have a free slot.
+
+    The doctor's buffer between consultations (TASK-088 section B) applies on every branch: a
+    day whose only free times sit inside it is not offered. `buffer_rule` says whose buffer and
+    which booking is being moved when the caller knows better than the conversation
+    (`_picker_buffer`).
 
     `anchor` centres the scan on the current appointment, showing the nearest days.
 
@@ -4405,12 +5162,31 @@ async def enter_day_picker(
         if anchor is not None:
             anchor_aware = anchor if anchor.tzinfo else anchor.replace(tzinfo=calendar.tzinfo)
             start = max(start, anchor_aware - timedelta(days=DAY_PICKER_WINDOW_DAYS // 2))
+        window_days = DAY_CALENDAR_WINDOW_DAYS if calendar_view else DAY_PICKER_WINDOW_DAYS
+        buffer_minutes, moved_event_id = _picker_buffer(
+            conversation, professionals, branch, buffer_rule
+        )
+        # The booking being moved never pads itself: the consultation windows are read once for
+        # the whole window WITHOUT it. A new booking leaves the read to the availability layer.
+        consultations = (
+            await offer_consultation_windows(
+                calendar,
+                start,
+                start + timedelta(days=window_days),
+                buffer_minutes=buffer_minutes,
+                ignore_event_id=moved_event_id,
+            )
+            if buffer_minutes > 0 and moved_event_id
+            else None
+        )
         days = await available_day_starts(
             calendar,
             start=start,
-            window_days=DAY_CALENDAR_WINDOW_DAYS if calendar_view else DAY_PICKER_WINDOW_DAYS,
+            window_days=window_days,
             duration_minutes=duration_minutes,
             not_before=_booking_floor(conversation, professionals, branch, calendar.tzinfo),
+            buffer_minutes=buffer_minutes,
+            consultations=consultations,
         )
         if anchor is not None:
             # The days NEAREST the current one come first (ties: the earlier day), so
@@ -4434,6 +5210,7 @@ async def enter_day_picker(
             step=step,
             professionals=professionals,
             calendar_view=True,
+            buffer_rule=buffer_rule,
         )
 
     if not days:
@@ -4508,8 +5285,13 @@ async def _enter_slot_picker(
     page: int = 0,
     back_target: str | None = None,
     professionals: list | None = None,
+    buffer_rule: BufferRule | None = None,
 ) -> FlowRouterResult:
     """Step 2 of the branch: the free times on `target`, plus its two exits.
+
+    The doctor's buffer (TASK-088 section B, `_picker_buffer`) drops every time that sits closer
+    than N minutes to a consultation or to another conversation's held time; the booking being
+    moved never pads itself.
 
     A day that comes back empty was free when the picker was built and filled
     in between — so the deterministic answer is the picker again, refreshed
@@ -4519,24 +5301,45 @@ async def _enter_slot_picker(
         return _calendar_unavailable(conversation, branch, branch.day_step)
     reserved = await _hold_windows(_hold_owner(conversation, professionals))
     floor = _booking_floor(conversation, professionals, branch, calendar.tzinfo)
+    buffer_minutes, moved_event_id = _picker_buffer(
+        conversation, professionals, branch, buffer_rule
+    )
     try:
         slots = await calendar.list_free_slots(
             day=target,
             slot_minutes=duration_minutes,
             max_slots=(
                 slot_scan_limit(duration_minutes)
-                if reserved or floor is not None
+                if reserved or floor is not None or buffer_minutes > 0
                 else SLOT_PICKER_MAX_SLOTS
             ),
         )
     except CalendarUnavailableError:
         return _calendar_unavailable(conversation, branch, branch.day_step)
 
+    # The doctor's buffer around his consultations (the whole day was read, so the times
+    # after the padding still fill the page). Held times are padded below, after "held" labels.
+    if buffer_minutes > 0:
+        day_start = target if target.tzinfo else target.replace(tzinfo=calendar.tzinfo)
+        consultations = await offer_consultation_windows(
+            calendar,
+            day_start,
+            day_start + timedelta(days=1),
+            buffer_minutes=buffer_minutes,
+            ignore_event_id=moved_event_id,
+        )
+        slots = without_holds(
+            slots,
+            padded(consultations, buffer_minutes),
+            duration_minutes=duration_minutes,
+            tz=calendar.tzinfo,
+        )
+
     # The doctor's minimum notice: a slot starting too soon is not offered at all. The
     # whole day was read, so the times after the floor still fill the page.
     if floor is not None:
         slots = at_or_after(slots, floor, calendar.tzinfo)
-        if not reserved:
+        if not reserved and buffer_minutes <= 0:
             slots = slots[:SLOT_PICKER_MAX_SLOTS]
 
     # A slot another conversation is HOLDING is not free, even though Google
@@ -4558,7 +5361,18 @@ async def _enter_slot_picker(
                 hidden=before - len(slots),
                 conversation_id=str(getattr(conversation, "id", None)),
             )
+        if buffer_minutes > 0:
+            # A held time becomes a consultation: its neighbours are inside the buffer too (not
+            # "held" - they are simply not offered).
+            slots = without_holds(
+                slots,
+                padded(reserved, buffer_minutes),
+                duration_minutes=duration_minutes,
+                tz=calendar.tzinfo,
+            )
         # Reserve the final two rows for the day and service navigation controls.
+        slots = slots[:SLOT_PICKER_MAX_SLOTS]
+    elif buffer_minutes > 0:
         slots = slots[:SLOT_PICKER_MAX_SLOTS]
 
     held_labels = [str(s.get("label") or "") for s in held if s.get("label")]
@@ -4598,6 +5412,7 @@ async def _enter_slot_picker(
             back_target=back_target,
             prefix=DAY_NO_LONGER_FREE_PREFIX,
             professionals=professionals,
+            buffer_rule=buffer_rule,
         )
 
     # `s["label"]` is CalendarService's fixed "%H:%M" (5 chars), so the calendar
@@ -4640,11 +5455,62 @@ def _handle_day_back(
     """The picker's back-control row: one step back, with every earlier
     answer preserved.
 
-    "service" re-renders the service list, "professional" the doctor list;
-    anything else (or an unusable target) falls back to the menu. Whatever the
+    "service" re-renders the service list, "professional" the doctor list, "unit" the unit
+    list, "insurance" the convênio list (TASK-088, R18); anything else (or an unusable target)
+    falls back to the menu. Whatever the
     destination, the service / doctor / convênio already chosen ride along —
-    going back must never silently erase them.
+    going back must never silently erase them. The one exception (TASK-088): the
+    AUTOMATIC Particular (nothing was accepted at the unit/service being left,
+    `_insurance_is_automatic`) is dropped, so the unit or service picked next is judged
+    afresh - a plan the patient chose himself still rides along and is re-judged there.
     """
+    automatic = _insurance_is_automatic(conversation)
+    result = _day_back_result(conversation, tenant, services, professionals, target)
+    if automatic and result.flow_state is FlowState.SERVICE_CATALOG:
+        result.flow_selected_insurance = None
+        result.flow_insurance_auto = None
+        result.insurance_dropped = True
+    return result
+
+
+def _insurance_is_automatic(conversation: Any | None) -> bool:
+    """Only an explicitly marked Particular was assigned by the gate."""
+    return getattr(conversation, "flow_insurance_auto", None) is True
+
+
+def _automatic_insurance_unit_changed(conversation: Conversation, unit: Any | None) -> bool:
+    return (
+        _insurance_is_automatic(conversation)
+        and flow_units.selected_unit_id(conversation) != getattr(unit, "id", None)
+    )
+
+
+def _chosen_particular(conversation: Conversation) -> bool:
+    return _label_match(
+        _selected_insurance(conversation), LABEL_INSURANCE_PARTICULAR
+    ) and not _insurance_is_automatic(conversation)
+
+
+def _day_back_result(
+    conversation: Conversation,
+    tenant: Tenant,
+    services: list[dict],
+    professionals: list | None,
+    target: str | None,
+) -> FlowRouterResult:
+    if target == BACK_TARGET_INSURANCE:
+        # The convênio list again, the unit kept (it rides in the conversation). The answer
+        # given there is not kept behind the question: it is the thing being chosen again.
+        # A stale row (the combination accepts nothing any more) never draws a list that holds
+        # only Particular: it goes one step further back, where the gate decides afresh.
+        owner = _booking_professional(conversation, professionals)
+        entry = _booking_service_entry(conversation, tenant, services, owner)
+        unit = flow_units.effective_unit(
+            conversation, owner, entry_service_id(entry) if entry else None
+        )
+        if _accepted_plans(tenant, owner, entry, unit):
+            return _enter_insurance(tenant, conversation, professionals=professionals)
+        target = _back_target_for(_booking_unit_choice(conversation, tenant, services, owner))
     if target == BACK_TARGET_UNIT:
         owner = _booking_professional(conversation, professionals)
         choice = _booking_unit_choice(conversation, tenant, services, owner)
@@ -4661,7 +5527,12 @@ def _handle_day_back(
         result.flow_selected_type = conversation.flow_selected_type
         result.flow_selected_insurance = _selected_insurance(conversation)
         return result
-    if target == BACK_TARGET_SERVICE and services:
+    if target == BACK_TARGET_SERVICE and _is_multi_professional(professionals):
+        # TASK-088 R18: on a multi-doctor clinic the service was the first choice (the clinic's
+        # catalog), the doctor the second - "Outro serviço" reopens the catalog, doctor and
+        # service cleared (they are not named on the result), not the chosen doctor's list.
+        return _enter_clinic_service_catalog(tenant, professionals or [])
+    if target in (BACK_TARGET_SERVICE, BACK_TARGET_DOCTOR_SERVICES) and services:
         return FlowRouterResult(
             action="reply",
             bubbles=[
@@ -4678,6 +5549,7 @@ def _handle_day_back(
             flow_selected_type=conversation.flow_selected_type,
             flow_selected_professional_id=_selected_professional_id(conversation),
             flow_selected_insurance=_selected_insurance(conversation),
+            flow_insurance_auto=getattr(conversation, "flow_insurance_auto", None),
         )
     return FlowRouterResult(
         action="reply",
@@ -4917,6 +5789,29 @@ def _booking_professional(conversation: Conversation, professionals: list | None
     return rows[0] if len(rows) == 1 else None
 
 
+async def _ask_day_after_choice(
+    state: _DayPickerState,
+    tenant: Tenant,
+    calendar: CalendarService | None,
+    services: list[dict] | None,
+    professionals: list | None,
+    *,
+    changed: bool,
+    announce_unit: bool = False,
+    prefix: str | None = None,
+) -> FlowRouterResult:
+    drop_automatic = changed and _insurance_is_automatic(state)
+    if drop_automatic:
+        state.flow_selected_insurance = None
+        state.flow_insurance_auto = None
+    result = await _ask_day(
+        state, tenant, calendar, services, professionals, announce_unit=announce_unit, prefix=prefix
+    )
+    if drop_automatic and result.flow_selected_insurance is None:
+        result.insurance_dropped = True
+    return result
+
+
 async def _ask_day(
     conversation: Conversation,
     tenant: Tenant,
@@ -4925,17 +5820,19 @@ async def _ask_day(
     professionals: list | None = None,
     *,
     prefix: str | None = None,
+    announce_unit: bool = False,
+    reask_insurance: bool = False,
 ) -> FlowRouterResult:
-    """Open the booking branch's day picker (the step after service/convênio).
+    """Open the booking branch's day picker (the step after service, doctor, unit and convênio).
 
     THE choke point for the static "this doctor has no hours at all" check, and
-    the reason it lives here rather than back on the service-confirm tap: every
-    first entry into the booking day picker funnels through this one function
-    — the tap (`_catalog_step`'s STEP_AWAITING_SERVICE_CONFIRM), the convênio
-    answer (`_handle_insurance`), the LLM hand-back (`enter_guided_booking`)
-    and a resumed conversation (`resume_bubbles`) — so a fifth caller cannot be
-    added that skips it. `enter_day_picker` itself stays free of the check
-    because the manage/reschedule branch shares it and has its own remedy.
+    the reason it lives here rather than back on a tap: every first entry into the
+    booking day picker funnels through this one function — the service tap
+    (`_continue_with_service`), the unit pick, the convênio answer (`_handle_insurance`),
+    the LLM hand-back (`enter_guided_booking`), the AI draft landing and a resumed
+    conversation (`_resume_bubbles`) — so another caller cannot be added that skips it.
+    `enter_day_picker` itself stays free of the check because the manage/reschedule branch
+    shares it and has its own remedy.
 
     The check is STATIC (`professional_business_hours`, pure stored config) and
     runs BEFORE any calendar call, which is exactly what separates it from
@@ -4943,7 +5840,15 @@ async def _ask_day(
     hours configured" and for "configured but fully booked", and only the first
     is somebody's mistake.
 
+    TASK-088: this is also WHERE the convênio is asked - after the unit is resolved (picked,
+    implied by the only one, or no units at all) and before the days, when the clinic collects
+    it (`_insurance_gate`): the filtered list, or Particular with one line when nothing is
+    accepted for (service, doctor, unit), or - for an answer that was already there - kept /
+    asked again, never swapped in silence.
+
     `prefix` explains why a supplied draft day was dropped; None renders as before.
+    `announce_unit` is for the caller that has JUST stored the unit (the unit pick, the convênio
+    answer): the unit's duration line (D3, no money) is then said once, as it was on the unit tap.
     """
     professional = _booking_professional(conversation, professionals)
     if professional is not None and professional_has_no_hours(professional, tenant):
@@ -4953,30 +5858,60 @@ async def _ask_day(
     # the "0 unidades" notice when there is none. No unit at all: today's picker.
     entry = _booking_service_entry(conversation, tenant, services, professional)
     service_id = entry_service_id(entry) if entry is not None else None
-    # TASK-086 (A5): only the units where the patient's convênio is accepted for the service.
-    plan = _plan_kwargs(tenant, _selected_insurance(conversation))
-    choice = flow_units.unit_choice(professional, service_id, **plan)
+    # TASK-088: the unit comes BEFORE the convênio, so the units offered are the service's, never
+    # narrowed by a convênio (the old TASK-086 A5 filter): the plan is judged AT the unit instead.
+    choice = flow_units.unit_choice(professional, service_id)
     service_name = _service_entry_name(conversation, entry)
-    unit = None
-    if choice.kind == "none" and choice.by_plan:
-        # The convênio, not the clinic's unit setup: never the "0 unidades" alert (R4).
-        if professional is not None:
-            return _enter_plan_refused(
-                conversation, tenant, professionals, professional, service_name, service_id
-            )
-        # Nobody to name (no doctor resolved, no units): today's unit-less picker; the final
-        # guard in `_handle_confirmation` still refuses the booking.
-        choice = flow_units.UnitChoice("free", [])
+    unit = flow_units.effective_unit(conversation, professional, service_id)
+    if _automatic_insurance_unit_changed(conversation, unit):
+        state = _DayPickerState(
+            id=getattr(conversation, "id", None),
+            flow_selected_type=conversation.flow_selected_type,
+            flow_selected_professional_id=_selected_professional_id(conversation),
+            flow_selected_insurance=_selected_insurance(conversation),
+            flow_insurance_auto=True,
+            flow_attendee_name=_attendee_name(conversation),
+        )
+        result = await _ask_day_after_choice(
+            state, tenant, calendar, services, professionals,
+            changed=True, announce_unit=announce_unit, prefix=prefix,
+        )
+        result.unit_dropped = result.flow_selected_unit_id is None
+        return result
     if choice.kind == "none" and entry is not None and service_id is not None:
         return _enter_no_unit_for_service(
             conversation, tenant, professionals, professional, service_name, service_id
         )
-    if choice.kind != "free":
-        unit = flow_units.effective_unit(conversation, professional, service_id, **plan)
-        if unit is None:
-            return _enter_unit_choice(
-                conversation, professional, choice, service_name=service_name, prefix=prefix
-            )
+    if choice.kind != "free" and unit is None:
+        return _enter_unit_choice(
+            conversation, professional, choice, service_name=service_name, prefix=prefix
+        )
+    if (
+        reask_insurance
+        and _chosen_particular(conversation)
+        and _insurance_step_skip_reason(tenant) is None
+        and _accepted_plans(tenant, professional, entry, unit)
+    ):
+        return _enter_insurance(
+            tenant, conversation, professionals=professionals,
+            unit_id=unit.id if unit is not None else None,
+        )
+    gate = _insurance_gate(
+        conversation,
+        tenant,
+        professionals,
+        professional,
+        entry,
+        unit,
+        prefix=prefix,
+        unit_asked=choice.kind in ("list", "confirm"),
+    )
+    if gate.ask is not None:
+        return gate.ask
+    if gate.offer_units is not None:
+        return gate.offer_units
+    if gate.notice:
+        prefix = f"{prefix} {gate.notice}" if prefix else gate.notice
     result = await enter_day_picker(
         conversation,
         tenant,
@@ -4987,13 +5922,23 @@ async def _ask_day(
             conversation, tenant, services, professionals, unit=unit
         ),
         branch=BOOKING_DAY_BRANCH,
-        back_target=_back_target_for(choice),
+        back_target=_day_back_target(tenant, professional, entry, unit, choice),
         professionals=professionals,
         prefix=prefix,
+        buffer_rule=_booking_buffer(professional),
     )
+    # R41: whose agenda this was drawn on - the state's explicit doctor (a clinic that stores none
+    # uses the tenant calendar, which is already right for it).
+    result.agenda_owner_id = _selected_professional_id(conversation)
     if unit is not None and result.flow_state is FlowState.SERVICE_CATALOG:
         result.flow_selected_unit_id = unit.id
-    return _with_unit_terms_line(result, conversation, tenant, services, professionals, unit)
+    if gate.particular and result.flow_state is FlowState.SERVICE_CATALOG:
+        # Nothing accepted for the combination: recorded as Particular, so the appointment is.
+        result.flow_selected_insurance = LABEL_INSURANCE_PARTICULAR
+        result.flow_insurance_auto = True
+    return _with_unit_terms_line(
+        result, conversation, tenant, services, professionals, unit, fresh=announce_unit
+    )
 
 
 # --------------------------------------------------------------------------
@@ -5195,12 +6140,12 @@ def _booking_service_id(
 def _booking_unit_choice(
     conversation: Any, tenant: Tenant, services: list[dict] | None, professional: Any | None
 ) -> flow_units.UnitChoice:
-    """`flow_units.unit_choice` for the booking in progress (its doctor, its service and -
-    TASK-086 - its convênio: the units offered are the ones that accept it)."""
+    """`flow_units.unit_choice` for the booking in progress (its doctor and its service).
+
+    TASK-088: never narrowed by the convênio - the unit comes BEFORE it, and the plan is
+    judged at the unit the patient picks (`_insurance_gate`)."""
     return flow_units.unit_choice(
-        professional,
-        _booking_service_id(conversation, tenant, services, professional),
-        **_plan_kwargs(tenant, _selected_insurance(conversation)),
+        professional, _booking_service_id(conversation, tenant, services, professional)
     )
 
 
@@ -5216,10 +6161,15 @@ def _booking_back_target(
     services: list[dict] | None,
     professionals: list | None,
 ) -> str:
-    """Where the booking day/slot pickers' back row goes: the unit list when the patient had
-    one to choose from (for THIS service), else the service list (today's)."""
+    """Where the booking day/slot pickers' back row goes: the convênio list when he was asked it
+    in this booking, else the unit list when he had one to choose from (for THIS service), else
+    the service list (`_day_back_target`)."""
     owner = _booking_professional(conversation, professionals)
-    return _back_target_for(_booking_unit_choice(conversation, tenant, services, owner))
+    entry = _booking_service_entry(conversation, tenant, services, owner)
+    choice = _booking_unit_choice(conversation, tenant, services, owner)
+    service_id = entry_service_id(entry) if entry else None
+    unit = flow_units.effective_unit(conversation, owner, service_id)
+    return _day_back_target(tenant, owner, entry, unit, choice)
 
 
 def _booking_unit(
@@ -5237,23 +6187,19 @@ def _service_entry_name(conversation: Any, entry: dict | None) -> str:
     return str(name or getattr(conversation, "flow_selected_type", None) or "")
 
 
-# TASK-085 D3 (owner's example: "Consulta na Unidade Centro: R$ 250,00 · 30 min"). Without a
-# price at that unit the "{preco} · " part is dropped. A no-break space (U+00A0) binds "min" to
-# its number and "R$" to the value, so a narrow chat never breaks "R$ / 250,00" (T8 cosmetic).
+# TASK-085 D3 / TASK-088 R23: "Consulta na Unidade Centro: 40 min" - the unit's duration, no money.
+# A no-break space (U+00A0) binds "min" to its number, so a narrow chat never breaks "40 / min".
 _NBSP = "\u00a0"
-UNIT_TERMS_LINE = "{servico} na {unidade}: {preco} · {duracao}" + _NBSP + "min"
-UNIT_TERMS_LINE_NO_PRICE = "{servico} na {unidade}: {duracao}" + _NBSP + "min"
+UNIT_TERMS_LINE = "{servico} na {unidade}: {duracao}" + _NBSP + "min"
 
 
-def _unit_terms_text(service_name: str, unit: Any, price: str | None, minutes: int) -> str:
-    """The D3 confirmation line. A unit already named "Unidade ..." is not prefixed again
+def _unit_terms_text(service_name: str, unit: Any, minutes: int) -> str:
+    """The unit duration line. A unit already named "Unidade ..." is not prefixed again
     ("Consulta na Unidade Centro", never "na Unidade Unidade Centro": `unit_place_label`)."""
     place = unit_place_label(getattr(unit, "name", None))
-    values = {"servico": service_name.strip(), "unidade": place, "duracao": minutes}
-    shown = price_text(price)
-    if shown:
-        return UNIT_TERMS_LINE.format(preco=shown.replace("R$ ", "R$" + _NBSP), **values)
-    return UNIT_TERMS_LINE_NO_PRICE.format(**values)
+    return UNIT_TERMS_LINE.format(
+        servico=service_name.strip(), unidade=place, duracao=minutes
+    )
 
 
 def _with_unit_terms_line(
@@ -5263,37 +6209,38 @@ def _with_unit_terms_line(
     services: list[dict] | None,
     professionals: list | None,
     unit: Any | None,
+    *,
+    fresh: bool = False,
 ) -> FlowRouterResult:
-    """TASK-085 D3: the price the service card hid, said once the unit is known.
+    """TASK-085 D3 / TASK-088 R23: the unit's DURATION, said once the unit is known - no money.
 
-    When the day picker opens for `unit` and the card left the price out (it differs between
-    the units where the doctor does the service: `flow_units.shown_terms(...).price_hidden`),
-    ONE text bubble goes before the picker with that unit's price and duration - the same
-    duration the slots use (`_booking_duration`). Nothing at all when the price did not differ
-    (no exception, the same price everywhere, one unit: the card already showed it), under a
-    convênio (the card never shows the private price there, R14), or when `unit` is already the
-    conversation's chosen unit (a day picker drawn again for it - resume, re-entry - never
-    repeats the line). `conversation` is the conversation as it arrived, not the step's carrier.
+    When the day picker opens for `unit` and the service takes a different time there than its
+    base (`flow_units.terms_at` / `_booking_duration`: the length the slots use), ONE text bubble
+    goes before the picker: "Consulta na Unidade Centro: 45 min". The price that used to ride in
+    this line ("... R$ 250,00 · 30 min") left the middle of the flow with the service card: money
+    is said only on the final confirmation. Nothing at all when the unit takes the base time (no
+    exception, the same duration everywhere, one unit), or when `unit` is already the
+    conversation's chosen unit (a day picker drawn again for it - resume, re-entry - never repeats
+    the line); so it is the same under a convênio. `conversation` is the conversation as it
+    arrived, not the step's carrier. `fresh`: the caller has JUST stored `unit` - the unit pick,
+    or the convênio answer that follows it - so the line is said once even though the conversation
+    holds it.
     """
     if (
         unit is None
         or result.action != "reply"
         or result.flow_step not in _BOOKING_DAY_STEPS
-        or unit.id == flow_units.selected_unit_id(conversation)
-        or is_convenio(_selected_insurance(conversation))
+        or (unit.id == flow_units.selected_unit_id(conversation) and not fresh)
     ):
         return result
     owner = _booking_professional(conversation, professionals)
     entry = _booking_service_entry(conversation, tenant, services, owner)
-    if entry is None or not flow_units.shown_terms(owner, entry).price_hidden:
+    if entry is None:
         return result
-    at_unit = flow_units.shown_terms(owner, entry, unit.id)
-    line = _unit_terms_text(
-        _service_entry_name(conversation, entry),
-        unit,
-        at_unit.price,
-        _booking_duration(conversation, tenant, services, professionals, unit=unit),
-    )
+    minutes = _booking_duration(conversation, tenant, services, professionals, unit=unit)
+    if minutes == _booking_duration(conversation, tenant, services, professionals, unit=None):
+        return result
+    line = _unit_terms_text(_service_entry_name(conversation, entry), unit, minutes)
     logger.info(
         "flow_unit_terms_line_shown", conversation_id=str(getattr(conversation, "id", None))
     )
@@ -5321,8 +6268,6 @@ def _enter_unit_choice(
             choice.units[0],
             name,
             prefix=prefix,
-            # TASK-086 (R5): the convênio is what leaves this one unit - say so.
-            convenio=_selected_insurance(conversation) if choice.by_plan else None,
         )
     return _enter_unit_list(conversation, professional, prefix=prefix, units=choice.units)
 
@@ -5334,7 +6279,6 @@ def _enter_unit_confirm(
     service_name: str,
     *,
     prefix: str | None = None,
-    convenio: str | None = None,
 ) -> FlowRouterResult:
     """"O serviço ... é feito apenas na unidade ...": the fixed ✅ Sim / ❌ Não card (spec §5.2).
 
@@ -5343,7 +6287,7 @@ def _enter_unit_confirm(
     (`_handle_unit_confirm_step`). The unit is NOT saved here - only "Sim" stores it - and the
     booking so far (service, doctor, convênio) rides along.
     """
-    body = flow_units.unit_confirm_body(service_name, professional, unit, convenio=convenio)
+    body = flow_units.unit_confirm_body(service_name, professional, unit)
     if prefix:
         body = f"{prefix} {body}"
     fields = _day_branch_fields(conversation, BOOKING_DAY_BRANCH)
@@ -5406,7 +6350,9 @@ def _enter_no_unit_for_service(
     worker), and the booking goes on - never a dead end, never a loop:
 
     * other doctors really do the service -> the doctor list, only them, with the service kept
-      (a tap goes straight to its card with that doctor, like the service-first branch);
+      (a tap re-enters the booking with that doctor and the service kept -
+      `_handle_service_professional` - and the unit, the convênio and the days follow, in that
+      order, like the service-first branch);
     * nobody else (one doctor, or only this one does it, whatever was picked first) -> the
       service list of this doctor, the service still in it (§9.9: never hidden).
 
@@ -5487,23 +6433,8 @@ def _another_doctor_or_service(
         flow_step=STEP_AWAITING_SERVICE,
         flow_selected_professional_id=_selected_professional_id(conversation),
         flow_selected_insurance=_selected_insurance(conversation),
+        flow_insurance_auto=getattr(conversation, "flow_insurance_auto", None),
     )
-
-
-def _matrix_refused_service(
-    tenant: Tenant, professional: Any | None, service: dict | None, insurance: str | None
-) -> UUID | None:
-    """The service's id when the convênio matrix refuses `insurance` for it with `professional`
-    at every place it is bookable (the "não atende este convênio" row, A4), else None."""
-    if professional is None or service is None:
-        return None
-    plan_id = _matrix_plan_id(tenant, insurance)
-    service_id = entry_service_id(service)
-    if plan_id is None or service_id is None:
-        return None
-    if refuses_everywhere(snapshot_exceptions(tenant), professional, service_id, plan_id):
-        return service_id
-    return None
 
 
 def _plan_refused_labels(
@@ -5571,6 +6502,7 @@ def _enter_plan_refused(
         flow_selected_type=service_name or conversation.flow_selected_type,
         flow_selected_professional_id=_selected_professional_id(conversation),
         flow_selected_insurance=_selected_insurance(conversation),
+        flow_insurance_auto=getattr(conversation, "flow_insurance_auto", None),
         flow_selected_unit_id=None,
     )
 
@@ -5581,7 +6513,8 @@ def _handle_plan_refused(
     body: str,
     professionals: list | None,
 ) -> FlowRouterResult:
-    """The answer to `_enter_plan_refused`'s card. Anything else: one model turn, same step."""
+    """The answer to `_enter_plan_refused`'s card (other doctor / other service). Anything else:
+    one model turn, same step. "Trocar convênio" is handled before this in `_catalog_step`."""
     owner = _booking_professional(conversation, professionals)
     service_name = str(conversation.flow_selected_type or "")
     if owner is not None and _label_match(body, LABEL_PLAN_OTHER_DOCTOR):
@@ -5607,10 +6540,11 @@ def _handle_plan_refused(
             flow_step=STEP_AWAITING_SERVICE,
             flow_selected_professional_id=_selected_professional_id(conversation),
             flow_selected_insurance=_selected_insurance(conversation),
+            flow_insurance_auto=getattr(conversation, "flow_insurance_auto", None),
         )
-    if _label_match(body, LABEL_PLAN_CHANGE_INSURANCE):
-        # The convênio list with the service (and doctor) kept: only plans accepted for it.
-        return _enter_insurance(tenant, conversation, professionals=professionals)
+    # "Trocar convênio" never gets here: `_catalog_step` routes that label to `_ask_day` first (the
+    # unit, then the convênio gate), so a list that would hold only Particular never reaches the
+    # patient.
     return _preserve(conversation, "delegate_llm")
 
 
@@ -5655,6 +6589,102 @@ def _enter_unit_list(
     )
 
 
+def _enter_insurance_unit_list(
+    conversation: Conversation, alternatives: list[tuple[Any, list[dict]]], *, page: int = 0
+) -> FlowRouterResult:
+    """Keep the original unit behind the list so Particular still books there."""
+    items, next_page = catalog_page(alternatives, page, fixed_rows=2)
+    origin = flow_units.selected_unit_id(conversation)
+    rows = [
+        *flow_units.insurance_unit_rows(items),
+        *catalog_more_row(flow_units.ROW_UNIT_MORE_PREFIX, flow_units.LABEL_MORE_UNITS, next_page),
+        (f"{flow_units.ROW_UNIT_PARTICULAR_PREFIX}{origin}", flow_units.LABEL_CONTINUE_PARTICULAR),
+        (f"{ROW_DAY_BACK_PREFIX}{BACK_TARGET_SERVICE}", LABEL_ANOTHER_SERVICE),
+    ]
+    return FlowRouterResult(
+        action="reply",
+        bubbles=[
+            SlotsBubble(
+                body="Estas unidades aceitam convênio para o serviço com o profissional escolhido:",
+                rows=rows,
+                button_label=flow_units.UNIT_LIST_BUTTON,
+                section_title=flow_units.UNIT_LIST_SECTION,
+            )
+        ],
+        flow_state=FlowState.SERVICE_CATALOG,
+        flow_step=flow_units.STEP_AWAITING_UNIT,
+        **_day_branch_fields(conversation, BOOKING_DAY_BRANCH),
+    )
+
+
+async def _handle_unit_insurance_choice(
+    conversation: Conversation,
+    tenant: Tenant,
+    calendar: CalendarService | None,
+    body: str | None,
+    services: list[dict],
+    professionals: list | None,
+) -> FlowRouterResult:
+    """Route the no-plan card and the filtered unit list, rechecking the current roster."""
+    browsing = conversation.flow_step == flow_units.STEP_AWAITING_UNIT
+    owner = _booking_professional(conversation, professionals)
+    entry = _booking_service_entry(conversation, tenant, services, owner)
+    if entry is None:
+        result = _handle_day_back(
+            conversation, tenant, services, professionals, BACK_TARGET_SERVICE
+        )
+        result.flow_selected_type = None
+        result.bubbles.insert(0, TextBubble(body="O serviço escolhido não está mais disponível."))
+        return result
+    service_id = entry_service_id(entry)
+    origin = flow_units.find_unit(owner, flow_units.selected_unit_id(conversation), service_id)
+    if origin is None:
+        state = _state_at_booking_unit(conversation, None)
+        result = await _ask_day(
+            state, tenant, calendar, services, professionals, prefix=flow_units.UNIT_GONE_NOTICE
+        )
+        result.unit_dropped = result.flow_selected_unit_id is None
+        return result
+
+    if _control_match(body, flow_units.LABEL_CONTINUE_PARTICULAR) and _row_payload(body) in (
+        None, str(origin.id)
+    ):
+        return await _continue_at_booking_unit(
+            conversation, tenant, calendar, services, professionals, origin.id, particular=True
+        )
+    if browsing and _is_day_back(body, BACK_TARGET_SERVICE):
+        return _handle_day_back(conversation, tenant, services, professionals, BACK_TARGET_SERVICE)
+
+    if (
+        _insurance_step_skip_reason(tenant) is not None
+        or _accepted_plans(tenant, owner, entry, origin)
+        or not (alternatives := _insurance_alternative_units(tenant, owner, entry, origin))
+    ):
+        result = await _ask_day(conversation, tenant, calendar, services, professionals)
+        if result.flow_step in _BOOKING_DAY_STEPS:
+            return _resume_parked_draft(conversation, result)
+        return result
+
+    if not browsing:
+        if _label_match(body, flow_units.LABEL_UNITS_WITH_INSURANCE):
+            return _enter_insurance_unit_list(conversation, alternatives)
+        if body is None:
+            return _enter_no_plan_at_unit(conversation, origin, refused_known=False)
+        return _preserve(conversation, "delegate_llm")
+
+    page = catalog_more_page(body, flow_units.LABEL_MORE_UNITS)
+    if body is None or page is not None:
+        return _enter_insurance_unit_list(conversation, alternatives, page=page or 0)
+    unit = flow_units.match_unit([unit for unit, _ in alternatives], body, strict_payload=True)
+    if unit is not None:
+        return await _continue_at_booking_unit(
+            conversation, tenant, calendar, services, professionals, unit.id
+        )
+    if _row_payload(body) is not None:
+        return _enter_insurance_unit_list(conversation, alternatives)
+    return _preserve(conversation, "delegate_llm")
+
+
 async def _handle_unit_step(
     conversation: Conversation,
     tenant: Tenant,
@@ -5663,9 +6693,15 @@ async def _handle_unit_step(
     services: list[dict],
     professionals: list | None,
 ) -> FlowRouterResult:
-    """A tap (or typed name) on the unit list: that unit's day picker, back row to the units.
+    """A tap (or typed name) on the unit list: the convênio when the clinic collects it, else
+    that unit's day picker (back row to the units) - TASK-088: `_ask_day` decides.
 
     Only the units that do the booking's service are accepted (follow-up §6.1)."""
+    # The ordinary list clears the unit. A saved unit here belongs to the alternatives list.
+    if flow_units.selected_unit_id(conversation) is not None:
+        return await _handle_unit_insurance_choice(
+            conversation, tenant, calendar, body, services, professionals
+        )
     owner = _booking_professional(conversation, professionals)
     choice = _booking_unit_choice(conversation, tenant, services, owner)
     units = choice.units
@@ -5687,28 +6723,52 @@ async def _handle_unit_step(
         conversation_id=str(getattr(conversation, "id", None)),
         unit_count=len(units),
     )
-    state = _DayPickerState(
+    return await _continue_at_booking_unit(
+        conversation, tenant, calendar, services, professionals, unit.id
+    )
+
+
+def _state_at_booking_unit(
+    conversation: Conversation, unit_id: UUID | None, *, particular: bool = False
+) -> _DayPickerState:
+    return _DayPickerState(
         id=getattr(conversation, "id", None),
         flow_selected_type=conversation.flow_selected_type,
         flow_selected_professional_id=_selected_professional_id(conversation),
-        flow_selected_insurance=_selected_insurance(conversation),
-        flow_attendee_name=_attendee_name(conversation),
-        flow_selected_unit_id=unit.id,
-    )
-    result = await enter_day_picker(
-        state,
-        tenant,
-        # TASK-087: the chosen unit's hours, minus the service's blocked days THERE.
-        _booking_calendar(calendar, conversation, tenant, services, owner, unit),
-        # The pick is in `state`, not on the conversation yet: the unit is passed explicitly.
-        duration_minutes=_booking_duration(
-            conversation, tenant, services, professionals, unit=unit
+        flow_selected_insurance=(
+            LABEL_INSURANCE_PARTICULAR if particular else _selected_insurance(conversation)
         ),
-        branch=BOOKING_DAY_BRANCH,
-        back_target=_back_target_for(choice),
-        professionals=professionals,
+        flow_insurance_auto=(
+            False if particular else getattr(conversation, "flow_insurance_auto", None)
+        ),
+        flow_attendee_name=_attendee_name(conversation),
+        flow_selected_unit_id=unit_id,
     )
-    return _with_unit_terms_line(result, conversation, tenant, services, professionals, unit)
+
+
+async def _continue_at_booking_unit(
+    conversation: Conversation,
+    tenant: Tenant,
+    calendar: CalendarService | None,
+    services: list[dict],
+    professionals: list | None,
+    unit_id: UUID,
+    *,
+    particular: bool = False,
+) -> FlowRouterResult:
+    state = _state_at_booking_unit(conversation, unit_id, particular=particular)
+    # The pick is in `state`, not on the conversation yet: `_ask_day` reads it from there, asks
+    # the convênio for (service, doctor, THIS unit) when the clinic collects it, and otherwise
+    # opens the unit's days (TASK-087: its hours, minus the service's blocked days THERE).
+    # A parked AI draft continues from the pick (TASK-088 R17): the pick is an answer.
+    return _resume_parked_draft(
+        conversation,
+        await _ask_day_after_choice(
+            state, tenant, calendar, services, professionals,
+            changed=unit_id != flow_units.selected_unit_id(conversation),
+            announce_unit=True,
+        ),
+    )
 
 
 async def _handle_unit_confirm_step(
@@ -5724,7 +6784,8 @@ async def _handle_unit_confirm_step(
     * "❌ Não" -> the doctors who do the service, else the service list - no notice, nothing
       sent to the clinic (`_another_doctor_or_service`);
     * the choice went away (a unit or a mark changed meanwhile) -> `_ask_day` decides again;
-    * "✅ Sim" -> the unit is saved and its day picker opens (back row: the service list);
+    * "✅ Sim" -> the unit is saved, then the convênio (when the clinic collects it) or its day
+      picker (back row: the service list) - `_ask_day` decides (TASK-088);
     * anything else -> one model turn on this same step (the buttons stay tappable).
     """
     owner = _booking_professional(conversation, professionals)
@@ -5744,9 +6805,7 @@ async def _handle_unit_confirm_step(
             _service_entry_name(conversation, entry),
             notice=None,
         )
-    choice = flow_units.unit_choice(
-        owner, service_id, **_plan_kwargs(tenant, _selected_insurance(conversation))
-    )
+    choice = flow_units.unit_choice(owner, service_id)
     if choice.kind != "confirm":
         return await _ask_day(conversation, tenant, calendar, services, professionals)
     if not _label_match(body, LABEL_YES):
@@ -5766,21 +6825,18 @@ async def _handle_unit_confirm_step(
         flow_selected_type=conversation.flow_selected_type,
         flow_selected_professional_id=_selected_professional_id(conversation),
         flow_selected_insurance=_selected_insurance(conversation),
+        flow_insurance_auto=getattr(conversation, "flow_insurance_auto", None),
         flow_attendee_name=_attendee_name(conversation),
         flow_selected_unit_id=unit.id,
     )
-    result = await enter_day_picker(
-        state,
-        tenant,
-        _service_scoped(calendar, owner, entry, unit),
-        duration_minutes=_booking_duration(
-            conversation, tenant, services, professionals, unit=unit
+    return _resume_parked_draft(
+        conversation,
+        await _ask_day_after_choice(
+            state, tenant, calendar, services, professionals,
+            changed=unit.id != flow_units.selected_unit_id(conversation),
+            announce_unit=True,
         ),
-        branch=BOOKING_DAY_BRANCH,
-        back_target=_back_target_for(choice),
-        professionals=professionals,
     )
-    return _with_unit_terms_line(result, conversation, tenant, services, professionals, unit)
 
 
 async def enter_guided_booking(
@@ -5794,32 +6850,33 @@ async def enter_guided_booking(
     services: list[dict] | None = None,
     professionals: list | None = None,
     attendee_name: str | None = None,
+    recorded: Any | None = None,
+    named_now: bool = False,
 ) -> FlowRouterResult:
     """LLM hand-back entry: resume the booking AFTER the service was chosen.
 
-    The deterministic twin of tapping "Sim, agendar" on a service card — see
-    `_catalog_step`'s STEP_AWAITING_SERVICE_CONFIRM branch, whose two outcomes,
-    order and `insurance_step_skipped` log this reproduces on purpose. The
-    free-text conversation resolved the service; everything after it (convênio,
-    day, time, confirmation, the booking itself) is the button flow's again.
+    The deterministic twin of tapping the service (`_continue_with_service`: no card, straight on
+    to `_ask_day`). The free-text conversation resolved the service; everything after it (the
+    unit, the convênio, day, time, confirmation, the booking itself) is the button flow's again.
 
-    Same order as the button flow (convênio -> profissional -> serviço -> dia):
-    the doctor is already fixed here (this hand-back only serves single-doctor
-    clinics - workers/tasks.py turns a multi-doctor one away to the menu) and
-    the service arrives chosen, so the only earlier answer that can still be
-    missing is the convênio. Already answered in the button flow before the
-    patient drifted into the LLM -> straight to the day picker; unanswered and
-    collected by the clinic -> asked now, then the day picker.
+    TASK-088 - the order is service -> doctor -> unit -> convênio -> day: the doctor is already
+    fixed here (this hand-back only serves single-doctor clinics - workers/tasks.py turns a
+    multi-doctor one away to the menu) and the service arrives chosen, so what is still open is
+    the unit (when the doctor has several), then the convênio. `_ask_day` is the one choke
+    point that asks them, in that order, for every path that reaches the days.
 
     **It deliberately does NOT skip an unanswered convênio.** The literal
     ask was "open the day list", but `collect_insurance` is a clinic-wide
     setting the hub saved on purpose, and `_insurance_step_skip_reason` is the
-    single place that decides whether it applies. Skipping it here would mean a
-    booking loses information the clinic asked for on every OTHER booking,
-    purely because this patient happened to arrive through the LLM — an
+    single place that decides whether it applies (`_insurance_gate` asks it). Skipping it here
+    would mean a booking loses information the clinic asked for on every OTHER booking,
+    purely because this patient happened to arrive through the LLM - an
     invariant break invisible until a receptionist notices a blank convênio.
-    So: convênio when the clinic collects it, day picker when it does not, and
-    the day picker is one tap further in exactly the case where it already was.
+    An answer that already exists is checked against the combination like any other: kept when
+    accepted, asked again (never swapped for Particular in silence) when not.
+
+    A patient's Particular choice survives a different booking combination. A Particular
+    assigned automatically is kept only at the same service, doctor and unit.
 
     Takes the conversation's state as plain arguments rather than a
     Conversation: the caller (workers/tasks.py::_handle_start_guided_booking)
@@ -5847,21 +6904,38 @@ async def enter_guided_booking(
         flow_selected_type=appointment_type,
         flow_selected_professional_id=professional_id,
         flow_selected_insurance=insurance,
+        flow_insurance_auto=(
+            False if named_now else getattr(recorded, "flow_insurance_auto", None)
+        ) if insurance is not None else None,
         # A pra-quem answer given in the button flow BEFORE the patient drifted
         # into the LLM survives the hand-back (services/attendee.py). The LLM
         # itself never books for someone else - see ai/tools.py.
         flow_attendee_name=attendee_name,
     )
-    skip_reason = _insurance_step_skip_reason(tenant)
-    if skip_reason is None and not insurance:
-        return _carry_booking(state, _enter_insurance(tenant, state, professionals=professionals))
-    if skip_reason is not None:
-        logger.info(
-            "insurance_step_skipped",
-            reason=skip_reason,
-            conversation_id=str(conversation_id),
-            professional_count=len(professionals or []),
+    if (
+        appointment_type
+        and _insurance_step_skip_reason(tenant) is None
+        and _insurance_is_automatic(state)
+    ):
+        owner = _booking_professional(state, professionals)
+        service_id = _booking_service_id(state, tenant, services, owner)
+        choice = flow_units.unit_choice(owner, service_id)
+        landing_unit = (
+            choice.units[0] if choice.kind in ("implied", "confirm") and choice.units else None
         )
+        if not particular_survives(
+            tenant,
+            insurance,
+            named_now=named_now,
+            recorded=recorded,
+            professionals=professionals,
+            opens_choice=choice.kind == "list",
+            landing_type=appointment_type,
+            landing_owner=owner,
+            landing_unit=landing_unit,
+        ):
+            state.flow_selected_insurance = None
+            state.flow_insurance_auto = None
     return _carry_booking(state, await _ask_day(state, tenant, calendar, services, professionals))
 
 
@@ -5905,16 +6979,29 @@ async def _slot_lost_since_confirm(
     end: datetime,
     professional_id: UUID | None,
     conversation_id: object,
+    *,
+    buffer_minutes: int = 0,
 ) -> bool:
     """The slot was free at "Confirmar"; is it still? Asked again after a deposit that failed
     (TASK-071 Plan 3): the agenda the event goes to, then the holds of OTHER conversations
-    (`busy_windows` already leaves this conversation's own out). Both reads fail open."""
+    (`busy_windows` already leaves this conversation's own out) - and, with a doctor's buffer
+    (TASK-088), the consultations and those holds padded by it. All reads fail open."""
     if await slot_taken_at_confirm(
         calendar, start, end, source="flow_confirm_deposit_waived", conversation_id=conversation_id
     ):
         return True
     windows = await gate.busy_windows(professional_id)
-    return any(other_start < end and start < other_end for other_start, other_end in windows)
+    if any(other_start < end and start < other_end for other_start, other_end in windows):
+        return True
+    return buffer_minutes > 0 and await buffer_taken_at_confirm(
+        calendar,
+        start,
+        end,
+        buffer_minutes=buffer_minutes,
+        source="flow_confirm_deposit_waived",
+        holds=windows,
+        conversation_id=conversation_id,
+    )
 
 
 async def _reoffer_taken_slot(
@@ -6010,6 +7097,7 @@ def _handle_slot(
     *,
     professional: Any | None = None,
     unit: Any | None = None,
+    money_lines: list[str] | None = None,
 ) -> FlowRouterResult:
     start = _slot_iso_from_body(body)
     if start is None:
@@ -6017,7 +7105,11 @@ def _handle_slot(
     slot_iso = start.replace(tzinfo=None).isoformat(timespec="minutes")
     return FlowRouterResult(
         action="reply",
-        bubbles=[_confirmation_card(conversation, start, professional=professional, unit=unit)],
+        bubbles=[
+            _confirmation_card(
+                conversation, start, professional=professional, unit=unit, money_lines=money_lines
+            )
+        ],
         flow_state=FlowState.SERVICE_CATALOG,
         flow_step=STEP_AWAITING_CONFIRMATION,
         flow_selected_type=conversation.flow_selected_type,
@@ -6025,12 +7117,14 @@ def _handle_slot(
         flow_selected_slot=slot_iso,
         flow_selected_professional_id=_selected_professional_id(conversation),
         flow_selected_insurance=_selected_insurance(conversation),
+        flow_insurance_auto=getattr(conversation, "flow_insurance_auto", None),
     )
 
 
-def _booking_insurance_refusal(
+async def _booking_insurance_refusal(
     conversation: Conversation,
     tenant: Tenant,
+    calendar: CalendarService | None,
     services: list[dict] | None,
     professionals: list | None,
     owner: Any | None,
@@ -6043,8 +7137,9 @@ def _booking_insurance_refusal(
     booking with a unit asks that unit; a doctor without units asks the "no unit" slice; one
     with units but none resolved is refused only when no unit accepts. Particular, a typed
     "Outro", a legacy name or a service outside the catalog are never refused. The refusal
-    books nothing, says so in plain words and reopens the convênio list for this service,
-    keeping service and doctor (day, time and unit are dropped). Logged with ids only.
+    books nothing, says so in plain words and asks the convênio again through `_ask_day` (the
+    list of what is accepted now, or Particular with its line when nothing is), keeping
+    service, doctor and unit (day and time are asked again). Logged with ids only.
     """
     plan_id = _matrix_plan_id(tenant, insurance)
     if plan_id is None:
@@ -6093,9 +7188,32 @@ def _booking_insurance_refusal(
             f"{PLAN_REFUSED_AT_CONFIRM_LEAD.format(**values)} {PLAN_REFUSED_HOW_TO_GO_ON}"
         )[:MAX_INTERACTIVE_BODY_CHARS]
         return result
-    notice = PLAN_REFUSED_AT_CONFIRM.format(**values)
-    result = _enter_insurance(tenant, conversation, professionals=professionals)
-    result.bubbles.insert(0, TextBubble(body=notice))
+    # TASK-088: the same decision the booking made the first time (`_insurance_gate`, through
+    # `_ask_day`). Keep the unit and the refused answer so the next question can explain
+    # the refusal. The day and time are asked again when the patient makes a choice.
+    result = await _ask_day(
+        _DayPickerState(
+            id=getattr(conversation, "id", None),
+            flow_selected_type=conversation.flow_selected_type,
+            flow_selected_professional_id=_selected_professional_id(conversation),
+            flow_selected_insurance=insurance,
+            flow_attendee_name=_attendee_name(conversation),
+            flow_selected_unit_id=getattr(unit, "id", None),
+        ),
+        tenant,
+        calendar,
+        services,
+        professionals,
+    )
+    if result.action == "reply":
+        # "Escolha outro convênio ou Particular:" only in front of a list; a Particular day
+        # picker offers no such choice (the "nothing accepted" line says what happens).
+        template = (
+            PLAN_REFUSED_AT_CONFIRM
+            if result.flow_step == STEP_AWAITING_INSURANCE
+            else PLAN_REFUSED_AT_CONFIRM_LEAD
+        )
+        result.bubbles.insert(0, TextBubble(body=template.format(**values)))
     return result
 
 
@@ -6158,6 +7276,7 @@ async def _handle_confirmation(
             flow_selected_slot=conversation.flow_selected_slot,
             flow_selected_professional_id=_selected_professional_id(conversation),
             flow_selected_insurance=_selected_insurance(conversation),
+            flow_insurance_auto=getattr(conversation, "flow_insurance_auto", None),
         )
     if _norm(body) != _norm(LABEL_CONFIRM):
         return _preserve(conversation, "delegate_llm")
@@ -6208,8 +7327,11 @@ async def _handle_confirmation(
     # TASK-086 (A7): the FINAL guard - the snapshot is reread every turn, so a matrix the clinic
     # changed while the patient was booking is caught here, before the notice floor, the slot
     # re-read and the gate (so before any Google event, Portal hold or Pix).
-    refusal = _booking_insurance_refusal(
-        conversation, tenant, services, professionals, booking_owner, unit, insurance
+    # TASK-088: where the pickers a re-offer draws go back to - the same destination the booking's
+    # own day picker had (`_day_back_target`), not always the service list.
+    reoffer_back = _booking_back_target(conversation, tenant, services, professionals)
+    refusal = await _booking_insurance_refusal(
+        conversation, tenant, calendar, services, professionals, booking_owner, unit, insurance
     )
     if refusal is not None:
         return refusal
@@ -6234,7 +7356,7 @@ async def _handle_confirmation(
             calendar,
             duration_minutes=duration,
             branch=BOOKING_DAY_BRANCH,
-            back_target=BACK_TARGET_SERVICE,
+            back_target=reoffer_back,
             prefix=refusal,
             professionals=professionals,
         )
@@ -6251,17 +7373,29 @@ async def _handle_confirmation(
             calendar,
             duration_minutes=duration,
             branch=BOOKING_DAY_BRANCH,
-            back_target=BACK_TARGET_SERVICE,
+            back_target=reoffer_back,
             prefix=booking_notice_message(booking_notice_hours(booking_owner)),
             professionals=professionals,
         )
 
+    # TASK-088 Task 5: and not inside the doctor's buffer of a consultation (or of another
+    # conversation's held time) - refused exactly like a slot taken meanwhile (R35).
     if await slot_taken_at_confirm(
         calendar,
         start,
         end,
         source="flow_confirm",
         conversation_id=getattr(conversation, "id", None),
+    ) or await _inside_buffer(
+        calendar,
+        start,
+        end,
+        booking_owner,
+        source="flow_confirm",
+        conversation_id=getattr(conversation, "id", None),
+        professional_id=professional_id,
+        # "Marcar outra": the appointment being replaced never pads its replacement.
+        ignore_event_id=_REPLACED_EVENT.get(),
     ):
         return await _reoffer_taken_slot(
             conversation,
@@ -6270,7 +7404,7 @@ async def _handle_confirmation(
             start,
             duration_minutes=duration,
             branch=BOOKING_DAY_BRANCH,
-            back_target=BACK_TARGET_SERVICE,
+            back_target=reoffer_back,
             professionals=professionals,
         )
 
@@ -6305,6 +7439,7 @@ async def _handle_confirmation(
                 flow_selected_slot=conversation.flow_selected_slot,
                 flow_selected_professional_id=_selected_professional_id(conversation),
                 flow_selected_insurance=insurance,
+                flow_insurance_auto=getattr(conversation, "flow_insurance_auto", None),
             )
         if decision.outcome == "held":
             # No bubbles: the caller sends the code CARD (three buttons), which
@@ -6317,6 +7452,9 @@ async def _handle_confirmation(
                 flow_selected_type=None,
                 flow_selected_day=None,
                 flow_selected_slot=None,
+                # Keep the pair so the same hold can resume through the code and Pix.
+                flow_selected_insurance=insurance,
+                flow_insurance_auto=getattr(conversation, "flow_insurance_auto", None),
                 booking_hold={
                     "hold_id": decision.hold_id,
                     "email_masked": decision.email_masked,
@@ -6357,6 +7495,7 @@ async def _handle_confirmation(
                 flow_selected_slot=conversation.flow_selected_slot,
                 flow_selected_professional_id=_selected_professional_id(conversation),
                 flow_selected_insurance=insurance,
+                flow_insurance_auto=getattr(conversation, "flow_insurance_auto", None),
                 flow_attendee_name=conversation.flow_attendee_name,
             )
         if decision.outcome == "awaiting_payment" and decision.payment is not None:
@@ -6373,6 +7512,7 @@ async def _handle_confirmation(
                 flow_selected_slot=conversation.flow_selected_slot,
                 flow_selected_professional_id=_selected_professional_id(conversation),
                 flow_selected_insurance=insurance,
+                flow_insurance_auto=getattr(conversation, "flow_insurance_auto", None),
                 # Carried too: "Trocar horario" must not silently turn a booking for someone
                 # else into one for the patient. `leave_wait` clears it when the booking ends.
                 flow_attendee_name=attendee_name,
@@ -6395,7 +7535,13 @@ async def _handle_confirmation(
             # reservation `begin_payment` made is gone and the provider call took time, so the
             # slot is asked about AGAIN (agenda + other conversations' holds) before the event.
             if await _slot_lost_since_confirm(
-                gate, calendar, start, end, professional_id, getattr(conversation, "id", None)
+                gate,
+                calendar,
+                start,
+                end,
+                professional_id,
+                getattr(conversation, "id", None),
+                buffer_minutes=booking_buffer_minutes(booking_owner),
             ):
                 return await _reoffer_taken_slot(
                     conversation,
@@ -6404,7 +7550,7 @@ async def _handle_confirmation(
                     start,
                     duration_minutes=duration,
                     branch=BOOKING_DAY_BRANCH,
-                    back_target=BACK_TARGET_SERVICE,
+                    back_target=reoffer_back,
                     professionals=professionals,
                 )
             waived = coerce_failure_reason(decision.deposit_waived_reason)
@@ -6434,7 +7580,7 @@ async def _handle_confirmation(
             start,
             duration_minutes=duration,
             branch=BOOKING_DAY_BRANCH,
-            back_target=BACK_TARGET_SERVICE,
+            back_target=reoffer_back,
             professionals=professionals,
         )
     except CalendarUnavailableError:
@@ -6447,6 +7593,7 @@ async def _handle_confirmation(
             flow_selected_slot=conversation.flow_selected_slot,
             flow_selected_professional_id=_selected_professional_id(conversation),
             flow_selected_insurance=_selected_insurance(conversation),
+            flow_insurance_auto=getattr(conversation, "flow_insurance_auto", None),
             deposit_waived_reason=deposit_waived_reason,
         )
 
@@ -6809,6 +7956,9 @@ async def _begin_reschedule(
         ),
         branch=MANAGE_DAY_BRANCH,
         professionals=professionals,
+        # TASK-088 Task 5 (R31, R32): the appointment's own doctor's buffer; its event is the
+        # booking being moved.
+        buffer_rule=_appointment_buffer(appt, professionals),
     )
 
 
@@ -6865,6 +8015,31 @@ def _appointment_unit_calendar(
 
 
 async def _manage_step(
+    conversation: Conversation,
+    tenant: Tenant,
+    calendar: CalendarService | None,
+    body: str,
+    appointments: list[dict],
+    professionals: list | None = None,
+    *,
+    patient_name: str | None = None,
+) -> FlowRouterResult:
+    # TASK-088 Task 5 (R31, R32): every picker and recheck of this turn belongs to the
+    # appointment being managed: its doctor's buffer, and its own event never pads itself.
+    managed_now = _find_appt_by_id(appointments, _managing_appt_id_str(conversation))
+    with moving_booking_scope(_appointment_buffer(managed_now, professionals)):
+        return await _manage_step_inner(
+            conversation,
+            tenant,
+            calendar,
+            body,
+            appointments,
+            professionals,
+            patient_name=patient_name,
+        )
+
+
+async def _manage_step_inner(
     conversation: Conversation,
     tenant: Tenant,
     calendar: CalendarService | None,
@@ -7147,6 +8322,8 @@ async def _manage_reschedule(
     # Same last read as the booking "Confirmar" (`_handle_confirmation`), on the
     # appointment's OWN agenda - the one the patch below goes to. The event
     # being moved is excluded: it never takes its own new time. Fail-open.
+    # TASK-088 Task 5: and the appointment's own doctor's buffer - the moved event is ignored.
+    owner = _appointment_owner(appt, professionals)
     if await slot_taken_at_confirm(
         calendar,
         start,
@@ -7154,6 +8331,15 @@ async def _manage_reschedule(
         source="flow_reschedule",
         ignore_event_id=event_id,
         conversation_id=getattr(conversation, "id", None),
+    ) or await _inside_buffer(
+        calendar,
+        start,
+        end,
+        owner,
+        source="flow_reschedule",
+        conversation_id=getattr(conversation, "id", None),
+        professional_id=getattr(owner, "id", None),
+        ignore_event_id=event_id,
     ):
         return await _reoffer_taken_slot(
             conversation,
@@ -7395,8 +8581,17 @@ async def _manage_rebook(
             professionals=professionals,
         )
 
+    owner = _appointment_owner(appt, professionals)
     if await slot_taken_at_confirm(
         calendar, start, end, source="flow_rebook", conversation_id=conversation_id
+    ) or await _inside_buffer(
+        calendar,
+        start,
+        end,
+        owner,
+        source="flow_rebook",
+        conversation_id=conversation_id,
+        professional_id=getattr(owner, "id", None),
     ):
         return await _reoffer()
     summary, description = _rebook_event_texts(appt, professionals, patient_name)
@@ -7492,6 +8687,7 @@ def _preserve_reply(
         flow_selected_slot=conversation.flow_selected_slot,
         flow_selected_professional_id=_selected_professional_id(conversation),
         flow_selected_insurance=_selected_insurance(conversation),
+        flow_insurance_auto=getattr(conversation, "flow_insurance_auto", None),
         flow_managing_appointment_id=_selected_managing_appointment_id(conversation),
         flow_selected_unit_id=flow_units.selected_unit_id(conversation),
     )
@@ -7563,22 +8759,81 @@ def _recap_professional(
     return _booking_professional(conversation, professionals)
 
 
+# TASK-088 R24 (the owner): money is said ONLY on the final confirmation. The lines (their wording
+# is fixed here so the worker seam that adds the sinal's, `workers/shared/deposit.py`, finds and
+# replaces the router's own):
+#   - Particular (or a clinic that does not ask the convênio): "Valor: R$ 200,00";
+#   - a convênio: no line (the service's price is the Particular one);
+#   - a sinal charged for the booking (whatever the convênio): "Sinal (Pix): R$ 60,00" and
+#     "Valor da consulta: R$ 200,00" - they replace the "Valor" line.
+PRICE_LINE_PREFIX = "Valor: "
+SINAL_LINE_PREFIX = "Sinal (Pix): "
+TOTAL_LINE_PREFIX = "Valor da consulta: "
+_MONEY_LINE_PREFIXES = (PRICE_LINE_PREFIX, SINAL_LINE_PREFIX, TOTAL_LINE_PREFIX)
+
+
+def _money_lines(*lines: str | None) -> list[str]:
+    return [line for line in lines if line]
+
+
+def booking_price_line(
+    conversation: Any, entry: dict | None, professional: Any | None, unit: Any | None
+) -> str | None:
+    """The final confirmation's service value line, or None (TASK-088 R24).
+
+    The value the patient is shown is the price of `entry` for `professional` AT `unit` (TASK-085:
+    `_priced_entry`), under the Particular rule (`service_price_text`: a convênio -> None). Only a
+    readable, positive amount is a line ("a combinar" or 0 say nothing), spelled as the sinal's
+    lines are (`format_brl`)."""
+    if entry is None:
+        return None
+    shown = service_price_text(
+        _priced_entry(entry, professional, getattr(unit, "id", None)),
+        _selected_insurance(conversation),
+    )
+    cents = parse_brl_to_cents(shown)
+    if cents is None or cents <= 0:
+        return None
+    return f"{PRICE_LINE_PREFIX}{format_brl(cents)}"
+
+
+def with_money_lines(body: str, lines: list[str]) -> str:
+    """`body` (a confirmation recap) ending with the money `lines`, within the card's cap.
+
+    Any money lines already at the end are replaced (the worker replaces the router's "Valor"
+    with the sinal's two; a second pass changes nothing). The money wins over the recap: when the
+    whole does not fit `MAX_INTERACTIVE_BODY_CHARS`, the recap is the part that is cut."""
+    kept = body.split("\n")
+    while kept and (not kept[-1].strip() or kept[-1].startswith(_MONEY_LINE_PREFIXES)):
+        kept.pop()
+    recap = "\n".join(kept)
+    if not lines:
+        return truncate_plain(recap, MAX_INTERACTIVE_BODY_CHARS)
+    block = "\n".join(lines)
+    room = MAX_INTERACTIVE_BODY_CHARS - len(block) - 2
+    return f"{truncate_plain(recap, room)}\n\n{block}"
+
+
 def _confirmation_card(
     conversation: Conversation,
     start: datetime,
     *,
     professional: Any | None = None,
     unit: Any | None = None,
+    money_lines: list[str] | None = None,
 ) -> ButtonBubble:
     """The Confirmar/Cancelar card - the ONE builder for the slot tap and the AI's express
     confirmation (services/booking_draft.py::_express_confirmation), so both read alike.
 
+    `money_lines` (TASK-088): the value line the router can say by itself (`booking_price_line`);
+    the sinal's lines are added later, by the worker seam, from the same functions the charge uses.
+
     "Confirmar" on it is routed by `_handle_confirmation`, whichever path drew it.
     """
     return ButtonBubble(
-        body=truncate_plain(
+        body=with_money_lines(
             _recap_text(conversation, start, professional=professional, unit=unit),
-            MAX_INTERACTIVE_BODY_CHARS,
+            money_lines or [],
         ),
         confirm_label=LABEL_CONFIRM,
         cancel_label=LABEL_CANCEL,
@@ -7642,14 +8897,19 @@ async def _resume_bubbles(
     )
     # TASK-083: the chosen unit's agenda; the unit list again when it was being asked.
     booking_owner = _booking_professional(conversation, professionals)
+    booking_unit = _booking_unit(conversation, tenant, services, booking_owner)
+    if step == STEP_AWAITING_NO_PLAN_AT_UNIT or (
+        step == flow_units.STEP_AWAITING_UNIT
+        and flow_units.selected_unit_id(conversation) is not None
+    ):
+        return await _handle_unit_insurance_choice(
+            conversation, tenant, calendar, None, services, professionals
+        )
+    if step in UNIT_KEEP_STEPS and _automatic_insurance_unit_changed(conversation, booking_unit):
+        return await _ask_day(conversation, tenant, calendar, services, professionals)
     # TASK-087: and without the service's blocked days at that unit.
     calendar = _booking_calendar(
-        calendar,
-        conversation,
-        tenant,
-        services,
-        booking_owner,
-        _booking_unit(conversation, tenant, services, booking_owner),
+        calendar, conversation, tenant, services, booking_owner, booking_unit
     )
     if step in (flow_units.STEP_AWAITING_UNIT, flow_units.STEP_AWAITING_UNIT_CONFIRM):
         # The unit list, or the Sim/Não on the only unit, again - whichever fits now.
@@ -7686,6 +8946,12 @@ async def _resume_bubbles(
         return _attendee_authorization_card(conversation.flow_selected_type, name)
 
     if step == STEP_AWAITING_INSURANCE:
+        if conversation.flow_selected_type:
+            # TASK-088: the question again through the same decision as the first time - the
+            # list, or continue to the days when the combination now accepts nothing.
+            return await _ask_day(
+                conversation, tenant, calendar, services, professionals, reask_insurance=True
+            )
         return _enter_insurance(tenant, conversation, professionals=professionals)
 
     if step == STEP_AWAITING_CATALOG_SERVICE:
@@ -7736,22 +9002,8 @@ async def _resume_bubbles(
                 ],
                 step=STEP_AWAITING_SERVICE,
             )
-        return _preserve_reply(
-            conversation,
-            [
-                ButtonBubble(
-                    body=_service_detail_text(
-                        service,
-                        tenant,
-                        _selected_insurance(conversation),
-                        professional=booking_owner,
-                        unit_id=_service_card_unit_id(conversation, booking_owner, service),
-                    ),
-                    confirm_label=LABEL_BOOK_SERVICE,
-                    cancel_label=LABEL_OTHER_SERVICE,
-                )
-            ],
-        )
+        # TASK-088: the card is retired - a chat parked on it goes on to what comes after it.
+        return await _ask_day(conversation, tenant, calendar, services, professionals)
 
     if step in _BOOKING_DAY_STEPS:
         # Re-render the picker from scratch: availability moves, and a resumed
@@ -7763,17 +9015,31 @@ async def _resume_bubbles(
         return await _relist_stored_day(conversation, tenant, calendar, services, professionals)
 
     if step == STEP_AWAITING_CONFIRMATION:
+        unit = _booking_unit(conversation, tenant, services, booking_owner)
         recap = _confirmation_recap(
             conversation,
             professional=_recap_professional(conversation, tenant, professionals),
-            unit=_booking_unit(conversation, tenant, services, booking_owner),
+            unit=unit,
         )
         if recap is None:
             # Lost the slot somehow: re-ask the day.
             return await _ask_day(conversation, tenant, calendar, services, professionals)
+        # The same card the slot tap drew, money line included (TASK-088 R24).
+        price = booking_price_line(
+            conversation,
+            _booking_service_entry(conversation, tenant, services, booking_owner),
+            booking_owner,
+            unit,
+        )
         return _preserve_reply(
             conversation,
-            [ButtonBubble(body=recap, confirm_label=LABEL_CONFIRM, cancel_label=LABEL_CANCEL)],
+            [
+                ButtonBubble(
+                    body=with_money_lines(recap, _money_lines(price)),
+                    confirm_label=LABEL_CONFIRM,
+                    cancel_label=LABEL_CANCEL,
+                )
+            ],
         )
 
     if step == STEP_AWAITING_RETRY:
@@ -7971,7 +9237,9 @@ async def enter_rebooking(
             professionals=professionals,
             # TASK-052: "Remarcar" on a released PAID slot says what happens to the deposit.
             prefix=prefix,
-            back_target=None if same_professional else BACK_TARGET_SERVICE,
+            back_target=None if same_professional else BACK_TARGET_DOCTOR_SERVICES,
+            # TASK-088 Task 5 (R31): the doctor the list is read for, not the stale selection.
+            buffer_rule=_booking_buffer(owner),
         )
         # enter_day_picker knows nothing about who or what is being booked, and
         # these fields are written unconditionally by the caller — so a result

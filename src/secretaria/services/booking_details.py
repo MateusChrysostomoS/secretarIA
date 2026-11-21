@@ -4,13 +4,14 @@ When the AI's draft carries everything - who it is for, the convênio, the docto
 service, the day and the time - the patient skips the steps that would have shown them the
 doctor, the service card and its price. Spec §4.4.2: they still receive everything those
 steps would have shown, as ONE text message of its own right before the confirmation card:
-the doctor (and specialty), the service with its price and description, what to bring / how
+the doctor (and specialty), the service with its description (no price since TASK-088: money
+is said only on the final confirmation card), what to bring / how
 to prepare (the service's `requirements`), the convênio, who the booking is for, and the
 clinic's address when the clinic has one stored (`Tenant.address`, read by
 workers/shared/draft_resolution.py::_load_draft_context).
 
 Pure: plain values in, one string out - no flow_router import (flow_router imports
-`price_text` from here), no database, no logging. The text names a third party and the
+`service_price_text` from here), no database, no logging. The text names a third party and the
 patient's convênio, so it is sent and never logged.
 
 Size: a text message caps at MAX_TEXT_MESSAGE_CHARS (core/whatsapp_limits.py), and a clinic
@@ -19,7 +20,7 @@ trimmed in a fixed order until it fits - the long description gives way to the s
 then to none, then the requirements keep their first REQUIREMENTS_KEEP items plus a "…"
 line - and only then is it hard-cut with `truncate_plain` (display-only text, nothing ever
 matches against it: skill third-party-text-limits). The lines that identify the booking
-(doctor, service, price, convênio, who, address) come first and are never the ones trimmed.
+(doctor, service, convênio, who, address) come first and are never the ones trimmed.
 """
 
 from __future__ import annotations
@@ -52,8 +53,9 @@ def _clean(value: Any) -> str | None:
 def price_text(price: Any) -> str | None:
     """The price as the patient reads it ("R$250", "R$ 250"), or None when there is none.
 
-    The ONE spelling the service card (`flow_router._service_detail_text`) and the booking
-    details share: a value without the "R$" prefix gets it, one that has it is kept.
+    The ONE spelling of a service price (the final confirmation's value line,
+    `flow_router.booking_price_line`, reads it through `service_price_text`): a value without
+    the "R$" prefix gets it, one that has it is kept.
     """
     if not price:
         return None
@@ -137,8 +139,8 @@ def _identity_lines(
             f"{EMOJI_DOCTOR} Profissional: {doctor}" + (f" — {specialty}" if specialty else "")
         )
     name = _clean(service.get("name")) or "Consulta"
-    price = service_price_text(service, insurance)
-    lines.append(f"{EMOJI_SERVICE} Serviço: {name}" + (f" — {price}" if price else ""))
+    # TASK-088 R23: no money here - it is said only on the final confirmation card.
+    lines.append(f"{EMOJI_SERVICE} Serviço: {name}")
     plan = _clean(insurance)
     if plan:
         lines.append(f"Convênio: {plan}")

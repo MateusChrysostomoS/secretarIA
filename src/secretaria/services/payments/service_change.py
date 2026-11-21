@@ -66,6 +66,7 @@ import httpx
 from sqlalchemy import func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from secretaria.core.database import async_session_factory
 from secretaria.core.logging import get_logger
 from secretaria.models import (
     LIVE_APPOINTMENT_STATUSES,
@@ -117,7 +118,7 @@ from secretaria.services.appointment_calendar_origin import (
     calendar_professional_id,
 )
 from secretaria.services.appointment_edit_write import write_appointment_edit
-from secretaria.services.appointment_status import SOURCE_HUB, SOURCE_SYSTEM
+from secretaria.services.appointment_status import SOURCE_FLOW, SOURCE_HUB, SOURCE_SYSTEM
 from secretaria.services.calendar import CalendarSlotTakenError, build_event_description
 from secretaria.services.local_calendar import (
     create_event_exclusive,
@@ -3190,6 +3191,7 @@ async def sync_agenda_event(
     *,
     patient_name: str | None,
     window_changed: bool,
+    buffer_for_patient: bool = False,
 ) -> None:
     """Put the appointment's event in line with its ROW: service in the title and the
     description, start and end. Used by the patient's edit when a service change stands at
@@ -3200,6 +3202,10 @@ async def sync_agenda_event(
     patient) and written exclusively on the secretarIA agenda; raises `CalendarSlotTakenError`
     when it does not fit and lets `CalendarUnavailableError` through. Never commits, never
     touches the row or the money.
+
+    TASK-088 Task 5: `buffer_for_patient` - the change was the PATIENT's - also refuses a window
+    inside the buffer of the doctor's other consultations (the appointment's own event never
+    pads itself). The clinic's own agenda edit leaves it False: the clinic is never limited.
     """
     event_id = (appointment.google_event_id or "").strip()
     if not event_id:
@@ -3228,7 +3234,59 @@ async def sync_agenda_event(
         session, tenant.id, start, end, professional_id=appointment.professional_id
     ):
         raise CalendarSlotTakenError("service_change_window_held")
+    if buffer_for_patient and await _inside_patient_buffer(
+        session, tenant, appointment, calendar, start, end, event_id
+    ):
+        raise CalendarSlotTakenError("service_change_window_buffer")
     await update_event_details_exclusive(calendar, event_id, start, end, summary, description)
+
+
+async def _inside_patient_buffer(
+    session: AsyncSession,
+    tenant: Tenant,
+    appointment: Appointment,
+    calendar: Any,
+    start: datetime,
+    end: datetime,
+    event_id: str | None,
+) -> bool:
+    """TASK-088 Task 5: is the patient's new window inside the buffer of `appointment`'s doctor?
+
+    The doctor is the row's own (the one whose agenda `calendar` is); `event_id` - the booking
+    being moved - never pads itself; other conversations' held windows count. No buffer: False
+    with no further read. FAIL-OPEN like every confirm recheck: a doctor that cannot be read means
+    no padding (logged with the error type only). The doctor is read in its OWN short session
+    (like `workers/shared/booking_hold.py::_held_buffer_rule`): a failed statement aborts the
+    Postgres transaction it ran in, and the caller's still has to write the calendar and the
+    attention item - so `session` is never touched here.
+    """
+    from secretaria.services.availability import booking_buffer_minutes, buffer_taken_at_confirm
+
+    professional_id = getattr(appointment, "professional_id", None)
+    if professional_id is None:
+        return False
+    try:
+        async with async_session_factory() as own_session:
+            professional = await own_session.get(Professional, professional_id)
+        minutes = booking_buffer_minutes(
+            professional if getattr(professional, "tenant_id", tenant.id) == tenant.id else None
+        )
+        if minutes <= 0:
+            return False
+        holds = await booking_hold.held_windows(tenant.id, professional_id)
+    except Exception as exc:  # noqa: BLE001 - fail-open
+        logger.warning("service_change_buffer_lookup_failed", error_type=type(exc).__name__)
+        return False
+    return await buffer_taken_at_confirm(
+        calendar,
+        start,
+        end,
+        buffer_minutes=minutes,
+        source="service_change",
+        ignore_event_id=event_id,
+        holds=holds,
+        tenant_id=tenant.id,
+    )
 
 
 async def update_agenda_after_payment(
@@ -3309,7 +3367,13 @@ async def update_agenda_after_payment(
     try:
         if agenda_moves:
             await _move_event_to_new_agenda(
-                session, tenant, appointment, expected, patient_name=patient_name, log=log
+                session,
+                tenant,
+                appointment,
+                expected,
+                patient_name=patient_name,
+                log=log,
+                buffer_for_patient=(adjustment.pending_edit or {}).get("source") == SOURCE_FLOW,
             )
         else:
             calendar = await calendar_for_appointment(session, tenant, appointment)
@@ -3322,6 +3386,8 @@ async def update_agenda_after_payment(
                 calendar,
                 patient_name=patient_name,
                 window_changed=window_changed,
+                # TASK-088 Task 5: only a PATIENT's change (source `flow`) is held to the buffer.
+                buffer_for_patient=(adjustment.pending_edit or {}).get("source") == SOURCE_FLOW,
             )
     except Exception as exc:  # noqa: BLE001 - the payment stands; the clinic fixes the agenda
         logger.warning(
@@ -3366,6 +3432,7 @@ async def _move_event_to_new_agenda(
     *,
     patient_name: str | None,
     log: dict,
+    buffer_for_patient: bool = False,
 ) -> None:
     """TASK-085 R (D-R3/D-R4): a paid change of DOCTOR. The row already carries the new doctor
     (`_apply_full_edit`) but still points at the OLD event. The event is created on the new
@@ -3393,6 +3460,13 @@ async def _move_event_to_new_agenda(
     end = as_utc(appointment.end_at or appointment.start_at)
     if not await new_calendar.is_slot_free(start, end):
         raise CalendarSlotTakenError("service_change_new_agenda_taken")
+    # TASK-088 Task 5: the NEW doctor's buffer, for the patient's change. The ROW already carries
+    # the new doctor and the new window (and still the OLD event id), and is live: it would pad its
+    # own new window, so it is ignored by that event id (fix round 1).
+    if buffer_for_patient and await _inside_patient_buffer(
+        session, tenant, appointment, new_calendar, start, end, old_event_id or None
+    ):
+        raise CalendarSlotTakenError("service_change_new_agenda_buffer")
     description = build_event_description(
         service=appointment.appointment_type,
         insurance=appointment.insurance,

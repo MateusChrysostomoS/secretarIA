@@ -46,8 +46,8 @@ from secretaria.services.flow_router import (  # noqa: E402
     STEP_AWAITING_CONFIRMATION,
     STEP_AWAITING_DAY,
     STEP_AWAITING_INSURANCE,
-    STEP_AWAITING_PROFESSIONAL,
     STEP_AWAITING_SERVICE,
+    STEP_AWAITING_SERVICE_PROFESSIONAL,
 )
 from secretaria.services.greeting_template import CONSENT_BUTTON_LABEL  # noqa: E402
 from secretaria.workers import tasks  # noqa: E402
@@ -163,6 +163,14 @@ def wired(monkeypatch: pytest.MonkeyPatch, db):
     monkeypatch.setattr(workers_ns, "_appointment_calendar", _agenda_for)
     # The turn's own calendar (the route() half of an answer) is the same fake agenda.
     monkeypatch.setattr(workers_ns, "_flow_turn_calendar", lambda conv, config, cal: agenda)
+    # A turn that PICKS the doctor re-runs route() on that doctor's calendar (TASK-088 R41, worker
+    # `_picked_doctor_calendar`): that calendar is the same fake agenda, never a real LocalCalendar
+    # opening a session on the settings' database.
+
+    async def _doctor_calendar(session, tenant, professional, **kwargs):
+        return agenda
+
+    monkeypatch.setattr(workers_ns, "resolve_professional_calendar", _doctor_calendar)
     return db
 
 
@@ -298,7 +306,7 @@ async def test_the_doctor_answer_lands_the_parked_draft_with_that_doctor(wired) 
     )
     await _onboard(tenant)
     await _hand_back(db, tenant, FULL_DRAFT)
-    assert (await _conversation(db, tenant)).flow_step == STEP_AWAITING_PROFESSIONAL
+    assert (await _conversation(db, tenant)).flow_step == STEP_AWAITING_SERVICE_PROFESSIONAL
 
     await _wa_turn(tenant, "Dr. Beto")
 
@@ -335,7 +343,7 @@ async def test_a_doctor_who_does_not_offer_the_parked_service_keeps_the_day_wait
     assert conversation.flow_step == STEP_AWAITING_SERVICE  # Dr. Caio's own services
     assert conversation.flow_draft["d"] == DAY.isoformat()  # the day still waits
     (resumed,) = [fields for event, fields in log.events if event == "booking_draft_resumed"]
-    assert resumed["answered_step"] == STEP_AWAITING_PROFESSIONAL
+    assert resumed["answered_step"] == STEP_AWAITING_SERVICE_PROFESSIONAL
     assert resumed["dropped"] == {"service": "not_offered_by_professional"}
 
     await _wa_turn(tenant, "Retorno")

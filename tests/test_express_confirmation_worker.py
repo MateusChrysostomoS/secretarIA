@@ -344,14 +344,16 @@ async def test_a_full_draft_lands_on_the_details_and_the_card_and_books_nothing(
     assert details.body == (
         "Confira os detalhes da sua consulta:\n\n"
         "🥼 Profissional: Dra. Única — Clínica Geral\n"
-        "🏥 Serviço: Consulta — R$250\n"
+        "🏥 Serviço: Consulta\n"
         "👤 Para: você\n"
         f"{ADDRESS_LINE}\n\n"
         "Avaliação completa.\n\n"
         "O que levar / preparo:\n"
         "• Jejum de 8 horas"
     )
-    assert card.body == f"Consulta\nProfissional: Dra. Única\n{WHEN}"
+    # TASK-088 Task 8: no price in the details message; the money is on the card (no convênio:
+    # the service's value).
+    assert card.body == f"Consulta\nProfissional: Dra. Única\n{WHEN}\n\nValor: R$ 250,00"
     row = await _row(wired.db, conversation)
     assert row.flow_step == fr.STEP_AWAITING_CONFIRMATION
     assert (row.flow_selected_day, row.flow_selected_slot) == (
