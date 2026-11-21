@@ -1478,6 +1478,7 @@ async def list_free_slots(day: str, max_slots: int = 6, appointment_type: str = 
     if unit_error is not None:
         return unit_error
     minutes: int | None = None
+    owner = None  # the professional row, when this call already loaded it (no second read)
     if unit is not None:
         # TASK-085 D7 (T8 I1): at a unit with its own duration, the slots have that length.
         canonical, service_error = _slot_service(appointment_type, "list_free_slots")
@@ -1497,15 +1498,18 @@ async def list_free_slots(day: str, max_slots: int = 6, appointment_type: str = 
         day=day_dt,
         max_slots=min(max(max_slots, 1), 10),
         held=held,
-        buffer_minutes=await _sole_buffer_minutes(),
+        buffer_minutes=await _sole_buffer_minutes(owner),
         slot_minutes=minutes,
     )
     return {"slots": slots}
 
 
-async def _sole_buffer_minutes() -> int:
+async def _sole_buffer_minutes(owner: Any | None = None) -> int:
     """The buffer between consultations of this turn's single professional (0 = none, or not
-    readable: a READ tool then offers as before; the booking tools re-ask at the write)."""
+    readable: a READ tool then offers as before; the booking tools re-ask at the write).
+    `owner` is the professional row when the caller already loaded it: no second read."""
+    if owner is not None:
+        return booking_buffer_minutes(owner)
     tenant_id, professional_id = _tenant_id_ctx.get(), _sole_professional_id()
     if tenant_id is None or professional_id is None:
         return 0

@@ -3455,10 +3455,11 @@ async def _move_event_to_new_agenda(
     end = as_utc(appointment.end_at or appointment.start_at)
     if not await new_calendar.is_slot_free(start, end):
         raise CalendarSlotTakenError("service_change_new_agenda_taken")
-    # TASK-088 Task 5: the NEW doctor's buffer, for the patient's change (nothing of this
-    # appointment is on that agenda yet, so there is nothing to ignore).
+    # TASK-088 Task 5: the NEW doctor's buffer, for the patient's change. The ROW already carries
+    # the new doctor and the new window (and still the OLD event id), and is live: it would pad its
+    # own new window, so it is ignored by that event id (fix round 1).
     if buffer_for_patient and await _inside_patient_buffer(
-        session, tenant, appointment, new_calendar, start, end, None
+        session, tenant, appointment, new_calendar, start, end, old_event_id or None
     ):
         raise CalendarSlotTakenError("service_change_new_agenda_buffer")
     description = build_event_description(

@@ -654,3 +654,187 @@ async def test_service_change_agenda_write_respects_buffer_only_for_the_patient(
         window_changed=True,
     )
     assert updates == ["evt-mine"]
+
+
+# --- DB-backed: the REAL calendar resolution and the REAL consultation rows (fix round 1) ------
+
+from tests._local_agenda import (  # noqa: E402
+    agenda as local_agenda,
+    seed_professional,
+    seed_tenant,
+    tomorrow_at,
+    wire_local_agenda,
+)
+from tests._reminder_fixtures import db  # noqa: E402, F401
+
+
+async def _set_buffer(db, professional, minutes):
+    from secretaria.models import Professional
+
+    async with db() as session:
+        row = await session.get(Professional, professional.id)
+        row.buffer_minutes = minutes
+        await session.commit()
+
+
+async def _patient_row(db, tenant, professional, start, event_id, patient_id=None):
+    """A patient's live appointment row stamped with the doctor (the way the bot writes it)."""
+    from secretaria.models import Appointment, AppointmentStatus, Patient
+
+    async with db() as session:
+        if patient_id is None:
+            patient = Patient(id=uuid4(), tenant_id=tenant.id,
+                              wa_id=f"55119{uuid4().int % 10**8:08d}", name="Rui",
+                              channel="whatsapp")
+            session.add(patient)
+            await session.flush()
+            patient_id = patient.id
+        row = Appointment(
+            tenant_id=tenant.id, patient_id=patient_id, professional_id=professional.id,
+            google_event_id=event_id, appointment_type="Consulta", start_at=start,
+            end_at=start + timedelta(minutes=30), phone="5511988887777",
+            status=AppointmentStatus.SCHEDULED,
+        )
+        session.add(row)
+        await session.commit()
+        return row.id, patient_id
+
+
+async def _patient_booking(db, tenant, professional, calendar, start):
+    """An event on the doctor's own agenda plus the row that names it."""
+    event = await calendar.create_event(start, start + timedelta(minutes=30), "Consulta")
+    await _patient_row(db, tenant, professional, start, event["id"])
+
+
+def _snapshot(professional, buffer_minutes):
+    doctor = _doctor(buffer_minutes)
+    doctor.id = professional.id
+    return doctor
+
+
+async def _assert_adjacent_slots_not_offered_nor_confirmed(calendar, professional):
+    """With a 30-minute buffer and a patient visit 10:00-10:30: 09:30 and 10:30 are neither
+    offered nor confirmable; 09:00 and 11:00 are both."""
+    visit = tomorrow_at(10)
+    day = visit.astimezone(TZ).date()
+    offered = _times(await availability.free_slots_for_day(
+        calendar, day=day, duration_minutes=30, buffer_minutes=30
+    ))
+    assert "09:30" not in offered and "10:30" not in offered
+    assert "09:00" in offered and "11:00" in offered
+
+    doctor = _snapshot(professional, 30)
+
+    async def confirm(hhmm):
+        slot = f"{day.isoformat()}T{hhmm}:00"
+        conversation = _conversation(
+            flow_step=fr.STEP_AWAITING_CONFIRMATION, flow_selected_slot=slot,
+            flow_selected_day=slot[:10],
+        )
+        return await fr.route(conversation, _tenant(), calendar, fr.LABEL_CONFIRM,
+                              professionals=[doctor])
+
+    refused = await confirm("10:30")
+    assert refused.appointment is None and refused.flow_step == fr.STEP_AWAITING_DAY
+    booked = await confirm("11:00")
+    assert booked.appointment is not None
+
+
+async def test_single_doctor_clinic_real_calendar_applies_the_buffer(db, monkeypatch):
+    """IMPORTANT 2 (a): the calendar the worker builds for a one-doctor clinic (`load_tenant_config`
+    + `from_tenant_config`, local agenda) reads the doctor's own consultation rows."""
+    from secretaria.models import Tenant
+    from secretaria.services.calendar import CalendarService
+    from secretaria.services.tenant_config import load_tenant_config
+
+    wire_local_agenda(monkeypatch, db)
+    tenant = await seed_tenant(db)
+    doctor = await seed_professional(db, tenant, "Dra. Ana")
+    await _set_buffer(db, doctor, 30)
+    async with db() as session:
+        config = await load_tenant_config(session, await session.get(Tenant, tenant.id))
+    calendar = CalendarService.from_tenant_config(config)
+    assert calendar._owner_professional_id == doctor.id  # the sole doctor's agenda IS the clinic's
+    await _patient_booking(db, tenant, doctor, calendar, tomorrow_at(10))
+    await _assert_adjacent_slots_not_offered_nor_confirmed(calendar, doctor)
+
+
+async def test_multi_doctor_clinic_real_calendar_applies_the_buffer(db, monkeypatch):
+    """IMPORTANT 2 (b): in a clinic with several doctors every doctor's calendar is resolved with
+    `professional_id=<that doctor>` (`resolve_professional_calendar`) - even one with no credential
+    of his own, who books on the local agenda backend - so the consultation windows are the booking
+    owner's. The clinic-level calendar (owner None) is never what a selected doctor's flow reads;
+    there is no configuration where a doctor books on it."""
+    from secretaria.models import Professional, Tenant
+    from secretaria.services.calendar import CalendarService
+    from secretaria.services.tenant_config import load_tenant_config, resolve_professional_calendar
+
+    wire_local_agenda(monkeypatch, db)
+    tenant = await seed_tenant(db)
+    first = await seed_professional(db, tenant, "Dra. Ana")
+    second = await seed_professional(db, tenant, "Dr. Beto")
+    await _set_buffer(db, second, 30)
+    async with db() as session:
+        tenant_row = await session.get(Tenant, tenant.id)
+        config = await load_tenant_config(session, tenant_row)
+        assert config.professional_id is None
+        assert CalendarService.from_tenant_config(config)._owner_professional_id is None
+        calendar = await resolve_professional_calendar(
+            session, tenant_row, await session.get(Professional, second.id), tenant_config=config
+        )
+        other_calendar = await resolve_professional_calendar(
+            session, tenant_row, await session.get(Professional, first.id), tenant_config=config
+        )
+    assert calendar._owner_professional_id == second.id
+    await _patient_booking(db, tenant, second, calendar, tomorrow_at(10))
+    # Ana's visit at 12:00 is not Beto's consultation: it pads nothing for him.
+    await _patient_booking(db, tenant, first, other_calendar, tomorrow_at(12))
+    await _assert_adjacent_slots_not_offered_nor_confirmed(calendar, second)
+    day = tomorrow_at(12).astimezone(TZ).date()
+    offered = _times(await availability.free_slots_for_day(
+        calendar, day=day, duration_minutes=30, buffer_minutes=30
+    ))
+    assert "11:30" in offered and "12:30" in offered
+
+
+async def test_paid_doctor_change_row_does_not_pad_its_own_new_window(db, monkeypatch):
+    """IMPORTANT 1: `_move_event_to_new_agenda` runs AFTER the row already carries the new doctor
+    and the new window (and still the old event id). The live row must not block its own window,
+    while a real neighbour of the new doctor still does."""
+    from secretaria.models import Appointment, Tenant
+    from secretaria.services import booking_hold
+    from secretaria.services.calendar import CalendarSlotTakenError
+    from secretaria.services.payments import service_change
+
+    wire_local_agenda(monkeypatch, db)
+    monkeypatch.setattr(booking_hold, "async_session_factory", db)
+    tenant = await seed_tenant(db)
+    old_doctor = await seed_professional(db, tenant, "Dra. Ana")
+    new_doctor = await seed_professional(db, tenant, "Dr. Beto")
+    await _set_buffer(db, new_doctor, 30)
+
+    async def _calendar_for(_session, _tenant, owner):
+        return local_agenda(tenant.id, owner.professional_id)
+
+    monkeypatch.setattr(service_change, "calendar_for_appointment", _calendar_for)
+    expected = {"professional_id": str(old_doctor.id)}
+
+    async def move(start, event_id, patient_id=None):
+        row_id, patient_id = await _patient_row(db, tenant, new_doctor, start, event_id, patient_id)
+        async with db() as session:
+            row = await session.get(Appointment, row_id)
+            await service_change._move_event_to_new_agenda(
+                session, await session.get(Tenant, tenant.id), row, expected,
+                patient_name="Rui", log={}, buffer_for_patient=True,
+            )
+            return row.google_event_id, patient_id
+
+    start = tomorrow_at(10)
+    new_event, patient_id = await move(start, "loc_old_event_1")
+    assert new_event != "loc_old_event_1"  # re-pointed to the new doctor's event: not refused
+    assert await local_agenda(tenant.id, new_doctor.id).has_conflict(
+        start, start + timedelta(minutes=30)
+    )
+    # 10:30 is right next to the visit just placed: inside the new doctor's buffer, refused.
+    with pytest.raises(CalendarSlotTakenError):
+        await move(tomorrow_at(10, 30), "loc_old_event_2", patient_id)

@@ -76,6 +76,19 @@ agendamento que está sendo movido nunca engorda a si mesmo. Recusa na confirma�
   "Alterar dados" (`appointment_edit_flow._slot_free`, `_availability`, `_apply_confirm`) e troca de serviço
   paga (`service_change.sync_agenda_event(buffer_for_patient=True)`, só quando a troca é do paciente).
 - Nunca na agenda da clínica: `api/hub/*`, `services/staff_appointment_edit.py` e a troca de origem `hub`.
+- `services/release_keep.py` ("Manter", recriar um horário liberado) fica de fora: a clínica aprova ou recusa o
+  pedido, então é o lado da clínica (decisão do controlador R40).
+- A ferramenta v1 `check_availability` só devolve ocupação (sem folga); quem aplica a folga nas ferramentas
+  v1 é a lista de horários e a reconferência de `create_event*` na hora de gravar.
+- Troca de médico paga do paciente: a linha da consulta já traz o médico novo e a janela nova (e ainda o id do
+  evento antigo), então `_move_event_to_new_agenda` a ignora pelo id do evento antigo e ela não engorda a si mesma.
+- As janelas de consulta são lidas para o dono da agenda (`professional_id` do calendário). Em toda clínica de
+  vários médicos `resolve_professional_calendar` monta cada calendário com o `professional_id` do médico (mesmo sem
+  credencial própria), e numa clínica de um médico só `load_tenant_config` + `from_tenant_config` dão a ele a
+  agenda; não existe médico agendando na agenda "da clínica" (dono None). Testes com a resolução real em
+  `tests/test_booking_buffer_paths.py`. Linhas antigas sem `professional_id` não entram na folga de ninguém.
+- `flow_replaces_appointment_id` ("Marcar outra") não tem mais quem o preencha em `src` (só é carregado e
+  limpo), então não há "consulta substituída" a ignorar na folga.
 
 ## Pendências
 
