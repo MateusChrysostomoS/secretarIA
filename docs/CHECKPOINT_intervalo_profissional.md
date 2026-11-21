@@ -97,7 +97,10 @@ agendamento que está sendo movido nunca engorda a si mesmo. Recusa na confirma�
   mantido); (3) a migração `f9a1d7c4e2b6` perdeu o BOM, ganhou "Create Date" e a ordem de deploy (migração antes da
   API e do worker) e o downgrade passa por `batch_alter_table`.
 - `flow_replaces_appointment_id` ("Marcar outra") não tem mais quem o preencha em `src` (só é carregado e
-  limpo), então não há "consulta substituída" a ignorar na folga.
+  limpo). Revisão C (2026-11-21, `7df52eb`): se uma conversa antiga ainda trouxer a marca, a consulta substituída
+  fica fora da própria folga no roteador (lista de dias, de horários e reconferência final) e na promoção do
+  código; os caminhos fora do roteador (rascunho da IA, re-oferta da promoção, sentinelas) ainda aplicam a folga
+  em volta dela (lado seguro: menos horários, nunca encaixe duplo).
 
 ## Pendências
 
