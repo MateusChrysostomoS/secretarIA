@@ -145,6 +145,29 @@ e para na primeira pergunta aberta: `pra quem → serviço → médico → unida
 - **Pouso legado** (chave da IA v2 desligada, `workers/shared/sentinels.py`): rascunho só com seleção em clínica de vários
   médicos → catálogo da clínica, ou os médicos do serviço já escolhido; serviço sem médico → lista de médicos do serviço
   (antes: menu / `missing_professional`). O Particular dito agora é mantido; o resto passa por `particular_survives`.
+- **Devoluções da IA (revisão final):** `ai/tools.py::_slot_taken_hand_back` (horário tomado/dentro do intervalo na hora de
+  gravar) devolve o rascunho **sem** convênio — o resolvedor lê o guardado com `named_now=False`, então um Particular
+  automático não vira "dito agora". `workers/shared/sentinels.py::_handle_select_professional` (escolher médico, chave v2
+  desligada) abre a lista de serviços do médico e por isso aplica `particular_survives(..., opens_choice=True)`.
+
+## Agenda do médico escolhido no mesmo toque (re-execução no worker)
+
+Sem o cartão do serviço, um toque que **escolhe o médico** (catálogo com um só médico que faz o serviço, médico da lista
+"quem faz este serviço") vai direto à lista de dias **no mesmo turno**. O worker resolve a agenda do turno **antes** do
+roteador, pelo médico já gravado (`workers/shared/llm_context.py::_flow_turn_calendar`): sem médico gravado, é a agenda da
+clínica — horários, ocupados, dono dos holds e do intervalo errados.
+
+- O roteador continua puro: `_ask_day` marca no resultado `FlowRouterResult.agenda_owner_id` (nunca gravado) quando chegou a
+  `enter_day_picker` — dias, calendário, "sem dias" ou "agenda indisponível".
+- `flow_router.calendar_owner_changed(conversation, result)`: dono marcado, diferente do médico gravado, e o turno não começou
+  num passo de ajuda com IA ("Não sei"). Então `workers/shared/flow_runner.py::_run_flow` resolve a agenda daquele médico como
+  o próximo turno resolveria (`resolve_professional_calendar`, linha ativa da própria clínica) e roda `route()` **uma vez**
+  de novo com o mesmo retrato, mensagem e portão (log `flow_turn_rerun_on_picked_doctor_calendar`, só ids). Nunca duas
+  chamadas de IA no mesmo turno; turnos de gerenciar consulta não trocam de agenda; rascunho estacionado é retomado depois da
+  re-execução. Falha ao resolver a agenda, ou a re-execução levantar erro (`worker_picked_doctor_rerun_failed`, tipo do erro
+  + ids) → roda com agenda nenhuma = "agenda indisponível" (atendente), nunca a IA no lugar.
+- O simulador da configuração (`workers/shared/flow_simulation.py::simulate_turn`) faz o mesmo com `calendar_for(médico)`.
+- Custo: o primeiro `route()` lê a agenda da clínica à toa nesses toques (latência, sem efeito colateral).
 
 ## Remarcação (R19, `appointment_edit_flow.py`)
 
@@ -194,8 +217,9 @@ dinheiro; a descrição pode ter 2000. O caminho da IA segue mandando a mensagem
 - Só para **novo agendamento** em `awaiting_confirmation` sem consulta gerenciada (cartão de remarcação/edição não é isto).
   Repasse de sinal pago pendente (`release_offer.carry_over_pending`, consultado depois da prévia): sem linhas de sinal; o
   cartão fica com a linha "Valor" do roteador.
-- Limite conhecido: a ajuda "Não sei" gera uma frase livre do modelo; sem preço nos dados, ela não tem número para citar, mas
-  um texto do modelo não é garantia formal.
+- Limite conhecido: a ajuda "Não sei" gera uma frase livre do modelo; sem preço nos dados, ela não tem número para citar, e as
+  regras dela (`ai/scoped_help.py::_SCOPED_RULES`) dizem "não informe valores; o valor aparece na confirmação final" — mas um
+  texto do modelo não é garantia formal.
 
 ## Conversas paradas no deploy (compatibilidade)
 
