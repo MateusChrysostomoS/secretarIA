@@ -17,7 +17,7 @@ Fronteira: folga de exatamente N minutos é aceita; menos que N tira o horário 
 Conta:
 
 - linha de `appointments` viva (`LIVE_APPOINTMENT_STATUSES`, e não suspensa por troca aguardando Pix:
-  `occupies_slot_clause`) **com paciente**, que não seja `appointment_type = "Bloqueado"`, do profissional da
+  `occupies_slot_clause`) que não seja `appointment_type = "Bloqueado"` (consulta marcada pela recepção só com nome/telefone, sem cadastro de paciente, também conta: achado da prova no navegador da sessão C, 2026-11-21), do profissional da
   agenda (ou, na agenda própria da clínica, as linhas sem profissional) **ou de qualquer irmão dele na agenda
   compartilhada** (mesma pessoa em outras clínicas, TASK-083: a folga é da pessoa);
 - janelas seguradas (`holds`) que o chamador passa (Pix em andamento de outra conversa).

@@ -241,14 +241,15 @@ async def consultation_windows(
     """Windows of the CONSULTATIONS of one agenda that overlap `[start, end)`; sorted, deduped.
 
     A consultation is a LIVE appointment row (`LIVE_APPOINTMENT_STATUSES`, not suspended by a
-    pending change: `occupies_slot_clause`) WITH a patient and not a block. Whose: the
-    professional's own rows at `tenant_id` (`professional_id` None = the clinic's own rows,
-    those without a professional) plus every SIBLING's row on the same agenda, at any clinic
+    pending change: `occupies_slot_clause`) that is not a block, whether or not the patient has a
+    record (a phone-only booking typed by reception, `patient_id` None, is a consultation).
+    Whose: the professional's own rows at `tenant_id` (`professional_id` None = the clinic's own
+    rows, those without a professional) plus every SIBLING's row on the same agenda, at any clinic
     (`sibling_professional_ids`): the buffer belongs to the person, not to the clinic. A
     sibling's live payment-phase HOLD (a Pix being paid at the other clinic) counts too.
 
     What is NOT a consultation, on purpose (designer decision 2: when the two cannot be told
-    apart, offer LESS padding): blocks (no patient / `BLOCK_APPOINTMENT_TYPE`), all-day and
+    apart, offer LESS padding): blocks (`BLOCK_APPOINTMENT_TYPE`), all-day and
     transparent events, and any calendar event with no appointment row (typed straight into
     Google, a local event nobody booked). `ignore_event_id` drops the row whose
     `google_event_id` is it: the booking being moved never pads itself.
@@ -268,7 +269,6 @@ async def consultation_windows(
     query = select(Appointment.start_at, Appointment.end_at).where(
         owner,
         Appointment.status.in_(LIVE_APPOINTMENT_STATUSES),
-        Appointment.patient_id.is_not(None),
         or_(
             Appointment.appointment_type.is_(None),
             Appointment.appointment_type != BLOCK_APPOINTMENT_TYPE,

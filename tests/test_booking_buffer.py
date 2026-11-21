@@ -3,8 +3,9 @@
 
 `Professional.buffer_minutes` = N: a patient is only OFFERED (and only allowed to CONFIRM) a
 time that leaves N free minutes before and after each CONSULTATION of that professional - a
-consultation being a live appointment WITH a patient, plus the windows other conversations
-are holding. Blocks, all-day events and events with no appointment row are not padded
+consultation being a live appointment that is not a block (patient record or not), plus the
+windows other conversations are holding. Blocks, all-day events and events with no appointment
+row are not padded
 (designer decision 2: when consultation and block cannot be told apart, offer LESS padding).
 
 The core rule lives in services/availability.py; the DB-backed read of the consultation
