@@ -72,6 +72,13 @@ UNIT_LIST_SECTION = "Unidades"
 # `unit|<uuid>` is a payload row (schemas/webhook.py::_PAYLOAD_ROW_PREFIXES): the tap arrives
 # as "<title> (<uuid>)", so the 24-char title is never the lookup key.
 ROW_UNIT_PREFIX = "unit|"
+ROW_UNIT_PARTICULAR_PREFIX = "unitpart|"
+ROW_UNIT_MORE_PREFIX = "unitmore|"
+LABEL_UNITS_WITH_INSURANCE = "Unidades c/ convênio"
+LABEL_CONTINUE_PARTICULAR = "Seguir particular"
+LABEL_MORE_UNITS = "Ver mais unidades"
+UNIT_INSURANCE_NONE = "Nessa unidade não há convênio para esse serviço."
+UNIT_INSURANCE_REFUSED = "Nessa unidade esse convênio não é aceito para o serviço."
 # WhatsApp lists hold 10 rows; one is the back row.
 MAX_UNIT_ROWS = 9
 
@@ -505,11 +512,28 @@ def unit_rows(units: list) -> list[tuple[str, str, str | None]]:
     return rows
 
 
+def insurance_unit_rows(
+    alternatives: list[tuple[Any, list[dict]]],
+) -> list[tuple[str, str, str]]:
+    """Unit list rows with the plans accepted in each unit on the current page."""
+    rows = []
+    for unit, plans in alternatives:
+        names = ", ".join(plan["name"] for plan in plans)
+        rows.append(
+            (
+                f"{ROW_UNIT_PREFIX}{unit.id}",
+                truncate_list_row_title(str(unit.name)),
+                truncate_list_row_title(f"Convênios: {names}", MAX_LIST_ROW_DESCRIPTION_CHARS),
+            )
+        )
+    return rows
+
+
 def _key(text: str | None) -> str:
     return strip_decoration(text).casefold()
 
 
-def match_unit(units: list, body: str | None) -> Any | None:
+def match_unit(units: list, body: str | None, *, strict_payload: bool = False) -> Any | None:
     """A tapped (embedded uuid) or typed (full or 24-char name) unit, or None."""
     if not body:
         return None
@@ -521,7 +545,7 @@ def match_unit(units: list, body: str | None) -> Any | None:
         tapped = None
     if tapped is not None:
         found = next((unit for unit in units if unit.id == tapped), None)
-        if found is not None:
+        if found is not None or (strict_payload and payload is not None):
             return found
     target = _key(_TRAILING_PAYLOAD.sub("", body))
     if not target:

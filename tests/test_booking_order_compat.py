@@ -452,9 +452,10 @@ async def test_back_from_day_goes_to_insurance_when_asked():
     assert plain.last.flow_step == fr.STEP_AWAITING_DAY
     assert _list(plain.last).rows[-1][1] == fu.LABEL_ANOTHER_UNIT
 
-    # Nothing accepted (the automatic Particular): there was no question to go back to.
+    # Nothing accepted at either unit (automatic Particular): no question to go back to.
     refused = _matrix(
-        "shared", ana, (ECO_ID, sul, UNIMED), (ECO_ID, sul, BRADESCO), (ECO_ID, sul, AMIL)
+        "shared", ana,
+        *((ECO_ID, unit, plan) for unit in (centro, sul) for plan in (UNIMED, BRADESCO, AMIL)),
     )
     auto = _Walk(_tenant("shared", refused, [ana]), [ana])
     await auto.to_unit_list(ana)
@@ -732,9 +733,10 @@ async def test_the_final_guard_with_nothing_accepted_goes_particular_and_asks_th
     centro, sul, _norte = m._units()
     ana = m._doctor(units=[centro, sul])
     doctors = [ana]
-    # The clinic stopped taking EVERY plan for the echo at Zona Sul while the patient booked.
+    # The clinic stopped taking every plan at both units while the patient booked.
     refused = m._matrix(
-        "shared", ana, (m.ECO_ID, sul, m.UNIMED), (m.ECO_ID, sul, m.BRADESCO)
+        "shared", ana,
+        *((m.ECO_ID, unit, plan) for unit in (centro, sul) for plan in (m.UNIMED, m.BRADESCO)),
     )
     tenant = m._tenant("shared", refused, doctors)
     result = await fr.route(
@@ -751,7 +753,7 @@ async def test_the_final_guard_with_nothing_accepted_goes_particular_and_asks_th
     assert result.flow_step == fr.STEP_AWAITING_DAY
     assert result.flow_selected_insurance == fr.LABEL_INSURANCE_PARTICULAR
     assert result.flow_selected_unit_id == sul.id
-    assert fr.INSURANCE_NONE_ACCEPTED_UNIT in _list(result).body
+    assert fr.INSURANCE_REFUSED_PARTICULAR_UNIT in _list(result).body
 
 
 async def test_the_not_accepted_card_change_insurance_with_nothing_accepted_goes_particular():

@@ -896,13 +896,14 @@ async def _land_day(
         unit,
         unit_asked=choice.kind in ("list", "confirm"),
     )
-    if gate.ask is not None:
+    question = gate.ask or gate.offer_units
+    if question is not None:
         # The answer that was refused (or none yet) is not kept behind the question: the parked
         # draft holds no convênio, and the patient's answer is what resumes it.
         checked.insurance = None
         state.flow_selected_insurance = None
         state.flow_insurance_auto = None
-        return ask(gate.ask, *(name for name in base if name != FIELD_INSURANCE))
+        return ask(question, *(name for name in base if name != FIELD_INSURANCE))
     notice = gate.notice if gate.particular else None
     if gate.particular:
         # Nothing accepted for the combination: recorded as Particular, so the appointment is.

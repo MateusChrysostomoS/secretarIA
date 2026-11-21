@@ -177,6 +177,7 @@ def test_the_draft_wait_steps_are_pra_quem_plus_the_booking_questions():
     assert fr.DRAFT_WAIT_STEPS == (
         *fr.ATTENDEE_STEPS,
         fr.STEP_AWAITING_INSURANCE,
+        fr.STEP_AWAITING_NO_PLAN_AT_UNIT,
         fr.STEP_AWAITING_PROFESSIONAL,
         fr.STEP_AWAITING_SERVICE,
         fr.STEP_AWAITING_CATALOG_SERVICE,

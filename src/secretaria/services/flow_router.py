@@ -406,6 +406,7 @@ STEP_AWAITING_PROFESSIONAL = "awaiting_professional"
 STEP_AWAITING_SERVICE = "awaiting_service"
 STEP_AWAITING_SERVICE_CONFIRM = "awaiting_service_confirm"
 STEP_AWAITING_INSURANCE = "awaiting_insurance"
+STEP_AWAITING_NO_PLAN_AT_UNIT = "awaiting_no_plan_at_unit"
 STEP_AWAITING_DAY = "awaiting_day"
 STEP_AWAITING_SLOT = "awaiting_slot"
 STEP_AWAITING_CONFIRMATION = "awaiting_confirmation"
@@ -441,6 +442,7 @@ STEP_AWAITING_SERVICE_PROFESSIONAL = "awaiting_service_professional"
 DRAFT_WAIT_STEPS = (
     *ATTENDEE_STEPS,
     STEP_AWAITING_INSURANCE,
+    STEP_AWAITING_NO_PLAN_AT_UNIT,
     STEP_AWAITING_PROFESSIONAL,
     STEP_AWAITING_SERVICE,
     STEP_AWAITING_CATALOG_SERVICE,
@@ -4112,11 +4114,55 @@ def _day_back_target(
 
 @dataclass
 class _InsuranceGate:
-    """What the day step does about the convênio: nothing, ask the list, or go Particular."""
+    """What to ask next, or whether to assign Particular and open the days."""
 
     ask: FlowRouterResult | None = None
+    offer_units: FlowRouterResult | None = None
     particular: bool = False
     notice: str | None = None
+
+
+def _insurance_alternative_units(
+    tenant: Tenant, professional: Any, entry: dict, origin: Any
+) -> list[tuple[Any, list[dict]]]:
+    """Other bookable units for this service and doctor, with their accepted plans."""
+    service_id = entry_service_id(entry)
+    alternatives = []
+    for unit in flow_units.units_for_service(professional, service_id):
+        if unit.id == origin.id:
+            continue
+        plans = _accepted_plans(tenant, professional, entry, unit)
+        if plans:
+            alternatives.append((unit, plans))
+    return alternatives
+
+
+def _enter_no_plan_at_unit(
+    conversation: Conversation, unit: Any, *, refused_known: bool, prefix: str | None = None
+) -> FlowRouterResult:
+    notice = (
+        flow_units.UNIT_INSURANCE_REFUSED if refused_known else flow_units.UNIT_INSURANCE_NONE
+    )
+    fields = _day_branch_fields(conversation, BOOKING_DAY_BRANCH)
+    fields.update(
+        flow_selected_unit_id=unit.id, flow_selected_insurance=None, flow_insurance_auto=None
+    )
+    bubbles = [TextBubble(body=prefix)] if prefix else []
+    bubbles.append(
+        ButtonBubble(
+            body=f"{notice} Você pode ver outras unidades ou seguir como particular aqui.",
+            confirm_label=flow_units.LABEL_UNITS_WITH_INSURANCE,
+            cancel_label=flow_units.LABEL_CONTINUE_PARTICULAR,
+        )
+    )
+    return FlowRouterResult(
+        action="reply",
+        bubbles=bubbles,
+        flow_state=FlowState.SERVICE_CATALOG,
+        flow_step=STEP_AWAITING_NO_PLAN_AT_UNIT,
+        insurance_dropped=True,
+        **fields,
+    )
 
 
 def _insurance_gate(
@@ -4134,8 +4180,8 @@ def _insurance_gate(
     Only where the clinic collects it (`_insurance_step_skip_reason`). The combination is
     (service, doctor, unit); the plans it accepts are `plans_accepted_for`.
 
-    * no answer yet: some accepted -> the filtered list; NONE accepted -> Particular, no
-      question, with ONE short line (`INSURANCE_NONE_ACCEPTED*`) before the days;
+    * no answer yet: some accepted -> the filtered list; NONE accepted -> offer other units
+      if they accept plans, otherwise Particular with a short line before the days;
     * an answer already there (an AI draft, a parked chat): Particular, a typed plan or a
       plan the combination accepts is kept and the days open; a plan it refuses is NEVER
       swapped for Particular in silence - the filtered list with a line on top, or, with
@@ -4155,15 +4201,30 @@ def _insurance_gate(
     known = _selected_insurance(conversation)
     accepted = _accepted_plans(tenant, professional, entry, unit)
     refused_known = False
+    # Only describe the absence of confirmed plans at a unit the patient actually chose.
+    where_unit = unit is not None and unit_asked
     if known:
         plan = _selected_plan(tenant, known)
-        if plan is None or any(str(each.get("id")) == str(plan["id"]) for each in accepted):
+        if plan is None:
+            # Unlisted plans are kept on the ordinary path. At a chosen unit
+            # without confirmed plans, offer the alternatives without claiming
+            # that the clinic explicitly refused the patient's unlisted plan.
+            if accepted or not where_unit or _label_match(known, LABEL_INSURANCE_PARTICULAR):
+                return _InsuranceGate()
+        elif any(str(each.get("id")) == str(plan["id"]) for each in accepted):
             return _InsuranceGate()
-        refused_known = True
-    # "Nessa unidade" only when the patient saw/chose the unit (a list or a Sim/Não); an
-    # implied one is never named.
-    where_unit = unit is not None and unit_asked
+        else:
+            refused_known = True
     if not accepted:
+        if where_unit and entry is not None and (alternatives := _insurance_alternative_units(
+            tenant, professional, entry, unit
+        )):
+            logger.info("insurance_step_units_offered", other_units_with_plans=len(alternatives))
+            return _InsuranceGate(
+                offer_units=_enter_no_plan_at_unit(
+                    conversation, unit, refused_known=refused_known, prefix=prefix
+                )
+            )
         logger.info(
             "insurance_step_particular_direct",
             conversation_id=str(getattr(conversation, "id", None)),
@@ -4527,9 +4588,13 @@ async def _catalog_step(
     day_check = _service_day_check(booking_owner, service_entry, booking_unit)
     back_target = _day_back_target(tenant, booking_owner, service_entry, booking_unit, unit_choice)
 
+    if step == STEP_AWAITING_NO_PLAN_AT_UNIT:
+        return await _handle_unit_insurance_choice(
+            conversation, tenant, unscoped_calendar, body, services, professionals
+        )
     if step == flow_units.STEP_AWAITING_UNIT:
         return await _handle_unit_step(
-            conversation, tenant, calendar, body, services, professionals
+            conversation, tenant, unscoped_calendar, body, services, professionals
         )
     if step == flow_units.STEP_AWAITING_UNIT_CONFIRM:
         return await _handle_unit_confirm_step(
@@ -5752,6 +5817,8 @@ async def _ask_day(
     )
     if gate.ask is not None:
         return gate.ask
+    if gate.offer_units is not None:
+        return gate.offer_units
     if gate.notice:
         prefix = f"{prefix} {gate.notice}" if prefix else gate.notice
     result = await enter_day_picker(
@@ -6447,6 +6514,102 @@ def _enter_unit_list(
     )
 
 
+def _enter_insurance_unit_list(
+    conversation: Conversation, alternatives: list[tuple[Any, list[dict]]], *, page: int = 0
+) -> FlowRouterResult:
+    """Keep the original unit behind the list so Particular still books there."""
+    items, next_page = catalog_page(alternatives, page, fixed_rows=2)
+    origin = flow_units.selected_unit_id(conversation)
+    rows = [
+        *flow_units.insurance_unit_rows(items),
+        *catalog_more_row(flow_units.ROW_UNIT_MORE_PREFIX, flow_units.LABEL_MORE_UNITS, next_page),
+        (f"{flow_units.ROW_UNIT_PARTICULAR_PREFIX}{origin}", flow_units.LABEL_CONTINUE_PARTICULAR),
+        (f"{ROW_DAY_BACK_PREFIX}{BACK_TARGET_SERVICE}", LABEL_ANOTHER_SERVICE),
+    ]
+    return FlowRouterResult(
+        action="reply",
+        bubbles=[
+            SlotsBubble(
+                body="Estas unidades aceitam convênio para o serviço com o profissional escolhido:",
+                rows=rows,
+                button_label=flow_units.UNIT_LIST_BUTTON,
+                section_title=flow_units.UNIT_LIST_SECTION,
+            )
+        ],
+        flow_state=FlowState.SERVICE_CATALOG,
+        flow_step=flow_units.STEP_AWAITING_UNIT,
+        **_day_branch_fields(conversation, BOOKING_DAY_BRANCH),
+    )
+
+
+async def _handle_unit_insurance_choice(
+    conversation: Conversation,
+    tenant: Tenant,
+    calendar: CalendarService | None,
+    body: str | None,
+    services: list[dict],
+    professionals: list | None,
+) -> FlowRouterResult:
+    """Route the no-plan card and the filtered unit list, rechecking the current roster."""
+    browsing = conversation.flow_step == flow_units.STEP_AWAITING_UNIT
+    owner = _booking_professional(conversation, professionals)
+    entry = _booking_service_entry(conversation, tenant, services, owner)
+    if entry is None:
+        result = _handle_day_back(
+            conversation, tenant, services, professionals, BACK_TARGET_SERVICE
+        )
+        result.flow_selected_type = None
+        result.bubbles.insert(0, TextBubble(body="O serviço escolhido não está mais disponível."))
+        return result
+    service_id = entry_service_id(entry)
+    origin = flow_units.find_unit(owner, flow_units.selected_unit_id(conversation), service_id)
+    if origin is None:
+        state = _state_at_booking_unit(conversation, None)
+        result = await _ask_day(
+            state, tenant, calendar, services, professionals, prefix=flow_units.UNIT_GONE_NOTICE
+        )
+        result.unit_dropped = result.flow_selected_unit_id is None
+        return result
+
+    if _control_match(body, flow_units.LABEL_CONTINUE_PARTICULAR) and _row_payload(body) in (
+        None, str(origin.id)
+    ):
+        return await _continue_at_booking_unit(
+            conversation, tenant, calendar, services, professionals, origin.id, particular=True
+        )
+    if browsing and _is_day_back(body, BACK_TARGET_SERVICE):
+        return _handle_day_back(conversation, tenant, services, professionals, BACK_TARGET_SERVICE)
+
+    if (
+        _insurance_step_skip_reason(tenant) is not None
+        or _accepted_plans(tenant, owner, entry, origin)
+        or not (alternatives := _insurance_alternative_units(tenant, owner, entry, origin))
+    ):
+        result = await _ask_day(conversation, tenant, calendar, services, professionals)
+        if result.flow_step in _BOOKING_DAY_STEPS:
+            return _resume_parked_draft(conversation, result)
+        return result
+
+    if not browsing:
+        if _label_match(body, flow_units.LABEL_UNITS_WITH_INSURANCE):
+            return _enter_insurance_unit_list(conversation, alternatives)
+        if body is None:
+            return _enter_no_plan_at_unit(conversation, origin, refused_known=False)
+        return _preserve(conversation, "delegate_llm")
+
+    page = catalog_more_page(body, flow_units.LABEL_MORE_UNITS)
+    if body is None or page is not None:
+        return _enter_insurance_unit_list(conversation, alternatives, page=page or 0)
+    unit = flow_units.match_unit([unit for unit, _ in alternatives], body, strict_payload=True)
+    if unit is not None:
+        return await _continue_at_booking_unit(
+            conversation, tenant, calendar, services, professionals, unit.id
+        )
+    if _row_payload(body) is not None:
+        return _enter_insurance_unit_list(conversation, alternatives)
+    return _preserve(conversation, "delegate_llm")
+
+
 async def _handle_unit_step(
     conversation: Conversation,
     tenant: Tenant,
@@ -6459,6 +6622,11 @@ async def _handle_unit_step(
     that unit's day picker (back row to the units) - TASK-088: `_ask_day` decides.
 
     Only the units that do the booking's service are accepted (follow-up §6.1)."""
+    # The ordinary list clears the unit. A saved unit here belongs to the alternatives list.
+    if flow_units.selected_unit_id(conversation) is not None:
+        return await _handle_unit_insurance_choice(
+            conversation, tenant, calendar, body, services, professionals
+        )
     owner = _booking_professional(conversation, professionals)
     choice = _booking_unit_choice(conversation, tenant, services, owner)
     units = choice.units
@@ -6480,15 +6648,40 @@ async def _handle_unit_step(
         conversation_id=str(getattr(conversation, "id", None)),
         unit_count=len(units),
     )
-    state = _DayPickerState(
+    return await _continue_at_booking_unit(
+        conversation, tenant, calendar, services, professionals, unit.id
+    )
+
+
+def _state_at_booking_unit(
+    conversation: Conversation, unit_id: UUID | None, *, particular: bool = False
+) -> _DayPickerState:
+    return _DayPickerState(
         id=getattr(conversation, "id", None),
         flow_selected_type=conversation.flow_selected_type,
         flow_selected_professional_id=_selected_professional_id(conversation),
-        flow_selected_insurance=_selected_insurance(conversation),
-        flow_insurance_auto=getattr(conversation, "flow_insurance_auto", None),
+        flow_selected_insurance=(
+            LABEL_INSURANCE_PARTICULAR if particular else _selected_insurance(conversation)
+        ),
+        flow_insurance_auto=(
+            False if particular else getattr(conversation, "flow_insurance_auto", None)
+        ),
         flow_attendee_name=_attendee_name(conversation),
-        flow_selected_unit_id=unit.id,
+        flow_selected_unit_id=unit_id,
     )
+
+
+async def _continue_at_booking_unit(
+    conversation: Conversation,
+    tenant: Tenant,
+    calendar: CalendarService | None,
+    services: list[dict],
+    professionals: list | None,
+    unit_id: UUID,
+    *,
+    particular: bool = False,
+) -> FlowRouterResult:
+    state = _state_at_booking_unit(conversation, unit_id, particular=particular)
     # The pick is in `state`, not on the conversation yet: `_ask_day` reads it from there, asks
     # the convênio for (service, doctor, THIS unit) when the clinic collects it, and otherwise
     # opens the unit's days (TASK-087: its hours, minus the service's blocked days THERE).
@@ -6497,7 +6690,7 @@ async def _handle_unit_step(
         conversation,
         await _ask_day_after_choice(
             state, tenant, calendar, services, professionals,
-            changed=unit.id != flow_units.selected_unit_id(conversation),
+            changed=unit_id != flow_units.selected_unit_id(conversation),
             announce_unit=True,
         ),
     )
@@ -6921,14 +7114,14 @@ async def _booking_insurance_refusal(
         )[:MAX_INTERACTIVE_BODY_CHARS]
         return result
     # TASK-088: the same decision the booking made the first time (`_insurance_gate`, through
-    # `_ask_day`) - the list of what is accepted now, or, when nothing is, Particular with its
-    # line and the days. Never a list that holds only Particular. The unit is kept (it was
-    # chosen before the convênio); the day and time are asked again.
+    # `_ask_day`). Keep the unit and the refused answer so the next question can explain
+    # the refusal. The day and time are asked again when the patient makes a choice.
     result = await _ask_day(
         _DayPickerState(
             id=getattr(conversation, "id", None),
             flow_selected_type=conversation.flow_selected_type,
             flow_selected_professional_id=_selected_professional_id(conversation),
+            flow_selected_insurance=insurance,
             flow_attendee_name=_attendee_name(conversation),
             flow_selected_unit_id=getattr(unit, "id", None),
         ),
@@ -8628,6 +8821,13 @@ async def _resume_bubbles(
     # TASK-083: the chosen unit's agenda; the unit list again when it was being asked.
     booking_owner = _booking_professional(conversation, professionals)
     booking_unit = _booking_unit(conversation, tenant, services, booking_owner)
+    if step == STEP_AWAITING_NO_PLAN_AT_UNIT or (
+        step == flow_units.STEP_AWAITING_UNIT
+        and flow_units.selected_unit_id(conversation) is not None
+    ):
+        return await _handle_unit_insurance_choice(
+            conversation, tenant, calendar, None, services, professionals
+        )
     if step in UNIT_KEEP_STEPS and _automatic_insurance_unit_changed(conversation, booking_unit):
         return await _ask_day(conversation, tenant, calendar, services, professionals)
     # TASK-087: and without the service's blocked days at that unit.

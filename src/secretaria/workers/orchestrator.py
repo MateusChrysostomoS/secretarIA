@@ -173,6 +173,7 @@ from secretaria.workers.shared.dispatch import (
     _send_name_question,
     _send_plain_reply,
 )
+from secretaria.workers.shared.draft_resolution import _resume_booking_draft, _turn_booking_gate
 from secretaria.workers.shared.flow_runner import (
     _apply_flow_result,
     _run_flow,
@@ -1262,6 +1263,9 @@ async def _send_bot_reply_inner(reply: _ReplyContext, redis=None) -> None:
             result = await resume_bubbles(
                 conv_snapshot, tenant_snapshot, calendar, professionals=flow_professionals
             )
+            if result.resume_draft and tenant is not None:
+                gate = _turn_booking_gate(reply, tenant, redis=redis)
+                result = await _resume_booking_draft(reply, tenant, result, gate=gate)
             if await _apply_flow_result(
                 reply, result, patient_wa, redis=redis, tenant=tenant, waba_token=waba_token
             ):

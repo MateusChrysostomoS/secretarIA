@@ -419,7 +419,8 @@ async def test_zero_accepted_goes_particular_direct_with_notice():
     ana = _doctor(units=[centro, sul])
     doctors = [ana]
     refused = _matrix(
-        "shared", ana, (ECO_ID, sul, UNIMED), (ECO_ID, sul, BRADESCO), (ECO_ID, sul, AMIL)
+        "shared", ana,
+        *((ECO_ID, unit, plan) for unit in (centro, sul) for plan in (UNIMED, BRADESCO, AMIL)),
     )
     walk = _Walk(_tenant("shared", refused, doctors), doctors)
     await walk.to_unit_list(ana)
@@ -440,8 +441,11 @@ async def test_zero_accepted_goes_particular_direct_with_notice():
     # The log never names a plan.
     assert not any(name in repr(logs) for name in SEEN_PLANS)
 
-    # The same doctor at the unit that does accept: asked as usual.
-    centro_walk = _Walk(_tenant("shared", refused, doctors), doctors)
+    # If Centro accepts plans, choosing it still opens its convênio picker.
+    only_sul_refused = _matrix(
+        "shared", ana, *((ECO_ID, sul, plan) for plan in (UNIMED, BRADESCO, AMIL))
+    )
+    centro_walk = _Walk(_tenant("shared", only_sul_refused, doctors), doctors)
     await centro_walk.to_unit_list(ana)
     await centro_walk.tap(f"unit|{centro.id}")
     assert centro_walk.last.flow_step == fr.STEP_AWAITING_INSURANCE
@@ -467,7 +471,8 @@ async def test_particular_recorded_when_none_accepted():
     ana = _doctor(units=[centro, sul])
     doctors = [ana]
     refused = _matrix(
-        "shared", ana, (ECO_ID, sul, UNIMED), (ECO_ID, sul, BRADESCO), (ECO_ID, sul, AMIL)
+        "shared", ana,
+        *((ECO_ID, unit, plan) for unit in (centro, sul) for plan in (UNIMED, BRADESCO, AMIL)),
     )
     walk = _Walk(_tenant("shared", refused, doctors), doctors)
     await walk.to_unit_list(ana)
@@ -688,7 +693,8 @@ async def test_back_after_auto_particular_asks_the_convenio_at_an_accepting_unit
     ana = _doctor(units=[centro, sul])
     doctors = [ana]
     refused = _matrix(
-        "shared", ana, (ECO_ID, sul, UNIMED), (ECO_ID, sul, BRADESCO), (ECO_ID, sul, AMIL)
+        "shared", ana,
+        *((ECO_ID, unit, plan) for unit in (centro, sul) for plan in (UNIMED, BRADESCO, AMIL)),
     )
     walk = _Walk(_tenant("shared", refused, doctors), doctors)
     await walk.to_unit_list(ana)
@@ -697,6 +703,10 @@ async def test_back_after_auto_particular_asks_the_convenio_at_an_accepting_unit
     back = _list(walk.last).rows[-1]
     # Nothing was accepted, so no question was asked: the days go back to the unit list.
     assert back[1] == fu.LABEL_ANOTHER_UNIT
+    # Centro starts accepting plans while the patient is still in the booking.
+    walk.tenant.insurance_refused = _matrix(
+        "shared", ana, *((ECO_ID, sul, plan) for plan in (UNIMED, BRADESCO, AMIL))
+    )
     await walk.tap(back[0])
     assert walk.last.flow_step == fu.STEP_AWAITING_UNIT
     assert walk.last.flow_selected_insurance is None  # the automatic answer is gone
