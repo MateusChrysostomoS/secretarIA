@@ -86,13 +86,14 @@ _SERVICES = [
 ]
 
 
-def test_char_b5_options_block_is_todays():
+def test_char_b5_options_block_has_no_money():
+    # TASK-088 R38: name and description only - the price the entry carries is not shown.
     assert _service_options_block(_SERVICES) == (
-        "- Primeira Consulta — R$ 250 — Avaliação completa.\n- Retorno"
+        "- Primeira Consulta — Avaliação completa.\n- Retorno"
     )
-    assert "- Primeira Consulta — R$ 250 — Avaliação completa." in _service_help_prompt(
-        _SERVICES, False
-    )
+    prompt = _service_help_prompt(_SERVICES, False)
+    assert "- Primeira Consulta — Avaliação completa." in prompt
+    assert "R$" not in prompt
 
 
 # ============================================================== shared roster snapshot shape
@@ -159,23 +160,13 @@ def test_b4_the_flag_is_an_allowlisted_output_key():
     assert undeclared_keys("get_service_info", {"preco_depende_da_unidade": True}) == []
 
 
-def test_b5_options_block_follows_d3_on_the_professionals_snapshot():
-    from secretaria.services.service_terms import UnitTerms
-
-    sede, centro = _unit("Sede"), _unit("Centro")
-    differs = _doctor([sede, centro], {SID: {centro.id: UnitTerms("R$ 250,00", None)}})
-    same = _doctor([sede, centro], {SID: {centro.id: UnitTerms("200", 40)}})
-    only = _doctor([centro], {SID: {centro.id: UnitTerms("R$ 250,00", None)}})
+def test_b5_options_block_never_has_money_nor_the_price_depends_sentence():
+    # TASK-088 R38 ("valor só no fim"): whatever the entries carry, the block is money-free and
+    # never says "o valor depende da unidade" (that told the model to say the price later).
     services = [ENTRY, {"name": "Retorno", "price": "R$ 90"}]
-    assert _service_options_block(services, differs) == (
-        f"- Consulta — {HIDDEN_TEXT}\n- Retorno — R$ 90"
-    )
-    assert _service_options_block(services, same) == "- Consulta — R$ 200,00\n- Retorno — R$ 90"
-    assert _service_options_block(services, only) == "- Consulta — R$ 250,00\n- Retorno — R$ 90"
-    # A snapshot without any per-unit value: today's block, byte for byte.
-    assert _service_options_block(services, _doctor([sede, centro])) == _service_options_block(
-        services
-    )
+    block = _service_options_block(services)
+    assert block == "- Consulta\n- Retorno"
+    assert "R$" not in block and "valor depende" not in block
 
 
 def test_a13_cannot_tell_the_service_means_no_price_never_a_wrong_one():

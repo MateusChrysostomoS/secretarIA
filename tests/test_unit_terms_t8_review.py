@@ -643,22 +643,23 @@ async def _help_block(db, monkeypatch, w, *, unit=None) -> str:
 
 
 @pytest.mark.asyncio
-async def test_c_scoped_help_before_the_unit_keeps_d3(db, monkeypatch):
+async def test_c_scoped_help_before_the_unit_has_no_money(db, monkeypatch):
     w = await base._world(db, exceptions=SEDE_200_CENTRO_250)
     block = await _help_block(db, monkeypatch, w)
-    assert block.startswith("- Consulta — valor depende da unidade escolhida")
-    assert "R$" not in block
+    assert block.startswith("- Consulta")
+    assert "R$" not in block and "valor depende" not in block
 
 
 @pytest.mark.asyncio
-async def test_c_scoped_help_after_the_unit_says_that_units_price(db, monkeypatch):
+async def test_c_scoped_help_after_the_unit_has_no_money_either(db, monkeypatch):
+    # TASK-088 R38, through the REAL `run_service_help` prompt builder (no fake of it): whatever
+    # the unit chosen - and even when the entry handed in carries a price - the options block the
+    # model reads has no "R$" and no "valor depende" sentence.
     w = await base._world(db, exceptions=SEDE_200_CENTRO_250)
-    assert (await _help_block(db, monkeypatch, w, unit=w.centro)).startswith(
-        "- Consulta — R$ 250,00"
-    )
-    assert (await _help_block(db, monkeypatch, w, unit=w.sede)).startswith(
-        "- Consulta — R$ 200,00"
-    )
+    for unit in (None, w.centro, w.sede):
+        block = await _help_block(db, monkeypatch, w, unit=unit)
+        assert block.startswith("- Consulta")
+        assert "R$" not in block and "valor depende" not in block
 
 
 # ========================================== M3: one rule for "na Unidade X" (never doubled)

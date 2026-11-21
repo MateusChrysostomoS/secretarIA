@@ -66,7 +66,8 @@ def test_professional_prompt_lists_only_real_options():
 
 def test_service_prompt_lists_only_real_options_and_final_rule():
     prompt = _service_help_prompt(_services(), final_round=True)
-    assert "Primeira Consulta — R$ 250 — Avaliação completa." in prompt
+    assert "Primeira Consulta — Avaliação completa." in prompt  # TASK-088 R38: no price
+    assert "R$" not in prompt
     assert "- Retorno" in prompt
     assert "serviço" in prompt.lower()
     assert "ÚLTIMA troca" in prompt

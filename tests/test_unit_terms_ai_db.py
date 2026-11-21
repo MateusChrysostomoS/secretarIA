@@ -320,12 +320,13 @@ async def _help_prompt(db, monkeypatch, w: World, *, selected: Professional | No
 
 
 @pytest.mark.asyncio
-async def test_char_b5_scoped_help_block_is_todays(db, monkeypatch):
+async def test_char_b5_scoped_help_block_has_no_money(db, monkeypatch):
+    # TASK-088 R38: the real help prompt lists the service without its price.
     prompt = await _help_prompt(db, monkeypatch, await _world(db))
-    assert "Serviços disponíveis (os ÚNICOS que existem):\n- Consulta — R$ 200,00\n\n" in prompt
+    assert "Serviços disponíveis (os ÚNICOS que existem):\n- Consulta\n\n" in prompt
     w = await _world(db, second=True)
     prompt = await _help_prompt(db, monkeypatch, w, selected=w.bia)
-    assert "- Consulta — R$ 300,00\n" in prompt
+    assert "- Consulta\n" in prompt and "R$" not in prompt
 
 
 # =================================================================== A11 get_availability
@@ -535,15 +536,17 @@ async def test_b4_with_the_unit_states_that_units_price_and_duration(db, monkeyp
 async def test_b5_scoped_help_never_shows_a_price_that_differs(db, monkeypatch):
     prompt = await _help_prompt(db, monkeypatch, await _world(db, exceptions=SEDE_200_CENTRO_250))
     block = prompt.split("Serviços disponíveis (os ÚNICOS que existem):\n")[1].split("\n\n")[0]
-    assert block.startswith("- Consulta — valor depende da unidade escolhida")
-    assert "R$" not in block
+    # R38: not even the "valor depende da unidade" sentence - money is said only at the end.
+    assert block == "- Consulta"
+    assert "R$" not in block and "valor depende" not in block
 
 
 @pytest.mark.asyncio
-async def test_b5_scoped_help_one_unit_shows_its_price(db, monkeypatch):
+async def test_b5_scoped_help_one_unit_shows_no_price_either(db, monkeypatch):
     w = await _world(db, units=("Centro",), exceptions={"Centro": ("R$ 250,00", None)})
     prompt = await _help_prompt(db, monkeypatch, w)
-    assert "\n- Consulta — R$ 250,00\n" in prompt
+    assert "\n- Consulta\n" in prompt
+    assert "R$" not in prompt and "valor depende" not in prompt
 
 
 @pytest.mark.asyncio

@@ -113,9 +113,6 @@ ALLOWLIST: dict[tuple[str, str], str] = {
     ("ai/prompts.py", "_format_appointment_types"): (
         "formats RuntimeAppointmentType, already D3-resolved by tenant_config"
     ),
-    ("ai/scoped_help.py", "_service_price"): (
-        "no exception -> base; else entry_shown_terms (D3 sentence, never a number)"
-    ),
     ("ai/tools.py", "get_service_info"): (
         "RuntimeAppointmentType (resolved) first, then overridden by the chosen unit's terms"
     ),
