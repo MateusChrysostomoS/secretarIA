@@ -66,6 +66,7 @@ import httpx
 from sqlalchemy import func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from secretaria.core.database import async_session_factory
 from secretaria.core.logging import get_logger
 from secretaria.models import (
     LIVE_APPOINTMENT_STATUSES,
@@ -3254,7 +3255,10 @@ async def _inside_patient_buffer(
     The doctor is the row's own (the one whose agenda `calendar` is); `event_id` - the booking
     being moved - never pads itself; other conversations' held windows count. No buffer: False
     with no further read. FAIL-OPEN like every confirm recheck: a doctor that cannot be read means
-    no padding (logged with the error type only).
+    no padding (logged with the error type only). The doctor is read in its OWN short session
+    (like `workers/shared/booking_hold.py::_held_buffer_rule`): a failed statement aborts the
+    Postgres transaction it ran in, and the caller's still has to write the calendar and the
+    attention item - so `session` is never touched here.
     """
     from secretaria.services.availability import booking_buffer_minutes, buffer_taken_at_confirm
 
@@ -3262,7 +3266,8 @@ async def _inside_patient_buffer(
     if professional_id is None:
         return False
     try:
-        professional = await session.get(Professional, professional_id)
+        async with async_session_factory() as own_session:
+            professional = await own_session.get(Professional, professional_id)
         minutes = booking_buffer_minutes(
             professional if getattr(professional, "tenant_id", tenant.id) == tenant.id else None
         )

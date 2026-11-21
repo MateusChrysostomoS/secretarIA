@@ -619,8 +619,16 @@ async def test_promotion_recheck_respects_buffer(monkeypatch):
 
 
 class _Session:
+    """Stands in for the doctor read's own session (`service_change.async_session_factory`)."""
+
     def __init__(self, professional):
         self.professional = professional
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *_exc):
+        return False
 
     async def get(self, _model, _key):
         return self.professional
@@ -643,6 +651,10 @@ async def test_service_change_agenda_write_respects_buffer_only_for_the_patient(
     monkeypatch.setattr(service_change.booking_hold, "held_windows", _no_windows)
     monkeypatch.setattr(service_change.unit_booking, "booking_unit_fields", _no_fields)
     updates: list = []
+    doctor_session = _Session(_doctor(30))
+    monkeypatch.setattr(
+        service_change, "async_session_factory", lambda: doctor_session, raising=False
+    )
 
     class _Cal(_Agenda):
         async def update_event_details(self, event_id, start, end, summary, description="", **_):
@@ -655,7 +667,7 @@ async def test_service_change_agenda_write_respects_buffer_only_for_the_patient(
         insurance=None, attendee_name=None, unit_id=None, professional_id=uuid4(),
     )
     tenant = SimpleNamespace(id=uuid4())
-    session = _Session(_doctor(30))
+    session = SimpleNamespace()  # the caller's transaction: never read for the buffer
     visit = [(*_win("08:30"), "evt-other")]
 
     with pytest.raises(CalendarSlotTakenError):
@@ -824,6 +836,8 @@ async def test_paid_doctor_change_row_does_not_pad_its_own_new_window(db, monkey
 
     wire_local_agenda(monkeypatch, db)
     monkeypatch.setattr(booking_hold, "async_session_factory", db)
+    # The doctor's buffer is read in `_inside_patient_buffer`'s own short session.
+    monkeypatch.setattr(service_change, "async_session_factory", db, raising=False)
     tenant = await seed_tenant(db)
     old_doctor = await seed_professional(db, tenant, "Dra. Ana")
     new_doctor = await seed_professional(db, tenant, "Dr. Beto")

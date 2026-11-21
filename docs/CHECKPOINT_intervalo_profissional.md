@@ -90,6 +90,12 @@ agendamento que está sendo movido nunca engorda a si mesmo. Recusa na confirma�
   credencial própria), e numa clínica de um médico só `load_tenant_config` + `from_tenant_config` dão a ele a
   agenda; não existe médico agendando na agenda "da clínica" (dono None). Testes com a resolução real em
   `tests/test_booking_buffer_paths.py`. Linhas antigas sem `professional_id` não entram na folga de ninguém.
+- Revisão C (TASK-088): (1) o Pix em andamento (hold de pagamento, ainda não expirado) num OUTRO consultório da
+  mesma pessoa agora também engorda, como uma consulta: `agenda.consultation_windows` soma esses holds dos irmãos
+  (só início/fim saem da consulta; hold de código e hold expirado não contam); (2) `_inside_patient_buffer` (troca
+  de serviço paga) lê o médico numa sessão própria e curta e nunca toca a transação de quem chamou (fail-open
+  mantido); (3) a migração `f9a1d7c4e2b6` perdeu o BOM, ganhou "Create Date" e a ordem de deploy (migração antes da
+  API e do worker) e o downgrade passa por `batch_alter_table`.
 - `flow_replaces_appointment_id` ("Marcar outra") não tem mais quem o preencha em `src` (só é carregado e
   limpo), então não há "consulta substituída" a ignorar na folga.
 

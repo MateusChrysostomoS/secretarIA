@@ -244,7 +244,8 @@ async def consultation_windows(
     pending change: `occupies_slot_clause`) WITH a patient and not a block. Whose: the
     professional's own rows at `tenant_id` (`professional_id` None = the clinic's own rows,
     those without a professional) plus every SIBLING's row on the same agenda, at any clinic
-    (`sibling_professional_ids`): the buffer belongs to the person, not to the clinic.
+    (`sibling_professional_ids`): the buffer belongs to the person, not to the clinic. A
+    sibling's live payment-phase HOLD (a Pix being paid at the other clinic) counts too.
 
     What is NOT a consultation, on purpose (designer decision 2: when the two cannot be told
     apart, offer LESS padding): blocks (no patient / `BLOCK_APPOINTMENT_TYPE`), all-day and
@@ -281,7 +282,22 @@ async def consultation_windows(
     if ignore_event_id:
         query = query.where(Appointment.google_event_id != ignore_event_id)
     rows = await session.execute(query)
-    return sorted({(_aware(s), _aware(e)) for s, e in rows.all()})
+    windows = {(_aware(s), _aware(e)) for s, e in rows.all()}
+    if siblings:
+        # A Pix being paid at the person's OTHER clinic is a consultation about to exist: it pads
+        # like one (the buffer is the person's). Bare windows only; this conversation's own hold
+        # is at its own clinic (the caller passes it) and never in this set.
+        holds = await session.execute(
+            select(BookingHold.start_at, BookingHold.end_at).where(
+                BookingHold.professional_id.in_(siblings),
+                BookingHold.phase == BLOCKING_PHASE,
+                BookingHold.expires_at > datetime.now(UTC),
+                BookingHold.start_at < end,
+                BookingHold.end_at > start,
+            )
+        )
+        windows.update((_aware(s), _aware(e)) for s, e in holds.all())
+    return sorted(windows)
 
 
 async def read_consultation_windows(
