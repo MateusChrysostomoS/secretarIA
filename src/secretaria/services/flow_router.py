@@ -2772,9 +2772,9 @@ def _attendee_step(
 def _start_booking(
     tenant: Tenant, professionals: list | None = None, *, insurance: str | None = None
 ) -> FlowRouterResult:
-    """The doctor-first way into a booking, kept for the callers that still hold one.
+    """The service list of a clinic with ONE active doctor (an empty roster lands here too).
 
-    TASK-088: only for a clinic with ONE active doctor, where it renders his own service list
+    TASK-088: only for a roster of one (or none), where it renders the doctor's own service list
     (decision recorded in docs/CHECKPOINT_convenio_catalogo.md: "show every doctor" over a roster
     of one is a list of one). Both callers - `_booking_entry` and the AI draft resolver
     (`booking_draft`) - send a multi-doctor clinic to the clinic's service catalog

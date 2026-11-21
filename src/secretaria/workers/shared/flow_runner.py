@@ -220,7 +220,21 @@ async def _run_flow(
                 conversation_id=str(reply.conversation_id),
                 professional_id=str(picked),
             )
-            result = await _route(await _picked_doctor_calendar(tenant, tenant_config, picked))
+            picked_calendar = await _picked_doctor_calendar(tenant, tenant_config, picked)
+            try:
+                result = await _route(picked_calendar)
+            except Exception as exc:  # noqa: BLE001 - degrade like a doctor with no calendar
+                # The re-run is NEW work (R41): a failed read on the doctor's agenda must not drop
+                # the whole turn - and the tap that picked the doctor - to the AI. Same degrade
+                # as a doctor whose calendar cannot be resolved: no calendar, which the router
+                # answers as "calendar unavailable" (never the clinic's agenda).
+                logger.warning(
+                    "worker_picked_doctor_rerun_failed",
+                    error_type=type(exc).__name__,
+                    conversation_id=str(reply.conversation_id),
+                    professional_id=str(picked),
+                )
+                result = await _route(None)
     except Exception as exc:
         logger.warning(
             "worker_flow_router_failed",

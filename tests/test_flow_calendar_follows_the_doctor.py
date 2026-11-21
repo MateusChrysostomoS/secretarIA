@@ -325,6 +325,26 @@ async def test_a_failed_calendar_resolution_degrades_like_the_next_turn(world, m
     assert result.action == "calendar_unavailable"
 
 
+async def test_a_failed_read_on_the_doctors_calendar_degrades_instead_of_dropping_the_turn(
+    world, monkeypatch
+):
+    """The calendar resolves, but the READ the re-run does on it fails (a session the worker could
+    not open, the agenda erroring): the turn must degrade like the next one would (no calendar
+    for the doctor -> "calendar unavailable"), never escape `_run_flow`'s router block and fall to
+    the AI with the patient's tap lost."""
+    ana = _doctor_a()
+    bruno = _doctor("Dr. Bruno", services=[s for s in _services() if s["name"] != CONSULTA])
+    await _seed_doctors(world, ana, bruno)
+
+    class _FailingAgenda(_Agenda):
+        async def list_available_days(self, *args, **kwargs):
+            raise RuntimeError("agenda read failed")
+
+    world.agendas[ana.id] = _FailingAgenda(open_days=(D2, D3), hours=(8, 10))
+    result = await _catalog_tap(world, [ana, bruno])
+    assert result.action == "calendar_unavailable"
+
+
 async def test_a_help_node_turn_is_never_run_twice(world, monkeypatch):
     # Documented choice (R41): a turn on a help step (it can call the LLM) is never re-run. It also
     # never needs to be: the service help is entered with the doctor already stored (the doctor's

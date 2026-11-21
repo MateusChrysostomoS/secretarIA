@@ -163,6 +163,14 @@ def wired(monkeypatch: pytest.MonkeyPatch, db):
     monkeypatch.setattr(workers_ns, "_appointment_calendar", _agenda_for)
     # The turn's own calendar (the route() half of an answer) is the same fake agenda.
     monkeypatch.setattr(workers_ns, "_flow_turn_calendar", lambda conv, config, cal: agenda)
+    # A turn that PICKS the doctor re-runs route() on that doctor's calendar (TASK-088 R41, worker
+    # `_picked_doctor_calendar`): that calendar is the same fake agenda, never a real LocalCalendar
+    # opening a session on the settings' database.
+
+    async def _doctor_calendar(session, tenant, professional, **kwargs):
+        return agenda
+
+    monkeypatch.setattr(workers_ns, "resolve_professional_calendar", _doctor_calendar)
     return db
 
 

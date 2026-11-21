@@ -106,7 +106,7 @@ class _Agenda:
         return slots
 
     async def list_available_days(self, start_day, days, slot_minutes=None, extra_busy=None):
-        """One scan. Like the real calendar, `extra_busy` is taken time that empties a day."""
+        """One scan. Like the real calendar, `busy`/`extra_busy` empty a day."""
         self.day_scans += 1
         first = start_day.date()
         length = timedelta(minutes=slot_minutes or 30)
@@ -114,7 +114,7 @@ class _Agenda:
             datetime(d.year, d.month, d.day, tzinfo=TZ)
             for d in self.open_days
             if first <= d < first + timedelta(days=days)
-            and (not extra_busy or self._walk(d, length, 1, extra_busy))
+            and self._walk(d, length, 1, extra_busy or ())
         ]
 
     async def list_free_slots(self, day, slot_minutes=None, max_slots=6):
