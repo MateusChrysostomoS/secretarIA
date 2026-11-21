@@ -43,6 +43,7 @@ from secretaria.services.flow_router import (
     main_menu_buttons,
     match_insurance_plan,
     menu_label,
+    particular_survives,
 )
 from secretaria.services.manage_request import (
     ACTION_RESCHEDULE,
@@ -756,7 +757,7 @@ async def _handle_start_guided_booking(
         # ORM rows: the day picker reads the unit's hours and blocked weekdays off it (P1).
         professionals=ctx.professionals,
         attendee_name=ctx.conversation.flow_attendee_name,
-        recorded_type=ctx.conversation.flow_selected_type,
+        recorded=ctx.conversation,
     )
     logger.info(
         "conversation_guided_booking_entered",
@@ -939,6 +940,14 @@ async def _legacy_booking_draft(
         # roster/catalog. Pra-quem is answered on this path (an unknown one goes to the
         # resolver), so the next list is the booking's own, never the question again.
         stored_type = canonical_service_name(fresh_services, stored_type)
+        # R30: every landing below opens a list - a stored "Particular" does not ride into it.
+        if not particular_survives(
+            tenant_snapshot,
+            insurance,
+            named_now=insurance_text is not None,
+            opens_choice=True,
+        ):
+            insurance = None
         if professional is not None:
             result = _enter_professional_services(
                 professional, tenant_snapshot, insurance=insurance
@@ -982,6 +991,16 @@ async def _legacy_booking_draft(
             _appointment_calendar_target({"professional_id": selected_id}, professional_rows),
         )
     appointment_type = canonical_type
+    # R30: the doctors of a service and a doctor's service list open a list - a stored
+    # "Particular" does not ride into them (the hand-back with a service judges it itself).
+    opens_list = is_multi and (professional is None or appointment_type is None)
+    if opens_list and not particular_survives(
+        tenant_snapshot,
+        insurance,
+        named_now=insurance_text is not None,
+        opens_choice=True,
+    ):
+        insurance = None
     if is_multi:
         if professional is None:
             # A service without a doctor on a multi-doctor clinic (TASK-088): the doctors of
@@ -1011,7 +1030,7 @@ async def _legacy_booking_draft(
                 ),
                 professionals=ctx.professionals,
                 attendee_name=attendee,
-                recorded_type=stored_type,
+                recorded=conversation,
             )
     else:
         # `ctx.professionals`, the router-shaped roster: see `_handle_start_guided_booking`.
@@ -1024,7 +1043,7 @@ async def _legacy_booking_draft(
             insurance=insurance,
             professionals=ctx.professionals,
             attendee_name=attendee,
-            recorded_type=stored_type,
+            recorded=conversation,
         )
     logger.info(
         "conversation_booking_draft_entered",

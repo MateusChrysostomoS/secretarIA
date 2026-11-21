@@ -3796,6 +3796,56 @@ def _enter_insurance(
     )
 
 
+def particular_survives(
+    tenant: Tenant,
+    insurance: str | None,
+    *,
+    named_now: bool = False,
+    recorded: Any | None = None,
+    professionals: list | None = None,
+    opens_choice: bool = False,
+    landing_type: str | None = None,
+    landing_owner: Any | None = None,
+    landing_unit: Any | None = None,
+) -> bool:
+    """R30 (TASK-088): does a STORED "Particular" survive a landing? THE one decision, used by the
+    AI draft resolver, the hand-back and every legacy AI landing.
+
+    A "Particular" can be the AUTOMATIC one - set because nothing was accepted at the
+    (service, doctor, unit) the conversation was at - so it is never carried to another
+    combination. It survives only when (a) the patient named it THIS turn (`named_now`: a draft
+    field filled now), or (b) the landing's (service, doctor, unit) are ALL equal to the triple
+    `recorded` (the conversation) holds. A landing that OPENS a choice list (the clinic catalog,
+    the doctors of a service, a doctor's service list, the unit list: `opens_choice`) never
+    survives it: the combination is about to be chosen anew and the gate re-sets Particular, with
+    its line, if nothing is accepted there. Anything that is not a stored Particular (a plan, no
+    answer, a clinic that does not collect the convênio) is left alone: True. A plan is kept and
+    re-judged by the gate, as ever."""
+    if (
+        _insurance_step_skip_reason(tenant) is not None
+        or not insurance
+        or not _label_match(insurance, LABEL_INSURANCE_PARTICULAR)
+        or named_now
+    ):
+        return True
+    recorded_type = getattr(recorded, "flow_selected_type", None)
+    if (
+        opens_choice
+        or recorded is None
+        or not landing_type
+        or not recorded_type
+        or recorded_type in (ATTENDEE_NEXT_BOOK, ATTENDEE_NEXT_CATALOG)
+        or _norm(recorded_type) != _norm(landing_type)
+    ):
+        return False
+    before = _booking_professional(recorded, professionals)
+    if getattr(before, "id", None) != getattr(landing_owner, "id", None):
+        return False
+    service_id = _booking_service_id(recorded, tenant, None, before)
+    unit = flow_units.effective_unit(recorded, before, service_id)
+    return getattr(unit, "id", None) == getattr(landing_unit, "id", None)
+
+
 def _accepted_plans(
     tenant: Tenant, professional: Any | None, entry: dict | None, unit: Any | None
 ) -> list:
@@ -6228,7 +6278,7 @@ async def enter_guided_booking(
     services: list[dict] | None = None,
     professionals: list | None = None,
     attendee_name: str | None = None,
-    recorded_type: str | None = None,
+    recorded: Any | None = None,
 ) -> FlowRouterResult:
     """LLM hand-back entry: resume the booking AFTER the service was chosen.
 
@@ -6253,12 +6303,12 @@ async def enter_guided_booking(
     An answer that already exists is checked against the combination like any other: kept when
     accepted, asked again (never swapped for Particular in silence) when not.
 
-    A STORED "Particular" (R29) may be the AUTOMATIC one - set because nothing was accepted at the
-    service / unit the booking was at. `recorded_type` is the service the conversation recorded
-    it at: it is kept only when this hand-back is for that same service AND the doctor has no unit
-    list still to choose from; otherwise it is dropped and the gate decides again at the service
-    and unit the booking reaches (with its line when nothing is accepted there). Cost accepted: a
-    patient who really chose Particular answers the list once more. A plan stays and is judged.
+    A STORED "Particular" (R29/R30) may be the AUTOMATIC one - set because nothing was accepted at
+    the (service, doctor, unit) the booking was at. `recorded` is the conversation as it stood: the
+    Particular survives only when this hand-back lands on that SAME triple with no unit list still
+    to choose from (`particular_survives`); otherwise it is dropped and the gate decides again at
+    the combination the booking reaches (with its line when nothing is accepted there). Cost
+    accepted: a patient who really chose Particular answers the list once more. A plan stays.
 
     Takes the conversation's state as plain arguments rather than a
     Conversation: the caller (workers/tasks.py::_handle_start_guided_booking)
@@ -6297,12 +6347,20 @@ async def enter_guided_booking(
     ):
         owner = _booking_professional(state, professionals)
         service_id = _booking_service_id(state, tenant, services, owner)
-        same_service = bool(appointment_type and recorded_type) and (
-            _norm(appointment_type) == _norm(recorded_type)
+        choice = flow_units.unit_choice(owner, service_id)
+        landing_unit = (
+            choice.units[0] if choice.kind in ("implied", "confirm") and choice.units else None
         )
-        if not same_service or flow_units.unit_choice(owner, service_id).kind == "list":
-            # Another service, or a unit still to be chosen: the Particular may be the AUTOMATIC
-            # one of what the patient left, so it is judged afresh where the booking lands.
+        if not particular_survives(
+            tenant,
+            insurance,
+            recorded=recorded,
+            professionals=professionals,
+            opens_choice=choice.kind == "list",
+            landing_type=appointment_type,
+            landing_owner=owner,
+            landing_unit=landing_unit,
+        ):
             state.flow_selected_insurance = None
     return _carry_booking(state, await _ask_day(state, tenant, calendar, services, professionals))
 

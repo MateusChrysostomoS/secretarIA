@@ -13,6 +13,7 @@ Router and resolver level: no database, no network.
 
 import datetime as dt
 import os
+from types import SimpleNamespace
 from uuid import uuid4
 
 os.environ.setdefault("APP_ENV", "test")
@@ -43,7 +44,9 @@ from tests.test_booking_draft_resume_questions import (  # noqa: E402
     _conversation,
     _hand_back,
     _onboard,
+    _professional,
     _seed_tenant,
+    _wa_turn,
     db as _db_fixture,
     wired as _wired_fixture,
 )
@@ -797,7 +800,11 @@ async def test_q1_handback_to_another_service_drops_a_stored_particular():
         "Consulta",
         insurance=stored,
         professionals=[ana],
-        recorded_type="Ecocardiograma",
+        recorded=SimpleNamespace(
+            flow_selected_type="Ecocardiograma",
+            flow_selected_professional_id=ana.id,
+            flow_selected_unit_id=centro.id,
+        ),
     )
     assert other.flow_step == fr.STEP_AWAITING_INSURANCE
     assert other.flow_selected_insurance is None
@@ -809,7 +816,11 @@ async def test_q1_handback_to_another_service_drops_a_stored_particular():
         "Ecocardiograma",
         insurance=stored,
         professionals=[ana],
-        recorded_type="Ecocardiograma",
+        recorded=SimpleNamespace(
+            flow_selected_type="Ecocardiograma",
+            flow_selected_professional_id=ana.id,
+            flow_selected_unit_id=centro.id,
+        ),
     )
     assert same.flow_step == fr.STEP_AWAITING_DAY
     assert same.flow_selected_insurance == fr.LABEL_INSURANCE_PARTICULAR
@@ -820,7 +831,11 @@ async def test_q1_handback_to_another_service_drops_a_stored_particular():
         "Consulta",
         insurance="Unimed",
         professionals=[ana],
-        recorded_type="Ecocardiograma",
+        recorded=SimpleNamespace(
+            flow_selected_type="Ecocardiograma",
+            flow_selected_professional_id=ana.id,
+            flow_selected_unit_id=centro.id,
+        ),
     )
     assert plan.flow_step == fr.STEP_AWAITING_DAY
     assert plan.flow_selected_insurance == "Unimed"
@@ -1017,3 +1032,209 @@ async def test_a_parked_draft_resumes_on_the_unit_pick_and_waits_on_the_convenio
     assert collecting.flow_step == fr.STEP_AWAITING_INSURANCE
     assert collecting.resume_draft is False
     assert collecting.flow_draft == parked  # still parked, on the convenio question
+
+
+
+# --------------------------------------------------------------------------
+# 9. Fix round 2 (R30): ONE helper decides whether a stored Particular survives a landing
+# --------------------------------------------------------------------------
+
+
+def _doc(name, *units):
+    return SimpleNamespace(
+        id=uuid4(),
+        name=name,
+        specialty=None,
+        about=None,
+        context_doctor_message=None,
+        appointment_types=[dict(entry) for entry in SERVICES],
+        business_hours={"thursday": [{"start": "08:00", "end": "12:00"}]},
+        units=list(units),
+        service_units={},
+    )
+
+
+def test_particular_survives_only_for_the_same_triple_or_when_named_now():
+    centro, sul = _unit("Centro"), _unit("Sul")
+    ana, bruno = _doc("Dra. Ana", centro), _doc("Dr. Bruno", sul)
+    tenant = _two_plans()
+    recorded = _conv(
+        flow_selected_type="Consulta",
+        flow_selected_professional_id=ana.id,
+        flow_selected_unit_id=centro.id,
+    )
+    particular = fr.LABEL_INSURANCE_PARTICULAR
+
+    def survives(**kw):
+        base = dict(
+            recorded=recorded,
+            professionals=[ana, bruno],
+            landing_type="Consulta",
+            landing_owner=ana,
+            landing_unit=centro,
+        )
+        base.update(kw)
+        return fr.particular_survives(tenant, particular, **base)
+
+    assert survives()  # (service, doctor, unit) all the recorded ones
+    assert not survives(landing_type="Retorno")
+    assert not survives(landing_owner=bruno, landing_unit=sul)
+    assert not survives(landing_unit=sul)
+    assert not survives(opens_choice=True)  # a list opens: the combination is chosen anew
+    assert not survives(recorded=None)
+    assert survives(named_now=True, landing_type="Retorno")  # the patient said it this turn
+    # Not a stored Particular: nothing to decide.
+    assert fr.particular_survives(tenant, "Unimed", opens_choice=True)
+    assert fr.particular_survives(tenant, None, opens_choice=True)
+    plain = _two_plans(collect_insurance=False, insurances=[], insurance_plans=[])
+    assert fr.particular_survives(plain, particular, opens_choice=True)
+
+
+async def test_p1_an_ai_draft_that_changes_doctor_and_unit_drops_a_stored_particular():
+    centro, sul = _unit("Centro"), _unit("Sul")
+    ana, bruno = _doc("Dra. Ana", centro), _doc("Dr. Bruno", sul)
+    refused = _refuse(
+        (str(CONSULTA), str(centro.id), PLAN), (str(CONSULTA), str(centro.id), PLAN_B)
+    )
+    tenant = _two_plans(refused)
+    conv = _conv(
+        flow_state=FlowState.LLM,
+        flow_selected_type="Consulta",
+        flow_selected_professional_id=ana.id,
+        flow_selected_unit_id=centro.id,
+        flow_selected_insurance=fr.LABEL_INSURANCE_PARTICULAR,  # automatic: Centro accepts nothing
+    )
+    moved = await _resolve(
+        BookingDraft(professional_id=bruno.id, day=DAY, time=TEN),
+        conv=conv,
+        tenant=tenant,
+        pros=[ana, bruno],
+    )
+    # Sul accepts both plans: asked, not the express card with a carried Particular.
+    assert moved.landing_step == fr.STEP_AWAITING_INSURANCE
+    assert moved.result.flow_selected_insurance is None
+
+    # The same doctor and unit: the stored answer stays.
+    same = await _resolve(
+        BookingDraft(professional_id=ana.id, day=DAY, time=TEN),
+        conv=conv,
+        tenant=tenant,
+        pros=[ana, bruno],
+    )
+    assert same.landing_step == fr.STEP_AWAITING_CONFIRMATION
+    assert same.result.flow_selected_insurance == fr.LABEL_INSURANCE_PARTICULAR
+
+
+async def test_p2_the_patients_own_particular_tap_resumes_without_asking_again():
+    centro, sul = _unit("Centro"), _unit("Sul")
+    sole = _doc("Dra. Única", centro, sul)
+    conv = _conv(
+        flow_state=FlowState.SERVICE_CATALOG,
+        flow_step=fr.STEP_AWAITING_INSURANCE,
+        flow_selected_type="Consulta",
+        flow_selected_unit_id=sul.id,
+        flow_selected_insurance=fr.LABEL_INSURANCE_PARTICULAR,
+    )
+    res = await _resolve(
+        BookingDraft(service="Consulta", day=DAY, time=TEN),
+        conv=conv,
+        tenant=_two_plans(),
+        pros=[sole],
+    )
+    assert res.landing_step == fr.STEP_AWAITING_CONFIRMATION
+    assert res.result.flow_selected_insurance == fr.LABEL_INSURANCE_PARTICULAR
+
+
+async def test_the_hand_back_compares_doctor_and_unit_too():
+    centro, sul = _units()
+    ana = _doctor(units=[centro])
+    refused = _matrix(
+        "shared", ana, (CONSULTA_ID, centro, UNIMED), (CONSULTA_ID, centro, BRADESCO),
+        (CONSULTA_ID, centro, AMIL),
+    )
+    tenant = _tenant("shared", refused, [ana])
+    recorded = SimpleNamespace(
+        flow_selected_type="Consulta",
+        flow_selected_professional_id=ana.id,
+        flow_selected_unit_id=centro.id,
+    )
+    kept = await fr.enter_guided_booking(
+        tenant,
+        _Agenda(),
+        "Consulta",
+        insurance=fr.LABEL_INSURANCE_PARTICULAR,
+        professionals=[ana],
+        recorded=recorded,
+    )
+    assert kept.flow_selected_insurance == fr.LABEL_INSURANCE_PARTICULAR
+    # The conversation was at another unit: not the recorded triple any more.
+    elsewhere = SimpleNamespace(
+        flow_selected_type="Consulta",
+        flow_selected_professional_id=ana.id,
+        flow_selected_unit_id=sul.id,
+    )
+    ana.units = [centro, sul]
+    moved = await fr.enter_guided_booking(
+        tenant,
+        _Agenda(),
+        "Consulta",
+        insurance=fr.LABEL_INSURANCE_PARTICULAR,
+        professionals=[ana],
+        recorded=elsewhere,
+    )
+    assert moved.flow_selected_insurance is None
+
+
+async def _legacy_with_stored_particular(wired):
+    tenant = await _seed_tenant(
+        wired,
+        collect=True,
+        doctors=[
+            ("Dra. Ana", ["Primeira Consulta", "Retorno"]),
+            ("Dr. Beto", ["Primeira Consulta", "Retorno"]),
+        ],
+    )
+    await _switch_off(wired, tenant)
+    await _onboard(tenant)
+    conv = await _conversation(wired, tenant)
+    async with wired() as session:
+        row = await session.get(Conversation, conv.id)
+        row.flow_attendee_name = ""
+        row.flow_state = FlowState.LLM
+        row.flow_step = None
+        row.flow_selected_type = "Retorno"
+        row.flow_selected_insurance = fr.LABEL_INSURANCE_PARTICULAR
+        await session.commit()
+    return tenant
+
+
+async def test_p4_legacy_service_without_doctor_drops_a_stored_particular(wired):
+    tenant = await _legacy_with_stored_particular(wired)
+    await _hand_back(wired, tenant, {"t": "Primeira Consulta"})
+    landed = await _conversation(wired, tenant)
+    assert landed.flow_step == fr.STEP_AWAITING_SERVICE_PROFESSIONAL
+    assert landed.flow_selected_insurance is None
+    await _wa_turn(tenant, "Dra. Ana")
+    await _wa_turn(tenant, fr.LABEL_BOOK_SERVICE)
+    # The question is asked - the old automatic answer did not ride along.
+    assert (await _conversation(wired, tenant)).flow_step == fr.STEP_AWAITING_INSURANCE
+
+
+async def test_legacy_selection_only_drops_a_stored_particular(wired):
+    tenant = await _legacy_with_stored_particular(wired)
+    await _hand_back(wired, tenant, {"i": None})
+    catalog = await _conversation(wired, tenant)
+    assert catalog.flow_step in (
+        fr.STEP_AWAITING_CATALOG_SERVICE,  # the clinic catalog (the stored service is not in it)
+        fr.STEP_AWAITING_SERVICE_PROFESSIONAL,  # or the doctors of the stored service
+    )
+    assert catalog.flow_selected_insurance is None
+
+
+async def test_legacy_doctor_only_drops_a_stored_particular(wired):
+    tenant = await _legacy_with_stored_particular(wired)
+    doctor = await _professional(wired, tenant, "Dra. Ana")
+    await _hand_back(wired, tenant, {"p": str(doctor.id)})
+    landed = await _conversation(wired, tenant)
+    assert landed.flow_step == fr.STEP_AWAITING_SERVICE
+    assert landed.flow_selected_insurance is None

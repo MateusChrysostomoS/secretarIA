@@ -641,35 +641,25 @@ async def _resolve(
         flow_selected_unit_id=getattr(conversation, "flow_selected_unit_id", None),
     )
 
-    # R29 (TASK-088 fix round 1): a STORED "Particular" (not one this draft names) may be the
-    # AUTOMATIC one - set because nothing was accepted at the service / unit the conversation
-    # was at. It survives only where the booking lands on that SAME service with no unit still
-    # to be chosen; anywhere else it is dropped and the gate decides again (with its line when
-    # nothing is accepted there). A convênio PLAN the patient chose is kept and judged.
-    if (
-        draft.insurance is None
-        and checked.insurance is not None
-        and fr._insurance_step_skip_reason(tenant) is None
-        and fr._label_match(checked.insurance, fr.LABEL_INSURANCE_PARTICULAR)
-    ):
-        recorded = _recorded_service(conversation)
-        same_service = (
-            recorded is not None
-            and checked.service is not None
-            and normalize_service_name(recorded)
-            == normalize_service_name(str(checked.service.get("name") or ""))
-        )
-        owner = fr._booking_professional(state, professionals)
-        service_id = fr._booking_service_id(
-            state, tenant, _booking_services(checked, tenant, service_catalog), owner
-        )
-        unit_to_choose = (
-            flow_units.unit_choice(owner, service_id).kind == "list"
-            and getattr(conversation, "flow_selected_unit_id", None) is None
-        )
-        if not same_service or unit_to_choose:
+    # R30: a landing that OPENS a list (the service step, the doctors of the service) never keeps a
+    # STORED Particular (`flow_router.particular_survives`); `_land_day` decides the rest once the
+    # unit settles.
+    def drop_particular_unless(survives: bool) -> None:
+        if not survives:
             checked.insurance = None
             state.flow_selected_insurance = None
+
+    if checked.service is None or (
+        (checked.multi or FIELD_PROFESSIONAL in checked.dropped) and checked.professional is None
+    ):
+        drop_particular_unless(
+            fr.particular_survives(
+                tenant,
+                checked.insurance,
+                named_now=draft.insurance is not None,
+                opens_choice=True,
+            )
+        )
 
     def done(result: FlowRouterResult, *names: str, fallback: str | None = None) -> DraftResolution:
         result = _carry(result, state)
@@ -771,6 +761,7 @@ async def _resolve(
         now=now,
         done=done,
         ask=asked,
+        drop_particular_unless=drop_particular_unless,
     )
 
 
@@ -876,6 +867,7 @@ async def _land_day(
     now: dt.datetime,
     done: Callable[..., DraftResolution],
     ask: Callable[..., DraftResolution],
+    drop_particular_unless: Callable[[bool], None],
 ) -> DraftResolution:
     """Steps 4-6: the unit, the convênio, then the day and the time - the day and the time
     re-derived from the FRESH agenda.
@@ -915,7 +907,23 @@ async def _land_day(
     service_id = fr._booking_service_id(state, tenant, services, owner)
     unit = flow_units.effective_unit(state, owner, service_id)
     state.flow_selected_unit_id = unit.id if unit is not None else None
-    if flow_units.offered_units(owner) and unit is None:
+    unit_question = bool(flow_units.offered_units(owner)) and unit is None
+    # R30: the unit question opens a list; once the unit settles the stored Particular survives
+    # only when (service, doctor, unit) are all the conversation's recorded ones.
+    drop_particular_unless(
+        fr.particular_survives(
+            tenant,
+            checked.insurance,
+            named_now=draft.insurance is not None,
+            recorded=conversation,
+            professionals=professionals,
+            opens_choice=unit_question,
+            landing_type=str((checked.service or {}).get("name") or ""),
+            landing_owner=owner,
+            landing_unit=unit,
+        )
+    )
+    if unit_question:
         result = await fr._ask_day(state, tenant, None, services, professionals)
         return ask(result, *base)
 
