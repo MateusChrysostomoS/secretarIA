@@ -1152,6 +1152,38 @@ EDIT_DAY_BRANCH = DayBranch(
 # Every step that the day branch owns, per branch — used by `_catalog_step` /
 # `_manage_step` to dispatch the retry/escape renders to the same handler.
 _BOOKING_DAY_STEPS = (STEP_AWAITING_DAY, STEP_AWAITING_DAY_RETRY, STEP_AWAITING_DAY_ESCAPE)
+
+# TASK-088 R41: the steps whose result was BUILT from the turn's calendar (the booking's day picker
+# family, the slot list, the confirmation's re-check) and the steps that can call the LLM (the
+# scoped help nodes). A tap that selects the doctor in the same turn goes straight to the days now
+# (no service card in between), so the worker hands `route()` the calendar of the doctor stored
+# BEFORE the turn - the clinic's - and re-runs it on the picked doctor's (`calendar_owner_changed`).
+CALENDAR_BOOKING_STEPS = (*_BOOKING_DAY_STEPS, STEP_AWAITING_SLOT, STEP_AWAITING_CONFIRMATION)
+LLM_HELP_STEPS = frozenset(
+    {
+        STEP_PROFESSIONAL_HELP,
+        STEP_PROFESSIONAL_HELP_FINAL,
+        STEP_SERVICE_HELP,
+        STEP_SERVICE_HELP_FINAL,
+    }
+)
+
+
+def calendar_owner_changed(conversation: Any, result: FlowRouterResult) -> bool:
+    """Whether `result` was drawn on another doctor's agenda than the one it now selects (R41).
+
+    True when the turn picked a DIFFERENT professional than the one the conversation had stored,
+    and the result is a step that consumed the calendar. Never for a turn that started on a help
+    step (it can call the LLM: it is not run twice - and it never needs to be, see the worker), nor
+    for a result that resumes a parked AI draft (the resolver builds its own agendas). Pure."""
+    picked = result.flow_selected_professional_id
+    return (
+        picked is not None
+        and picked != _selected_professional_id(conversation)
+        and result.flow_step in CALENDAR_BOOKING_STEPS
+        and getattr(conversation, "flow_step", None) not in LLM_HELP_STEPS
+        and not result.resume_draft
+    )
 _MANAGE_DAY_STEPS = (STEP_MANAGE_DAY, STEP_MANAGE_DAY_RETRY, STEP_MANAGE_DAY_ESCAPE)
 _EDIT_DAY_STEPS = (STEP_EDIT_DAY, STEP_EDIT_DAY_RETRY, STEP_EDIT_DAY_ESCAPE)
 

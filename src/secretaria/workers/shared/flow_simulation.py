@@ -28,7 +28,7 @@ from zoneinfo import ZoneInfo
 from secretaria.models import FlowState
 from secretaria.schemas.webhook import inbound_routing_text
 from secretaria.services.calendar import CalendarService
-from secretaria.services.flow_router import LABEL_BOOK, route
+from secretaria.services.flow_router import LABEL_BOOK, calendar_owner_changed, route
 from secretaria.workers.shared.bubbles import _bubble_history_body, _bubble_interactive
 
 SIMULATED_EVENT_ID = "simulation"
@@ -166,16 +166,23 @@ async def simulate_turn(
 
     conversation = _conversation(current)
     selected = current.get("flow_selected_professional_id")
-    result = await route(
-        conversation,
-        tenant,
-        calendar_for(selected),
-        inbound,
-        SIMULATION_PATIENT,
-        upcoming_appointments=[],
-        professionals=professionals,
-        gate=None,
-    )
+    async def _route(professional_id):
+        return await route(
+            conversation,
+            tenant,
+            calendar_for(professional_id),
+            inbound,
+            SIMULATION_PATIENT,
+            upcoming_appointments=[],
+            professionals=professionals,
+            gate=None,
+        )
+
+    result = await _route(selected)
+    if calendar_owner_changed(conversation, result):
+        # TASK-088 R41: the tap picked the doctor and went straight to the days - draw them on the
+        # PICKED doctor's agenda, as the real worker does (help steps never reach here).
+        result = await _route(str(result.flow_selected_professional_id))
     bubbles = [_render(b) for b in result.bubbles]
     finished = result.appointment is not None
     note = note_for(result.action, result.flow_step)
