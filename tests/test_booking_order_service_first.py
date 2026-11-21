@@ -177,6 +177,7 @@ class _Walk:
             flow_selected_slot=None,
             flow_selected_professional_id=None,
             flow_selected_insurance=None,
+            flow_insurance_auto=None,
             flow_selected_unit_id=None,
             flow_managing_appointment_id=None,
             flow_attendee_name=None,
@@ -209,6 +210,7 @@ class _Walk:
             flow_selected_slot=result.flow_selected_slot,
             flow_selected_professional_id=result.flow_selected_professional_id,
             flow_selected_insurance=result.flow_selected_insurance,
+            flow_insurance_auto=result.flow_insurance_auto,
             flow_selected_unit_id=result.flow_selected_unit_id,
             flow_attendee_name=result.flow_attendee_name,
         )
@@ -710,10 +712,8 @@ async def test_back_after_auto_particular_asks_the_convenio_at_an_accepting_unit
     ]
 
 
-async def test_back_through_the_convenio_list_after_a_chosen_particular_asks_again():
-    """TASK-088 R18: the days go back to the convenio list the patient was asked, the list goes
-    back to the unit list - and the answer given before is not carried behind the question: it is
-    asked again at the unit picked next (never silently kept, never silently changed)."""
+async def test_back_through_the_convenio_list_preserves_chosen_particular():
+    """Opening Trocar convênio and then going back does not change the answer."""
     centro, sul = _units()
     ana = _doctor(units=[centro, sul])
     doctors = [ana]
@@ -725,9 +725,12 @@ async def test_back_through_the_convenio_list_after_a_chosen_particular_asks_aga
     assert walk.last.flow_step == fr.STEP_AWAITING_INSURANCE
     await walk.tap(_list(walk.last).rows[-1][0])  # back from the list: the unit list
     assert walk.last.flow_step == fu.STEP_AWAITING_UNIT
-    assert walk.last.flow_selected_insurance is None
+    assert walk.last.flow_selected_insurance == fr.LABEL_INSURANCE_PARTICULAR
+    assert walk.last.flow_insurance_auto is False
     await walk.tap(f"unit|{centro.id}")
-    assert walk.last.flow_step == fr.STEP_AWAITING_INSURANCE
+    assert walk.last.flow_step == fr.STEP_AWAITING_DAY
+    assert walk.last.flow_selected_insurance == fr.LABEL_INSURANCE_PARTICULAR
+    assert walk.last.flow_insurance_auto is False
     assert walk.last.flow_selected_unit_id == centro.id
 
 

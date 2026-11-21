@@ -88,6 +88,7 @@ def _conversation_flow_snapshot(conversation: Conversation) -> SimpleNamespace:
         flow_selected_slot=conversation.flow_selected_slot,
         flow_selected_professional_id=conversation.flow_selected_professional_id,
         flow_selected_insurance=conversation.flow_selected_insurance,
+        flow_insurance_auto=getattr(conversation, "flow_insurance_auto", None),
         flow_selected_unit_id=conversation.flow_selected_unit_id,
         flow_managing_appointment_id=conversation.flow_managing_appointment_id,
         flow_attendee_name=conversation.flow_attendee_name,
@@ -313,8 +314,9 @@ async def _resume_booking_draft(
             # is accepted there) is NOT copied: the resolver decides it again, with its line.
             if result.flow_selected_unit_id is not None:
                 ctx.conversation.flow_selected_unit_id = result.flow_selected_unit_id
-        elif result.flow_selected_insurance is not None:
+        elif result.flow_selected_insurance is not None and result.flow_insurance_auto is not True:
             ctx.conversation.flow_selected_insurance = result.flow_selected_insurance
+            ctx.conversation.flow_insurance_auto = result.flow_insurance_auto
         resolution = await _resolve_draft(reply, tenant, draft, ctx, gate=gate)
     except Exception as exc:
         logger.warning(

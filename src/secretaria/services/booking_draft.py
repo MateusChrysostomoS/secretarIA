@@ -468,8 +468,7 @@ def _carry(result: FlowRouterResult, state: Any) -> FlowRouterResult:
     """
     if result.flow_state is not FlowState.SERVICE_CATALOG:
         return result
-    if result.flow_selected_insurance is None and result.flow_step != fr.STEP_AWAITING_INSURANCE:
-        result.flow_selected_insurance = state.flow_selected_insurance
+    fr._carry_insurance(state, result)
     if result.flow_step in fr.ATTENDEE_STEPS:
         return result
     if result.flow_selected_type is None:
@@ -573,6 +572,13 @@ async def _resolve(
         service_catalog=service_catalog,
         tenant_insurance=tenant_insurance,
     )
+    insurance_auto = None
+    if checked.insurance is not None:
+        insurance_auto = (
+            False
+            if draft.insurance is not None
+            else getattr(conversation, "flow_insurance_auto", None)
+        )
     state = fr._DayPickerState(
         id=getattr(conversation, "id", None),
         flow_selected_type=str(checked.service.get("name", "")) if checked.service else None,
@@ -580,19 +586,19 @@ async def _resolve(
             checked.professional.id if checked.multi and checked.professional is not None else None
         ),
         flow_selected_insurance=checked.insurance,
+        flow_insurance_auto=insurance_auto,
         flow_attendee_name=checked.attendee_name,
         # TASK-083: a unit already chosen in the buttons; `_land_day` keeps it only when it is
         # one the booking's doctor still offers (`flow_units.effective_unit`).
         flow_selected_unit_id=getattr(conversation, "flow_selected_unit_id", None),
     )
 
-    # R30: a landing that OPENS a list (the service step, the doctors of the service) never keeps a
-    # STORED Particular (`flow_router.particular_survives`); `_land_day` decides the rest once the
-    # unit settles.
+    # An automatic Particular is tied to the previous service, doctor and unit.
     def drop_particular_unless(survives: bool) -> None:
         if not survives:
             checked.insurance = None
             state.flow_selected_insurance = None
+            state.flow_insurance_auto = None
 
     if checked.service is None or (
         (checked.multi or FIELD_PROFESSIONAL in checked.dropped) and checked.professional is None
@@ -602,6 +608,7 @@ async def _resolve(
                 tenant,
                 checked.insurance,
                 named_now=draft.insurance is not None,
+                recorded=conversation,
                 opens_choice=True,
             )
         )
@@ -858,8 +865,7 @@ async def _land_day(
     unit = flow_units.effective_unit(state, owner, service_id)
     state.flow_selected_unit_id = unit.id if unit is not None else None
     unit_question = bool(flow_units.offered_units(owner)) and unit is None
-    # R30: the unit question opens a list; once the unit settles the stored Particular survives
-    # only when (service, doctor, unit) are all the conversation's recorded ones.
+    # Recheck an automatic Particular if the draft needs a unit or lands on a different combination.
     drop_particular_unless(
         fr.particular_survives(
             tenant,
@@ -895,11 +901,13 @@ async def _land_day(
         # draft holds no convênio, and the patient's answer is what resumes it.
         checked.insurance = None
         state.flow_selected_insurance = None
+        state.flow_insurance_auto = None
         return ask(gate.ask, *(name for name in base if name != FIELD_INSURANCE))
     notice = gate.notice if gate.particular else None
     if gate.particular:
         # Nothing accepted for the combination: recorded as Particular, so the appointment is.
         state.flow_selected_insurance = fr.LABEL_INSURANCE_PARTICULAR
+        state.flow_insurance_auto = True
         checked.insurance = fr.LABEL_INSURANCE_PARTICULAR
 
     details = _booking_details(

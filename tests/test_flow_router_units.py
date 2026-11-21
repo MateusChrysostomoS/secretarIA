@@ -546,6 +546,8 @@ async def test_the_portal_holds_the_slot_with_the_unit():
             flow_selected_day="2099-01-05",
             flow_selected_slot="2099-01-05T09:00",
             flow_selected_unit_id=centro.id,
+            flow_selected_insurance="Particular",
+            flow_insurance_auto=True,
         ),
         _tenant(),
         agenda,
@@ -556,6 +558,8 @@ async def test_the_portal_holds_the_slot_with_the_unit():
     )
     assert held.flow_state is FlowState.AWAITING_EMAIL_CODE
     assert held.booking_hold is not None
+    assert held.flow_selected_insurance == "Particular"
+    assert held.flow_insurance_auto is True
     assert gate.decided[0]["unit_id"] == centro.id
     assert agenda.log.created == []  # nothing written before the code
 

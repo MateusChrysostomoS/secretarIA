@@ -424,9 +424,10 @@ async def _handle_select_professional(
         )
         return
     insurance = ctx.conversation.flow_selected_insurance
-    # R30: the doctor's service list is a list to choose from - a stored "Particular" does not
-    # ride into it (the convênio gate re-sets it, with its line, if nothing is accepted there).
-    if not particular_survives(ctx.tenant_snapshot, insurance, opens_choice=True):
+    # The patient's own choice carries to the service list; an automatic one is rechecked.
+    if not particular_survives(
+        ctx.tenant_snapshot, insurance, recorded=ctx.conversation, opens_choice=True
+    ):
         insurance = None
     result = _enter_professional_services(
         professional,
@@ -439,6 +440,8 @@ async def _handle_select_professional(
     if result.flow_state == FlowState.SERVICE_CATALOG:
         result.flow_attendee_name = ctx.conversation.flow_attendee_name
         result.flow_selected_insurance = insurance
+        if insurance is not None:
+            result.flow_insurance_auto = getattr(ctx.conversation, "flow_insurance_auto", None)
     await _land_handback(
         reply,
         result,
@@ -939,17 +942,27 @@ async def _legacy_booking_draft(
             topology=topology,
         )
 
+    def carry_insurance(result: FlowRouterResult) -> None:
+        result.flow_selected_insurance = insurance
+        if insurance is not None:
+            result.flow_insurance_auto = (
+                False
+                if insurance_text is not None
+                else getattr(conversation, "flow_insurance_auto", None)
+            )
+
     if selection_only:
         # An unspecified service means administrative choices, never an inferred procedure
         # or a jump to availability. Stored selections are revalidated against the FRESH
         # roster/catalog. Pra-quem is answered on this path (an unknown one goes to the
         # resolver), so the next list is the booking's own, never the question again.
         stored_type = canonical_service_name(fresh_services, stored_type)
-        # R30: every landing below opens a list - a stored "Particular" does not ride into it.
+        # The list opens a new combination; only automatic Particular is rechecked.
         if not particular_survives(
             tenant_snapshot,
             insurance,
             named_now=insurance_text is not None,
+            recorded=conversation,
             opens_choice=True,
         ):
             insurance = None
@@ -973,7 +986,7 @@ async def _legacy_booking_draft(
         if result.flow_state != FlowState.SERVICE_CATALOG:
             await _menu(hb.FALLBACK_NO_BOOKABLE_CATALOG)
             return
-        result.flow_selected_insurance = insurance
+        carry_insurance(result)
         result.flow_attendee_name = attendee
         if result.flow_step not in ATTENDEE_STEPS:
             result.flow_selected_type = stored_type
@@ -996,13 +1009,13 @@ async def _legacy_booking_draft(
             _appointment_calendar_target({"professional_id": selected_id}, professional_rows),
         )
     appointment_type = canonical_type
-    # R30: the doctors of a service and a doctor's service list open a list - a stored
-    # "Particular" does not ride into them (the hand-back with a service judges it itself).
+    # Recheck automatic Particular if the patient still needs to choose a service or doctor.
     opens_list = is_multi and (professional is None or appointment_type is None)
     if opens_list and not particular_survives(
         tenant_snapshot,
         insurance,
         named_now=insurance_text is not None,
+        recorded=conversation,
         opens_choice=True,
     ):
         insurance = None
@@ -1013,14 +1026,14 @@ async def _legacy_booking_draft(
             result = _enter_service_professional_list(
                 tenant_snapshot, professional_rows, str(appointment_type), insurance=insurance
             )
-            result.flow_selected_insurance = insurance
+            carry_insurance(result)
             result.flow_attendee_name = attendee
         elif appointment_type is None:
             result = _enter_professional_services(
                 professional, tenant_snapshot, insurance=insurance
             )
             if result.flow_state == FlowState.SERVICE_CATALOG:
-                result.flow_selected_insurance = insurance
+                carry_insurance(result)
                 result.flow_attendee_name = attendee
         else:
             result = await enter_guided_booking(

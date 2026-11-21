@@ -284,6 +284,7 @@ async def _waived_booking_not_written(
             booking.get("professional_id") or result.flow_selected_professional_id
         ),
         flow_selected_insurance=booking.get("insurance") or result.flow_selected_insurance,
+        flow_insurance_auto=result.flow_insurance_auto,
         flow_attendee_name=booking.get("attendee_name") or result.flow_attendee_name,
     )
     logger.error(
@@ -407,6 +408,7 @@ async def _apply_flow_result(
                     conv.flow_selected_slot = result.flow_selected_slot
                     conv.flow_selected_professional_id = result.flow_selected_professional_id
                     conv.flow_selected_insurance = result.flow_selected_insurance
+                    conv.flow_insurance_auto = result.flow_insurance_auto
                     conv.flow_selected_unit_id = result.flow_selected_unit_id
                     conv.flow_managing_appointment_id = result.flow_managing_appointment_id
                     conv.flow_attendee_name = result.flow_attendee_name

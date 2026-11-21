@@ -42,6 +42,7 @@ STATE_FIELDS = (
     "flow_selected_slot",
     "flow_selected_professional_id",
     "flow_selected_insurance",
+    "flow_insurance_auto",
     "flow_managing_appointment_id",
     "flow_attendee_name",
 )

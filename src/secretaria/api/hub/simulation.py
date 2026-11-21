@@ -48,6 +48,7 @@ class SimulationState(BaseModel):
     flow_selected_slot: str | None = Field(default=None, max_length=64)
     flow_selected_professional_id: UUID | None = None
     flow_selected_insurance: str | None = Field(default=None, max_length=200)
+    flow_insurance_auto: bool | None = None
     flow_managing_appointment_id: UUID | None = None
     flow_attendee_name: str | None = Field(default=None, max_length=200)
 

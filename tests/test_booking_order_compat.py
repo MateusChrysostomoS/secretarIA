@@ -346,6 +346,7 @@ async def test_the_hand_back_rejudges_an_automatic_particular():
         "Consulta",
         insurance=fr.LABEL_INSURANCE_PARTICULAR,
         professionals=[ana],
+        recorded=SimpleNamespace(flow_insurance_auto=True),
     )
     # No unit chosen yet: the unit is asked; the Particular must not decide for the next unit.
     assert result.flow_step == fu.STEP_AWAITING_UNIT
@@ -800,6 +801,7 @@ async def test_q1_handback_to_another_service_drops_a_stored_particular():
         insurance=stored,
         professionals=[ana],
         recorded=SimpleNamespace(
+            flow_insurance_auto=True,
             flow_selected_type="Ecocardiograma",
             flow_selected_professional_id=ana.id,
             flow_selected_unit_id=centro.id,
@@ -816,6 +818,7 @@ async def test_q1_handback_to_another_service_drops_a_stored_particular():
         insurance=stored,
         professionals=[ana],
         recorded=SimpleNamespace(
+            flow_insurance_auto=True,
             flow_selected_type="Ecocardiograma",
             flow_selected_professional_id=ana.id,
             flow_selected_unit_id=centro.id,
@@ -851,6 +854,7 @@ async def test_q2_resolver_drops_a_stored_particular_for_another_service():
         flow_state=FlowState.LLM,
         flow_selected_type="Retorno",
         flow_selected_unit_id=centro.id,
+        flow_insurance_auto=True,
         flow_selected_insurance=fr.LABEL_INSURANCE_PARTICULAR,  # the automatic one of Retorno
     )
     res = await _resolve(
@@ -1050,7 +1054,7 @@ def _doc(name, *units):
     )
 
 
-def test_particular_survives_only_for_the_same_triple_or_when_named_now():
+def test_automatic_particular_survives_only_for_the_same_triple_or_when_named_now():
     centro, sul = _unit("Centro"), _unit("Sul")
     ana, bruno = _doc("Dra. Ana", centro), _doc("Dr. Bruno", sul)
     tenant = _two_plans()
@@ -1058,6 +1062,7 @@ def test_particular_survives_only_for_the_same_triple_or_when_named_now():
         flow_selected_type="Consulta",
         flow_selected_professional_id=ana.id,
         flow_selected_unit_id=centro.id,
+        flow_insurance_auto=True,
     )
     particular = fr.LABEL_INSURANCE_PARTICULAR
 
@@ -1077,7 +1082,7 @@ def test_particular_survives_only_for_the_same_triple_or_when_named_now():
     assert not survives(landing_owner=bruno, landing_unit=sul)
     assert not survives(landing_unit=sul)
     assert not survives(opens_choice=True)  # a list opens: the combination is chosen anew
-    assert not survives(recorded=None)
+    assert survives(recorded=None)
     assert survives(named_now=True, landing_type="Retorno")  # the patient said it this turn
     # Not a stored Particular: nothing to decide.
     assert fr.particular_survives(tenant, "Unimed", opens_choice=True)
@@ -1098,6 +1103,7 @@ async def test_p1_an_ai_draft_that_changes_doctor_and_unit_drops_a_stored_partic
         flow_selected_type="Consulta",
         flow_selected_professional_id=ana.id,
         flow_selected_unit_id=centro.id,
+        flow_insurance_auto=True,
         flow_selected_insurance=fr.LABEL_INSURANCE_PARTICULAR,  # automatic: Centro accepts nothing
     )
     moved = await _resolve(
@@ -1150,6 +1156,7 @@ async def test_the_hand_back_compares_doctor_and_unit_too():
     )
     tenant = _tenant("shared", refused, [ana])
     recorded = SimpleNamespace(
+        flow_insurance_auto=True,
         flow_selected_type="Consulta",
         flow_selected_professional_id=ana.id,
         flow_selected_unit_id=centro.id,
@@ -1165,6 +1172,7 @@ async def test_the_hand_back_compares_doctor_and_unit_too():
     assert kept.flow_selected_insurance == fr.LABEL_INSURANCE_PARTICULAR
     # The conversation was at another unit: not the recorded triple any more.
     elsewhere = SimpleNamespace(
+        flow_insurance_auto=True,
         flow_selected_type="Consulta",
         flow_selected_professional_id=ana.id,
         flow_selected_unit_id=sul.id,
@@ -1200,6 +1208,7 @@ async def _legacy_with_stored_particular(wired):
         row.flow_step = None
         row.flow_selected_type = "Retorno"
         row.flow_selected_insurance = fr.LABEL_INSURANCE_PARTICULAR
+        row.flow_insurance_auto = True
         await session.commit()
     return tenant
 
@@ -1310,6 +1319,7 @@ async def test_a_hand_back_named_now_and_a_clinic_without_a_catalog_keep_particu
     )
     tenant = _tenant("shared", refused, [ana])
     elsewhere = SimpleNamespace(
+        flow_insurance_auto=True,
         flow_selected_type="Ecocardiograma",
         flow_selected_professional_id=ana.id,
         flow_selected_unit_id=centro.id,

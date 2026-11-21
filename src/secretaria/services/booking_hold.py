@@ -37,7 +37,7 @@ asks brain-api to mail a code (`services/pending_identity.py::request_code`
 takes no address by design) and receives back at most a MASK.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Literal
 from uuid import UUID
@@ -46,7 +46,7 @@ from sqlalchemy import delete, or_, select, text, update
 
 from secretaria.core.database import async_session_factory
 from secretaria.core.logging import get_logger
-from secretaria.models import BookingHold, Conversation, Tenant
+from secretaria.models import BookingHold, Conversation, FlowState, Tenant
 from secretaria.services.patient_context import load_upcoming_appointments
 from secretaria.services.payments.failure_reason import FailureReason
 from secretaria.services.pending_identity import RequestCodeOutcome, request_code
@@ -110,6 +110,8 @@ class HeldSlot:
     unit_id: UUID | None = None
     # TASK-085 R: the `deposit_adjustments` row whose NEW window this hold guards (D-R4).
     adjustment_id: UUID | None = None
+    # Loaded from the waiting conversation with the same insurance answer (no hold column).
+    insurance_auto: bool | None = None
 
     @classmethod
     def of(cls, row: BookingHold) -> "HeldSlot":
@@ -235,12 +237,26 @@ async def latest_hold_in(session, conversation_id: UUID) -> HeldSlot | None:
     worker holds its own session factory (and its tests patch THAT symbol),
     while the gate runs from the router with no session in hand.
     """
-    row = await session.scalar(
-        select(BookingHold)
+    result = await session.execute(
+        select(BookingHold, Conversation.flow_insurance_auto)
+        .outerjoin(
+            Conversation,
+            (Conversation.id == BookingHold.conversation_id)
+            & (Conversation.tenant_id == BookingHold.tenant_id)
+            & (Conversation.flow_selected_insurance == BookingHold.insurance)
+            & Conversation.flow_state.in_(
+                (FlowState.AWAITING_EMAIL_CODE, FlowState.AWAITING_DEPOSIT)
+            ),
+        )
         .where(BookingHold.conversation_id == conversation_id)
         .order_by(BookingHold.created_at.desc())
+        .limit(1)
     )
-    return HeldSlot.of(row) if row is not None else None
+    match = result.first()
+    if match is None:
+        return None
+    hold, insurance_auto = match
+    return replace(HeldSlot.of(hold), insurance_auto=insurance_auto)
 
 
 async def conversation_has_live_charge(conversation_id: UUID) -> bool:

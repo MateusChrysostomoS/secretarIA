@@ -4,7 +4,16 @@ import enum
 import uuid
 from datetime import datetime
 
-from sqlalchemy import JSON, DateTime, Enum as SAEnum, ForeignKey, String, UniqueConstraint, func
+from sqlalchemy import (
+    JSON,
+    Boolean,
+    DateTime,
+    Enum as SAEnum,
+    ForeignKey,
+    String,
+    UniqueConstraint,
+    func,
+)
 from sqlalchemy.orm import Mapped, mapped_column
 
 from secretaria.core.database import Base
@@ -174,6 +183,8 @@ class Conversation(Base):
     # Appointment at booking time. Free text, not a FK — tenants.insurances is
     # a JSON list of plan names, there is no Insurance table.
     flow_selected_insurance: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    # True only if the booking gate selected Particular because no plans were accepted.
+    flow_insurance_auto: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     # TASK-083 spec §8: the unit the booking in progress happens at, when the chosen
     # professional attends at more than one (services/flow_router.py "awaiting_unit"). Copied
     # onto the hold / appointment / local event at booking time. NULL = no unit (every doctor

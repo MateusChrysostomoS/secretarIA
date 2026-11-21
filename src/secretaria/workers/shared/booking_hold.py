@@ -834,6 +834,7 @@ async def _slot_taken_reoffer(
                 None if held.professional_id == implied else held.professional_id
             ),
             "flow_selected_insurance": held.insurance,
+            "flow_insurance_auto": getattr(held, "insurance_auto", None),
             # TASK-083: the same unit, so the day picker that follows lists its hours.
             "flow_selected_unit_id": held.unit_id,
             "flow_attendee_name": held.attendee_name or ATTENDEE_SELF,

@@ -528,6 +528,7 @@ async def _send_bot_reply_inner(reply: _ReplyContext, redis=None) -> None:
                                 conversation.flow_selected_professional_id
                             ),
                             flow_selected_insurance=conversation.flow_selected_insurance,
+                            flow_insurance_auto=getattr(conversation, "flow_insurance_auto", None),
                             flow_selected_unit_id=conversation.flow_selected_unit_id,
                             flow_managing_appointment_id=(
                                 conversation.flow_managing_appointment_id
@@ -1247,6 +1248,7 @@ async def _send_bot_reply_inner(reply: _ReplyContext, redis=None) -> None:
                     # these drops the patient's doctor on the way back in.
                     flow_selected_professional_id=conv_snapshot.flow_selected_professional_id,
                     flow_selected_insurance=conv_snapshot.flow_selected_insurance,
+                    flow_insurance_auto=getattr(conv_snapshot, "flow_insurance_auto", None),
                     flow_attendee_name=conv_snapshot.flow_attendee_name,
                     flow_selected_unit_id=getattr(conv_snapshot, "flow_selected_unit_id", None),
                 ),

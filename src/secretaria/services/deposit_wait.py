@@ -159,6 +159,7 @@ def _clear_selection(conversation: Conversation) -> None:
     conversation.flow_selected_slot = None
     conversation.flow_selected_professional_id = None
     conversation.flow_selected_insurance = None
+    conversation.flow_insurance_auto = None
     conversation.flow_attendee_name = None
     conversation.flow_selected_unit_id = None  # TASK-083: the unit of the booking that ended
 
