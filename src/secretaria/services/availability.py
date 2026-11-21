@@ -27,8 +27,9 @@ The doctor's BUFFER between consultations (TASK-088 §B, `Professional.buffer_mi
 same kind of rule as the notice floor: every function here takes `buffer_minutes` (default 0 =
 exactly the behaviour above, no extra read). With N > 0 a time is only offered/confirmed when
 it leaves N free minutes before and after each CONSULTATION of the agenda (a live appointment
-with a patient, siblings' included - `CalendarService.consultation_windows`) and each held
-window; blocks and all-day events are not padded. docs/CHECKPOINT_intervalo_profissional.md.
+that is not a block, patient record or not, siblings' included -
+`CalendarService.consultation_windows`) and each held window; blocks and all-day events are
+not padded. docs/CHECKPOINT_intervalo_profissional.md.
 """
 
 from __future__ import annotations

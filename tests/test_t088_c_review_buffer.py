@@ -143,6 +143,45 @@ async def test_end_to_end_a_slot_next_to_a_sibling_pix_hold_is_not_offered(db, _
     assert {"13:00", "15:00"} <= labels
 
 
+async def test_a_consultation_booked_by_reception_without_a_patient_record_pads(db, _wired):
+    # Agenda "Nova consulta" with the patient typed as name/phone: patient_id None, no type or a
+    # service name. It is a consultation; only the clinic BLOCK marker is not.
+    from tests.test_booking_buffer import _appointment
+
+    tenant = await seed_tenant(db, name="P")
+    doctor = await seed_professional(db, tenant, "Dr. X")
+    start = tomorrow_at(14)
+    await _appointment(db, tenant, doctor, start, patient=False, kind=None)
+    await _appointment(
+        db, tenant, doctor, start + timedelta(hours=2), patient=False, kind="Consulta"
+    )
+    await _appointment(
+        db, tenant, doctor, start + timedelta(hours=3), patient=False, kind="Bloqueado"
+    )
+    windows = await _windows(agenda(tenant.id, doctor.id), start)
+    assert [(_utc(s), _utc(e)) for s, e in windows] == [
+        (_utc(start), _utc(start + timedelta(minutes=30))),
+        (_utc(start + timedelta(hours=2)), _utc(start + timedelta(hours=2, minutes=30))),
+    ]
+
+
+async def test_end_to_end_a_slot_next_to_a_reception_booking_is_not_offered(db, _wired):
+    from tests.test_booking_buffer import _appointment
+
+    tenant = await seed_tenant(db, name="P")
+    doctor = await seed_professional(db, tenant, "Dr. X")
+    start = tomorrow_at(14)
+    await _appointment(db, tenant, doctor, start, patient=False, kind=None)
+    calendar = agenda(tenant.id, doctor.id)
+    day = start.astimezone(calendar.tzinfo).date()
+    padded = await availability.free_slots_for_day(
+        calendar, day=day, duration_minutes=30, buffer_minutes=30
+    )
+    labels = {s.strftime("%H:%M") for s in padded}
+    assert {"13:30", "14:00", "14:30"}.isdisjoint(labels)
+    assert {"13:00", "15:00"} <= labels
+
+
 # --- 2. the patient-buffer check never touches the caller's transaction --------------------
 
 
