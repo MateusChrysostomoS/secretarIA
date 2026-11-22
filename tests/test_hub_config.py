@@ -106,7 +106,7 @@ async def test_get_config_includes_new_fields_with_defaults(client: AsyncClient)
     assert response.status_code == 200
     body = response.json()
     assert body["address"] is None
-    assert body["collect_insurance"] is False
+    assert body["collect_insurance"] is True  # legacy constant (TASK-090)
     assert body["post_consult_message"] is None
     assert body["post_consult_knowledge"] is None
 
@@ -127,7 +127,7 @@ async def test_get_config_omits_greeting_buttons(client: AsyncClient) -> None:
 
 
 async def test_put_address_and_legacy_collect_insurance_succeeds_while_disconnected(
-    client: AsyncClient, tenant
+    client: AsyncClient, db, tenant
 ) -> None:
     """The tenant fixture has phone_number_id=None and no Calendar connected -
     a plain config save (no `is_active` in the body) must still succeed."""
@@ -148,8 +148,11 @@ async def test_put_address_and_legacy_collect_insurance_succeeds_while_disconnec
     assert response.status_code == 200
     body = response.json()
     assert body["address"]["city"] == "São Paulo"
-    # TASK-090: accepted but ignored - the stored legacy flag does not change.
-    assert body["collect_insurance"] is False
+    # TASK-090: accepted but ignored - the read is a legacy constant and the stored flag
+    # does not change.
+    assert body["collect_insurance"] is True
+    async with db() as session:
+        assert (await session.get(Tenant, tenant.id)).collect_insurance is False
     assert body["is_active"] is False  # untouched
 
 
@@ -533,6 +536,7 @@ async def test_config_update_accepts_and_ignores_collect_insurance(
 
     response = await client.put(CONFIG, json={"collect_insurance": False})
     assert response.status_code == 200
+    assert response.json()["collect_insurance"] is True  # legacy constant
 
     async with db() as session:
         stored = await session.get(Tenant, tenant.id)

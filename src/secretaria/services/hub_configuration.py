@@ -516,7 +516,8 @@ async def tenant_read_model(session: AsyncSession, tenant: Tenant) -> TenantConf
         initial_flows=tenant.initial_flows or {},
         address=tenant.address,
         clinic_facts=tenant.clinic_facts,
-        collect_insurance=tenant.collect_insurance,
+        # Legacy constant: the question depends only on the clinic having convênios (TASK-090).
+        collect_insurance=True,
         is_active=tenant.is_active,
         calendar_connected=connected,
         calendar_backend="google" if connected else "local",

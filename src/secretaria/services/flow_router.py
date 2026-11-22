@@ -4221,7 +4221,7 @@ def _insurance_gate(
 ) -> _InsuranceGate:
     """The convênio point of the booking: after the unit, before the days (TASK-088 R5/R8).
 
-    Only where the clinic collects it (`_insurance_step_skip_reason`). The combination is
+    Only where the clinic has convênios (`_insurance_step_skip_reason`). The combination is
     (service, doctor, unit); the plans it accepts are `plans_accepted_for`.
 
     * no answer yet: some accepted -> the filtered list; NONE accepted -> offer other units
@@ -7177,9 +7177,11 @@ async def _booking_insurance_refusal(
         "onde": f" na unidade {unit_name}" if unit_name else "",
     }
     if _insurance_step_skip_reason(tenant) is not None:
-        # TASK-086 T9 review (minor 6): the clinic no longer asks the convênio, so its list is
-        # never reopened - the "não atende este convênio" step instead (another doctor / another
-        # service; no "Trocar convênio" with the step off), with the same refusal sentence.
+        # TASK-086 T9 review (minor 6): the step is skipped only when the clinic has no
+        # acceptance mode (NO_MODE) or no convênios (EMPTY_CATALOG) - since TASK-090 the old
+        # toggle cannot silence it. The list is then never reopened: the "não atende este
+        # convênio" step opens instead (another doctor / another service; no "Trocar convênio"),
+        # with the same refusal sentence.
         result = _enter_plan_refused(
             conversation,
             tenant,

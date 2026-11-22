@@ -402,7 +402,8 @@ async def test_hub_config_put_no_longer_accepts_insurances(db):
         # mirror `set_tenant_plans` wrote above ("Unimed"), never
         # "Bradesco Saude"/"Xyz" from the ignored field.
         assert stored.insurances == ["Unimed"]
-        # TASK-090: the legacy flag is accepted but never written any more.
+        # TASK-090: the legacy flag is accepted but never written any more (the config READ
+        # returns the constant True, the stored column stays False).
         assert stored.collect_insurance is False
 
 

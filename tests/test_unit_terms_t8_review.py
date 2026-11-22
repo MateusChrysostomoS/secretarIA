@@ -733,6 +733,35 @@ async def test_t086_final_guard_ignores_the_legacy_collect_flag():
 
 
 @pytest.mark.asyncio
+async def test_t086_final_guard_with_no_acceptance_mode_opens_the_plan_refused_step():
+    """The step is skipped only for NO_MODE / EMPTY_CATALOG (TASK-090): the guard then opens
+    the "não atende este convênio" step, never the convênio list."""
+    centro, sul, _norte = m086._units()
+    ana = m086._doctor(units=[centro, sul])
+    tenant = m086._tenant("shared", m086._matrix("shared", ana, (m086.ECO_ID, sul, m086.UNIMED)))
+    tenant.insurance_mode = None
+    assert fr._insurance_step_skip_reason(tenant) == fr.INSURANCE_SKIP_NO_MODE
+    agenda = m086._Agenda()
+    gate = m086._Gate(armed=False)
+    result = await fr.route(
+        m086._confirming(sul, ana),
+        tenant,
+        agenda,
+        fr.LABEL_CONFIRM,
+        patient_name="Maria",
+        professionals=[ana],
+        gate=gate,
+    )
+    assert result.appointment is None and result.booking_hold is None
+    assert agenda.log["created"] == [] and gate.decided == []
+    assert result.flow_step == fr.STEP_AWAITING_PLAN_REFUSED
+    [menu] = result.bubbles
+    assert fr.LABEL_PLAN_CHANGE_INSURANCE not in menu.labels
+    assert fr.LABEL_PLAN_OTHER_SERVICE in menu.labels
+    assert "Escolha outro convênio" not in menu.body
+
+
+@pytest.mark.asyncio
 async def test_t086_final_guard_with_the_convenio_step_on_is_unchanged():
     """Characterization: the step on -> the convenio list reopens, as before."""
     centro, sul, _norte = m086._units()

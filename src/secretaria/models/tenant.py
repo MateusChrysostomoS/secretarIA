@@ -252,7 +252,8 @@ class Tenant(Base):
     # policy, documents, FAQ). Shape: schemas/clinic_facts.py::ClinicFacts. NULL = never
     # filled in. The ADDRESS is not duplicated here: it stays in `address`. (TASK-025)
     clinic_facts: Mapped[dict | None] = mapped_column(JSON, nullable=True)
-    # Whether the bot should ask patients for their insurance during booking.
+    # LEGACY / UNUSED (TASK-090): nothing reads or writes this any more. The convênio question
+    # during booking depends only on the clinic having convênios. Column kept (no migration).
     collect_insurance: Mapped[bool] = mapped_column(
         Boolean, server_default=text("false"), default=False
     )
