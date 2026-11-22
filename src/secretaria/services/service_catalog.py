@@ -32,9 +32,13 @@ from collections.abc import Sequence
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from secretaria.models.insurance_acceptance_exception import InsuranceAcceptanceException
+from secretaria.models.professional import Professional
+from secretaria.models.professional_service_unit import ProfessionalServiceUnit
+from secretaria.models.professional_service_unit_terms import ProfessionalServiceUnitTerms
 from secretaria.models.service import Service
 
 # The optional key added to each per-professional / per-tenant JSON entry that
@@ -377,3 +381,79 @@ async def load_service_catalog(session: AsyncSession, tenant_id: UUID) -> list[S
         .order_by(Service.sort_order, Service.name)
     )
     return list(rows)
+
+
+def _without_service(entries: Any, catalog: Sequence[Service], service: Service) -> list | None:
+    """`entries` minus the ones that resolve to `service`; None when nothing was removed.
+
+    "Resolve to" is `match_service` on the WHOLE catalog (id first, normalized name second),
+    so an entry carrying another service's id is never taken for this one, while an entry
+    that only has the name (never backfilled) or a dangling id for this name does go.
+    Entries that are not dicts are kept untouched.
+    """
+    if not isinstance(entries, list):
+        return None
+    kept = [
+        entry
+        for entry in entries
+        if not (isinstance(entry, dict) and match_service(catalog, entry) is service)
+    ]
+    return kept if len(kept) != len(entries) else None
+
+
+async def delete_service_everywhere(session: AsyncSession, tenant: Any, service: Service) -> None:
+    """Delete `service` for the whole clinic (TASK-090). Mutates only: the caller commits.
+
+    Four things go in the caller's transaction:
+
+      - the `services` row, and the rows that hang off its id (a professional's unit
+        restriction, the per-unit price/duration exceptions, the convenio-matrix
+        exceptions). The FKs are `ON DELETE CASCADE`, but they are deleted explicitly
+        too so the outcome does not depend on the database enforcing them (SQLite
+        does not, by default). Convenio PLANS are never touched: only this service's
+        exceptions to them;
+      - the entries of this service in EVERY professional's `appointment_types` of the
+        tenant, and in `tenant.appointment_types` (the legacy list a professional with
+        a NULL list inherits). Those JSON lists are not foreign keys, so nothing else
+        removes them. Entries are matched by `service_id` or by normalized name;
+      - the remaining services' `sort_order`, repacked 0..n-1 in their current order.
+
+    Past appointments keep their `appointment_type` text: it is a label, not a reference.
+    New lists are assigned, never mutated in place (plain JSON columns do not track that).
+    """
+    tenant_id = tenant.id
+    catalog = await load_service_catalog(session, tenant_id)
+
+    professionals = list(
+        await session.scalars(select(Professional).where(Professional.tenant_id == tenant_id))
+    )
+    for professional in professionals:
+        # NULL means "inherit the clinic's list": nothing of its own to strip.
+        kept = _without_service(professional.appointment_types, catalog, service)
+        if kept is not None:
+            professional.appointment_types = kept
+    kept = _without_service(getattr(tenant, "appointment_types", None), catalog, service)
+    if kept is not None:
+        tenant.appointment_types = kept
+
+    # Scoped by tenant as well as by id, though the service was already resolved per tenant.
+    await session.execute(
+        delete(InsuranceAcceptanceException).where(
+            InsuranceAcceptanceException.service_id == service.id,
+            InsuranceAcceptanceException.tenant_id == tenant_id,
+        )
+    )
+    await session.execute(
+        delete(ProfessionalServiceUnitTerms).where(
+            ProfessionalServiceUnitTerms.service_id == service.id,
+            ProfessionalServiceUnitTerms.tenant_id == tenant_id,
+        )
+    )
+    await session.execute(
+        delete(ProfessionalServiceUnit).where(ProfessionalServiceUnit.service_id == service.id)
+    )
+    await session.delete(service)
+    await session.flush()
+
+    for position, row in enumerate(row for row in catalog if row.id != service.id):
+        row.sort_order = position
