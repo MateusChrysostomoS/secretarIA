@@ -22,7 +22,9 @@ and worker; the later DROP revision goes last.
 
 Downgrade restores NOTHING: it does not remove the Sede (by then it is ordinary clinic data,
 possibly edited) and it cannot bring back the old `true` flags (the previous value is not kept).
-It is a no-op and never fails.
+It is a no-op and never fails. Consequence, acceptable for a one-time hand-run migration:
+running upgrade again after a downgrade would recreate a Sede for a clinic that has since deleted
+all its units, and would reset again any flag set back to true.
 
 Revision ID: f2b8d4c6e0a3
 Revises: e1a7c3b9d5f2
@@ -79,7 +81,10 @@ _UFS = frozenset(_UF_BY_NAME.values())
 _LINE_WITH_NUMBER = re.compile(
     r"^(?P<street>.+?)(?:\s*,\s*|\s+)(?P<number>\d{1,10}[A-Za-z]?|[sS]/?[nN])\s*$"
 )
-_EARLIER_NUMBER = re.compile(r",\s*\d")
+_COMPLEMENT_WORDS = frozenset(
+    {"apto", "ap", "apartamento", "sala", "bloco", "bl", "cj", "conjunto"}
+    | {"lote", "quadra", "andar"}
+)
 _MIN_STREET_LENGTH = 4  # "Rua 15" is a street named 15, not street "Rua" + number 15
 
 
@@ -95,9 +100,15 @@ def split_line(line: str | None) -> tuple[str | None, str | None]:
     match = _LINE_WITH_NUMBER.match(text)
     if match:
         street = match.group("street").rstrip(" ,")
-        # A number already inside the street ("Rua A, 45, apto 2") means the tail is a
-        # complement, not the street number: leave the line whole rather than guess wrong.
-        if len(street) >= _MIN_STREET_LENGTH and not _EARLIER_NUMBER.search(street):
+        # The tail is not a street number when the street part still holds a comma
+        # ("Rua B 10, apto 2") or ends with a complement keyword ("Quadra 10 Lote 5"): leave the
+        # line whole rather than mislabel a complement as the number.
+        last_word = street.rsplit(None, 1)[-1].rstrip(".").lower()
+        if (
+            len(street) >= _MIN_STREET_LENGTH
+            and "," not in street
+            and last_word not in _COMPLEMENT_WORDS
+        ):
             return street, match.group("number")
     return text, None
 

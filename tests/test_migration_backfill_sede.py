@@ -32,7 +32,9 @@ def test_single_head_is_this_revision():
     config = Config(str(ROOT / "alembic.ini"))
     config.set_main_option("script_location", str(ROOT / "migrations"))
     scripts = ScriptDirectory.from_config(config)
-    assert scripts.get_heads() == [REVISION]
+    heads = scripts.get_heads()
+    assert len(heads) == 1
+    assert REVISION in {r.revision for r in scripts.walk_revisions(base="base", head=heads[0])}
     assert MIGRATION.down_revision == DOWN_REVISION
 
 
@@ -50,6 +52,11 @@ def test_single_head_is_this_revision():
         ("Rua 7 de Setembro", ("Rua 7 de Setembro", None)),
         ("Rua 15", ("Rua 15", None)),
         ("Rua A, 45, apto 2", ("Rua A, 45, apto 2", None)),
+        ("Rua B 10, apto 2", ("Rua B 10, apto 2", None)),
+        ("Rua B 10, sala 3", ("Rua B 10, sala 3", None)),
+        ("Quadra 10 Lote 5", ("Quadra 10 Lote 5", None)),
+        ("Rua B Bloco 2", ("Rua B Bloco 2", None)),
+        ("Av. Brasil 100 Apto. 7", ("Av. Brasil 100 Apto. 7", None)),
     ],
 )
 def test_split_line(line, expected):
