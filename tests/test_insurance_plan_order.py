@@ -330,6 +330,14 @@ async def test_put_order_404_foreign_professional_and_unknown_plan(client, world
         _order_url(a["ana"]), json={"plan_ids": [str(uuid4())]}, headers=HEADERS
     )
     assert resp.status_code == 404 and resp.json()["detail"] == "plan_not_found"
+    # An id that is not even a UUID is just an unknown plan (contract C3), never a 422.
+    for junk in ("not-a-uuid", "", "123"):
+        resp = await client.put(
+            _order_url(a["ana"]),
+            json={"plan_ids": [str(a["ap"]["unimed"].id), junk]},
+            headers=HEADERS,
+        )
+        assert resp.status_code == 404 and resp.json()["detail"] == "plan_not_found", junk
     assert await _order_rows(world["db"]) == 0
 
     # Tenant isolation: clinic A's order never reaches clinic B (same catalog plans).

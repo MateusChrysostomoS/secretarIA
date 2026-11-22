@@ -6,7 +6,6 @@ Request models forbid extra fields: the client never sends tenant/professional/p
 """
 
 from typing import Literal
-from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -72,12 +71,13 @@ class PlanOrderUpdate(BaseModel):
     """PUT .../professionals/{id}/insurance-acceptance/plan-order (TASK-090 C3).
 
     `plan_ids` are the matrix's `plans[].id` (this doctor's own plan rows), left to right. It may
-    be a subset: the clinic's place of every plan not listed is kept.
+    be a subset: the clinic's place of every plan not listed is kept. Plain strings on purpose:
+    an id that is not a UUID is an unknown plan (404 `plan_not_found`, contract C3), not a 422.
     """
 
     model_config = ConfigDict(extra="forbid")
 
-    plan_ids: list[UUID] = Field(max_length=INSURANCE_PLANS_PER_CLINIC)
+    plan_ids: list[str] = Field(max_length=INSURANCE_PLANS_PER_CLINIC)
 
 
 class MatrixUnitCount(BaseModel):

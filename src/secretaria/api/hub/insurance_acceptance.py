@@ -626,9 +626,16 @@ async def put_professional_plan_order(
             session, tenant.id, professional.id
         )
     }
-    wanted = list(dict.fromkeys(body.plan_ids))
-    if any(plan_id not in keys for plan_id in wanted):
-        raise HTTPException(status.HTTP_404_NOT_FOUND, detail="plan_not_found")
+    wanted: list[UUID] = []
+    for raw in dict.fromkeys(body.plan_ids):
+        try:
+            plan_id = UUID(raw)
+        except ValueError:
+            plan_id = None  # not a UUID: an unknown plan, same 404 as any other
+        if plan_id is None or plan_id not in keys:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, detail="plan_not_found")
+        wanted.append(plan_id)
+    wanted = list(dict.fromkeys(wanted))
     if wanted:
         await plan_order.save_subset_order(session, tenant.id, [keys[pid] for pid in wanted])
         await session.commit()
