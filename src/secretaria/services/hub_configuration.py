@@ -59,6 +59,7 @@ from secretaria.services.greeting_template import (
 )
 from secretaria.services.operating_channel import available_operating_channels
 from secretaria.services.payments import settings as payment_settings
+from secretaria.services.professional_readiness import professional_readiness
 from secretaria.services.service_catalog import entry_service_id, load_service_catalog
 
 # ---------------------------------------------------------------------------
@@ -541,6 +542,7 @@ async def professional_list_item(
     session: AsyncSession, professional: Professional, tenant: Tenant
 ) -> ProfessionalListItem:
     completeness = await cfg.professional_completeness_item(session, professional, tenant)
+    readiness = await professional_readiness(session, tenant, professional)
     return ProfessionalListItem(
         id=str(professional.id),
         name=professional.name,
@@ -567,4 +569,7 @@ async def professional_list_item(
         has_hours=completeness.has_hours,
         has_services=completeness.has_services,
         complete=completeness.complete,
+        requires_self_setup=bool(professional.requires_self_setup),
+        booking_ready=readiness.ready,
+        missing=list(readiness.missing),
     )

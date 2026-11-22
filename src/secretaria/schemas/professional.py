@@ -1,6 +1,7 @@
 """Request/response schemas for the doctor-hub professionals endpoints."""
 
 from datetime import datetime
+from typing import Literal
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
@@ -252,3 +253,13 @@ class ProfessionalListItem(BaseModel):
     has_hours: bool
     has_services: bool
     complete: bool
+    # TASK-091 (additive; defaulted so an older reader building this model never 500s):
+    # `requires_self_setup` = added to a clinic that already had professionals, so the doctor
+    # configures themselves and is hidden from patients until `booking_ready`; `booking_ready` is
+    # computed for EVERY professional (services/professional_readiness.py); `missing` lists what is
+    # still absent, in the stable order servicos, horarios, unidades, convenios.
+    requires_self_setup: bool = False
+    booking_ready: bool = True
+    missing: list[Literal["servicos", "horarios", "unidades", "convenios"]] = Field(
+        default_factory=list
+    )

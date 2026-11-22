@@ -192,6 +192,10 @@ async def test_list_shape_is_whitelisted(
         "has_hours",
         "has_services",
         "complete",
+        # Additive (TASK-091): invited-professional setup state (professional_readiness.py).
+        "requires_self_setup",
+        "booking_ready",
+        "missing",
         # No address of any kind. A professional's email belongs to brain-api
         # (`users.email`) and is read per use through
         # services/brain_professionals.py — FIX 34 removed the column FEAT 41
