@@ -394,7 +394,7 @@ async def test_run_agent_receives_plugin_tools_for_entitled_addons(
 
     monkeypatch.setattr(workers_ns, "get_entitlements", _fake_get_entitlements)
     monkeypatch.setattr(workers_ns, "run_agent", _fake_run_agent)
-    monkeypatch.setattr(workers_ns, "agent_tools_for", lambda summary: sentinel_tools)
+    monkeypatch.setattr(workers_ns, "agent_tools_for", lambda summary, **_kw: sentinel_tools)
 
     await tasks._send_bot_reply(_reply_context(conversation, patient, _LLM_ANSWER))
 
@@ -404,6 +404,43 @@ async def test_run_agent_receives_plugin_tools_for_entitled_addons(
     # than an exact list; the hand-back tool has its own tests above.
     assert len(run_agent_calls) == 1
     assert "sentinel-tool" in run_agent_calls[0]["extra_tools"]
+
+
+@pytest.mark.parametrize("with_unit", [False, True])
+async def test_unit_tools_switch_on_from_the_clinics_active_units(
+    monkeypatch: pytest.MonkeyPatch, db, with_unit: bool
+) -> None:
+    """TASK-090: `multi_unit` is no add-on; the worker tells the registry whether the clinic has
+    an ACTIVE unit, and a clinic without one keeps the toolset it always had."""
+    from secretaria.models import Unit
+
+    tenant, patient, conversation = await _make_conversation(db, flow_state=FlowState.LLM)
+    async with db() as session:
+        # An inactive unit alone never counts; another clinic's active unit never counts either.
+        session.add(Unit(tenant_id=tenant.id, name="Centro", address="Rua A, 1", is_active=False))
+        session.add(Unit(tenant_id=uuid4(), name="Other clinic", address="x", is_active=True))
+        if with_unit:
+            session.add(Unit(tenant_id=tenant.id, name="Sul", address="Rua B, 2", is_active=True))
+        await session.commit()
+    seen: list[bool] = []
+
+    async def _fake_get_entitlements(tenant_id, redis):
+        return _summary()
+
+    async def _fake_run_agent(message, context, **kwargs):
+        return "Oi!"
+
+    def _fake_agent_tools_for(summary, *, has_active_units=True):
+        seen.append(has_active_units)
+        return []
+
+    monkeypatch.setattr(workers_ns, "get_entitlements", _fake_get_entitlements)
+    monkeypatch.setattr(workers_ns, "run_agent", _fake_run_agent)
+    monkeypatch.setattr(workers_ns, "agent_tools_for", _fake_agent_tools_for)
+
+    await tasks._send_bot_reply(_reply_context(conversation, patient, _LLM_ANSWER))
+
+    assert seen == [with_unit]
 
 
 # --------------------------------------------------------------------------

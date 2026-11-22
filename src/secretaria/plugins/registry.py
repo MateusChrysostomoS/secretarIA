@@ -56,10 +56,17 @@ def enabled_plugins(summary: EntitlementSummary) -> list[PluginSpec]:
     return [spec for spec in REGISTRY.values() if _spec_enabled(summary, spec)]
 
 
-def agent_tools_for(summary: EntitlementSummary) -> list:
-    """Flatten `agent_tools` across every plugin this tenant is entitled to."""
+def agent_tools_for(summary: EntitlementSummary, *, has_active_units: bool = True) -> list:
+    """Flatten `agent_tools` across every plugin this tenant is entitled to.
+
+    A plugin flagged `requires_active_units` (the unit tools) contributes only when
+    `has_active_units` - the production caller (workers/orchestrator.py) passes the clinic's real
+    answer; the default keeps the plugin on for callers that have no clinic data to consult.
+    """
     tools: list = []
     for spec in enabled_plugins(summary):
+        if spec.requires_active_units and not has_active_units:
+            continue
         tools.extend(spec.agent_tools)
     return tools
 

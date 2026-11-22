@@ -1,6 +1,9 @@
 """multi_unit plugin: unit (physical location) awareness for booking.
 
-Entitlement-gated addon (`multi_unit`). Units do not carry their own Calendar
+Not a paid add-on any more (TASK-090): `multi_unit` is always entitled
+(services/entitlements_client.py::CORE_ADDON_IDS); the tools are offered to a clinic that has at
+least one active unit (`requires_active_units`, applied by registry.agent_tools_for). Units do not
+carry their own Calendar
 credentials — they only record WHERE the patient should show up. Booking
 itself keeps using the tenant's own calendar (or, when multi_professional is
 ALSO active, the professional's calendar — see
@@ -11,7 +14,7 @@ logic rather than duplicating it).
 Two tools:
   - `list_units`: names + addresses of active units, so the LLM can tell the
     patient where to go / ask them to choose one.
-  - `create_event_at_unit`: for tenants that have multi_unit WITHOUT
+  - `create_event_at_unit`: for tenants that have units WITHOUT
     multi_professional — a single-calendar booking tool that records which
     unit the appointment is at. Tenants with BOTH addons use
     `create_event_for_professional`'s optional `unit_name` instead; this tool
@@ -217,7 +220,7 @@ async def create_event_at_unit(
     # This books on the CLINIC's own calendar with no professional in the
     # loop, so it is a tenant-level mutation exactly like the base
     # `create_event` — and just as wrong for a multi-professional tenant.
-    # Entitlements only ADD tools, so a tenant holding multi_unit could reach
+    # Plugins only ADD tools, so a tenant with units could reach
     # the wrong agenda through here; the shared guard refuses before any
     # Google call (ai/tools.py::_blocked_tenant_level).
     blocked = _blocked_tenant_level("create_event_at_unit")
@@ -335,7 +338,7 @@ async def create_event_at_unit(
         "status": event.get("status"),
         # The event on the clinic's calendar (right for the clinic) and the
         # public add-to-calendar link (the only one the PATIENT can open).
-        # This tool is the sole booking tool for a tenant with multi_unit but
+        # This tool is the sole booking tool for a tenant with units but
         # no multi_professional, so omitting the second one would leave those
         # clinics with no link at all — see
         # services/calendar.py::build_patient_calendar_link.
@@ -355,5 +358,6 @@ MULTI_UNIT_SPEC = PluginSpec(
     id="multi_unit",
     entitlement_keys=("multi_unit",),
     agent_tools=(list_units, create_event_at_unit),
+    requires_active_units=True,
 )
 register(MULTI_UNIT_SPEC)

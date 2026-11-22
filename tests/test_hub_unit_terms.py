@@ -16,10 +16,7 @@ from uuid import uuid4  # noqa: E402
 import pytest_asyncio  # noqa: E402
 from sqlalchemy import select  # noqa: E402
 
-from secretaria.api.hub import (  # noqa: E402
-    deps as hub_deps,
-    professional_units as pu_api,
-)
+from secretaria.api.hub import deps as hub_deps  # noqa: E402
 from secretaria.core.database import get_session  # noqa: E402
 from secretaria.core.subscription import SubscriptionClaim  # noqa: E402
 from secretaria.models import (  # noqa: E402
@@ -30,7 +27,6 @@ from secretaria.models import (  # noqa: E402
     Service,
     Unit,
 )
-from secretaria.services.entitlements_client import EntitlementSummary  # noqa: E402
 from tests._local_agenda import seed_tenant  # noqa: E402
 from tests._reminder_fixtures import db  # noqa: E402,F401
 
@@ -121,21 +117,8 @@ async def world(db, monkeypatch):
             professional_id=None,
         )
 
-    async def _entitled(tenant_id, redis=None):
-        return EntitlementSummary(
-            tenant_id=str(tenant_id),
-            status="active",
-            active=True,
-            secretaria_enabled=True,
-            plan="bronze",
-            secretaria_tier="basico",
-            addons={"multi_unit": True},
-            limits={},
-        )
-
     app.dependency_overrides[get_session] = _session
     monkeypatch.setattr(hub_deps, "verify_subscription_token", _verify)
-    monkeypatch.setattr(pu_api, "get_entitlements", _entitled)
     yield {
         "db": db,
         "tenant": tenant,

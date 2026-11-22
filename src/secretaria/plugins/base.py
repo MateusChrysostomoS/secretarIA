@@ -38,6 +38,10 @@ class PluginSpec:
         hook runs, each independently fail-open (registry.run_post_booking
         wraps each call in its own try/except). None (the default) means this
         plugin never reacts to a booking.
+    requires_active_units: when True, `registry.agent_tools_for` offers this plugin's tools only
+        to a clinic that has at least one ACTIVE unit (TASK-090: units are core, so the
+        entitlement is always on - the clinic's own data is what turns the unit tools and prompt
+        on; a clinic without units keeps the exact toolset and prompt it always had).
     on_inbound: called by `registry.run_on_inbound` (from
         workers/tasks.py:_send_bot_reply, after the entitlement gate and
         before the flow router) with one `InboundContext`. Returning True
@@ -51,6 +55,7 @@ class PluginSpec:
     agent_tools: tuple[Any, ...] = ()
     post_booking: Callable[..., Any] | None = None
     on_inbound: Callable[["InboundContext"], Any] | None = None
+    requires_active_units: bool = False
 
 
 @dataclass(frozen=True)

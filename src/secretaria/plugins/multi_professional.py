@@ -35,7 +35,7 @@ set) rides along in the tool result under `professional_context` — this is
 how the LLM "loads" that professional's context for the rest of the turn.
 
 `create_event_for_professional` also accepts an optional `unit_name` (used
-only when the multi_unit addon is ALSO active for this tenant — see
+only when the clinic ALSO has an active unit — see
 plugins/multi_unit.py). When provided, the unit is resolved the same
 case-insensitive way and its id is persisted on the Appointment row alongside
 professional_id. An empty/omitted `unit_name` behaves exactly as before unit

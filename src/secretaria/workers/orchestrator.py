@@ -102,6 +102,7 @@ from secretaria.services.pending_identity import (
     request_code,
     verify_code,
 )
+from secretaria.services.professional_units import has_active_units as clinic_has_active_units
 from secretaria.services.sensitive_claim_guard import guard_reply
 from secretaria.services.service_catalog import (
     load_service_catalog,
@@ -390,6 +391,9 @@ async def _send_bot_reply_inner(reply: _ReplyContext, redis=None) -> None:
     # roster AND the run_agent prompt-context source), the selected
     # professional's plain snapshot, and their resolved calendar.
     professional_rows: list[Professional] | None = None
+    # TASK-090: units are core, so the unit tools/prompt switch on from the clinic's own data
+    # (>= 1 active unit); a clinic without units keeps the toolset and prompt it always had.
+    has_active_units = False
     flow_professionals: list[SimpleNamespace] | None = None
     selected_professional: SimpleNamespace | None = None
     flow_calendar: CalendarService | None = None
@@ -464,6 +468,7 @@ async def _send_bot_reply_inner(reply: _ReplyContext, redis=None) -> None:
                     # resolves, not only when flows are on: the agent's
                     # professional context + sentinel hand-backs need it too.
                     professional_rows = await list_active_professionals(session, tenant.id)
+                    has_active_units = await clinic_has_active_units(session, tenant.id)
                     # ONE read of the clinic's canonical catalog per turn. Each
                     # professional's entries are resolved through it HERE, so
                     # the pure router downstream sees the clinic's single
@@ -1393,7 +1398,11 @@ async def _send_bot_reply_inner(reply: _ReplyContext, redis=None) -> None:
             # The deterministic-flow hand-back tools ride along with the plugin
             # ones, gated on the flow existing at all (and, for
             # start_guided_booking, on the topology) - see _flow_handback_tools.
-            extra_tools=_flow_handback_tools(tenant, turn_topology, agent_tools_for(summary)),
+            extra_tools=_flow_handback_tools(
+                tenant,
+                turn_topology,
+                agent_tools_for(summary, has_active_units=has_active_units),
+            ),
             redis=redis,
             selected_professional=selected_professional,
             # The tenant's REAL shape decides which tools the agent is given at

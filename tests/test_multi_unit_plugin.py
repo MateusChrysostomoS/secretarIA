@@ -215,20 +215,23 @@ async def test_create_event_at_unit_inactive_unit_is_not_resolvable(db):
 
 
 # --------------------------------------------------------------------------
-# Plugin gating: tools only present in agent_tools_for when entitled
+# Plugin gating: units are core (TASK-090) - the tools follow the clinic's active units
 # --------------------------------------------------------------------------
 
 
-def test_multi_unit_tools_present_only_when_entitled():
-    entitled = _summary(addons={**_ALL_ADDONS_OFF, "multi_unit": True})
-    not_entitled = _summary(addons=dict(_ALL_ADDONS_OFF))
-
-    entitled_names = {t.name for t in reg.agent_tools_for(entitled)}
-    not_entitled_names = {t.name for t in reg.agent_tools_for(not_entitled)}
-
+def test_multi_unit_tools_follow_the_clinics_units_not_an_addon():
+    # Same brain-api summary both ways (add-on off): only the clinic's own units decide.
+    summary = _summary(addons=dict(_ALL_ADDONS_OFF))
     expected = {mu.list_units.name, mu.create_event_at_unit.name}
-    assert expected <= entitled_names
-    assert expected.isdisjoint(not_entitled_names)
+
+    with_units = {t.name for t in reg.agent_tools_for(summary, has_active_units=True)}
+    without_units = {t.name for t in reg.agent_tools_for(summary, has_active_units=False)}
+
+    assert expected <= with_units
+    assert expected.isdisjoint(without_units)
+    # An inactive subscription still gets no tool at all.
+    inactive = _summary(addons=dict(_ALL_ADDONS_OFF), active=False)
+    assert expected.isdisjoint({t.name for t in reg.agent_tools_for(inactive)})
 
 
 async def test_create_event_at_unit_returns_the_patient_link_too(db):

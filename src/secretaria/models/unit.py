@@ -1,6 +1,7 @@
-"""Unit model - one physical location a tenant operates from (multi_unit addon).
+"""Unit model - one physical location a tenant operates from (core since TASK-090, not an add-on).
 
-Entitlement-gated by the `multi_unit` plugin (see plugins/multi_unit.py).
+The `multi_unit` plugin's tools switch on when the clinic has an active unit
+(see plugins/multi_unit.py).
 Units do not carry their own Calendar credentials - they only record where
 the patient should show up; the booking itself still uses the tenant's (or,
 when multi_professional is also active, the professional's) calendar.

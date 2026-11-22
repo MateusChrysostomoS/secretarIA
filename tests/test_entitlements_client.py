@@ -90,6 +90,15 @@ def test_tier_entitlement(tenant_tier, expected):
     assert is_entitled(summary, "basico") is expected
 
 
+def test_multi_unit_is_always_entitled_for_an_active_tenant():
+    """TASK-090: units are core, not an add-on - whatever brain-api says; the key stays known."""
+    assert "multi_unit" in ec.ADDON_IDS
+    assert is_entitled(_summary(addons={**_ALL_ADDONS_OFF}), "multi_unit") is True
+    assert is_entitled(_summary(addons={}), "multi_unit") is True
+    # ... but an inactive subscription is still entitled to nothing.
+    assert is_entitled(_summary(active=False), "multi_unit") is False
+
+
 def test_unknown_key_raises():
     summary = _summary()
     with pytest.raises(ValueError):

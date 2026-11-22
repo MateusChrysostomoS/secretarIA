@@ -151,9 +151,11 @@ def _staging_tools(tools) -> list:
     return [t for t in tools if getattr(t, "name", None) in _STAGING]
 
 
-def _turn_tools(tenant, topology, *, addons=ALL_ADDONS):
+def _turn_tools(tenant, topology, *, addons=ALL_ADDONS, has_active_units=True):
     """What the worker hands the agent for one turn: `extra_tools` + the v2 flag."""
-    extra = _flow_handback_tools(tenant, topology, reg.agent_tools_for(addons))
+    extra = _flow_handback_tools(
+        tenant, topology, reg.agent_tools_for(addons, has_active_units=has_active_units)
+    )
     return graph.effective_tools(topology, extra, toolset_v2=_ai_toolset_v2(tenant))
 
 
@@ -265,8 +267,24 @@ def test_a_staging_name_passes_only_as_its_blind_variant(topology):
 
 
 def test_without_the_addons_the_v2_set_still_has_the_way_back_to_the_flow():
-    names = _names(_turn_tools(TENANT_ON, BOOKING_TOPOLOGY_SOLE, addons=_summary()))
+    names = _names(
+        _turn_tools(TENANT_ON, BOOKING_TOPOLOGY_SOLE, addons=_summary(), has_active_units=False)
+    )
     assert names == _SCOPE_FREE | _HANDBACKS | _V2_READS_AND_STAGING
+
+
+def test_unit_tools_follow_the_clinics_units_not_an_addon():
+    """TASK-090: `multi_unit` is always entitled; >= 1 active unit switches the unit tools on and a
+    clinic without units keeps exactly the toolset it had without the add-on."""
+    without_units = _names(reg.agent_tools_for(_summary(), has_active_units=False))
+    with_units = _names(reg.agent_tools_for(_summary(), has_active_units=True))
+    assert {"list_units", "create_event_at_unit"}.isdisjoint(without_units)
+    assert with_units - without_units == {"list_units", "create_event_at_unit"}
+    # No add-on in the brain-api summary and no units: still the exact legacy set.
+    for topology in TOPOLOGIES:
+        assert _names(
+            _turn_tools(TENANT_ON, topology, addons=_summary(), has_active_units=False)
+        ).isdisjoint({"list_units", "create_event_at_unit"})
 
 
 @pytest.mark.parametrize("topology", TOPOLOGIES)

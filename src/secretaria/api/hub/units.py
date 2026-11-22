@@ -1,30 +1,23 @@
-"""Doctor hub — units CRUD (multi_unit addon).
+"""Doctor hub — units CRUD.
 
-GET   /tenants/me/units      - list (always allowed, even when the addon is
-                                disabled — a tenant that lost the addon can
-                                still see what it had).
+GET   /tenants/me/units      - list.
 POST  /tenants/me/units      - create.
 PATCH /tenants/me/units/{id} - update (name, address, is_active).
 
-Entitlement + limit enforcement — mirrors api/hub/professionals.py exactly,
-against the `multi_unit` addon and `limits["units"]`:
-  - Addon disabled -> creating, or activating (is_active: false -> true), a
-    unit is rejected with 403 {"detail": "multi_unit_not_entitled"}.
-  - Creating/activating an ACTIVE unit beyond `limits["units"]` is rejected
-    with 409 {"detail": "unit_limit_reached"}.
-  - A failed entitlement fetch (None) fails CLOSED: 503, never silently allowed.
+Units are NOT a paid add-on any more (TASK-090, owner decision): any clinic can create and
+activate units, with no limit on how many. Nothing here consults entitlements or
+`limits["units"]` (no 403 `multi_unit_not_entitled`, no 409 `unit_limit_reached`, no 503 from
+an entitlement fetch).
   - A unit always has an address: create without a (non-blank) address, or a PATCH that
     sends a blank/null address, is rejected with 422
     {"detail": {"code": "unit_address_required", "message": ...}}. A PATCH that omits
     `address` is untouched (legacy units without one stay editable).
-  - Renaming, changing the address, or DEACTIVATING never touch
-    entitlements/limits at all.
 """
 
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy import func, select
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from secretaria.api.hub.deps import get_current_tenant
@@ -33,14 +26,10 @@ from secretaria.core.logging import get_logger
 from secretaria.models import Tenant
 from secretaria.models.unit import Unit
 from secretaria.schemas.unit import UnitCreate, UnitRead, UnitUpdate
-from secretaria.services.entitlements_client import get_entitlements, is_entitled
 from secretaria.services.professional_units import count_professionals_by_unit
 
 logger = get_logger(__name__)
 router = APIRouter(prefix="/tenants/me/units", tags=["hub-units"])
-
-ADDON_KEY = "multi_unit"
-LIMIT_KEY = "units"
 
 
 def _require_address(raw: str | None) -> str:
@@ -78,36 +67,6 @@ async def _get_unit(session: AsyncSession, tenant: Tenant, unit_id: str) -> Unit
     return unit
 
 
-async def _count_active(session: AsyncSession, tenant_id: UUID) -> int:
-    result = await session.scalar(
-        select(func.count())
-        .select_from(Unit)
-        .where(Unit.tenant_id == tenant_id, Unit.is_active.is_(True))
-    )
-    return int(result or 0)
-
-
-async def _require_entitled_within_limit(session: AsyncSession, tenant: Tenant) -> None:
-    """Gate an activate/create-active mutation. Raises HTTPException on failure.
-
-    Fetches entitlements fresh (redis=None — this path is not hot). None
-    (fetch failure) fails CLOSED: 503, never treated as "allowed".
-    """
-    summary = await get_entitlements(tenant.id, redis=None)
-    if summary is None:
-        raise HTTPException(
-            status.HTTP_503_SERVICE_UNAVAILABLE, "Could not verify entitlements right now"
-        )
-    if not is_entitled(summary, ADDON_KEY):
-        raise HTTPException(status.HTTP_403_FORBIDDEN, "multi_unit_not_entitled")
-
-    limit = summary.limits.get(LIMIT_KEY)
-    if limit is not None:
-        active_count = await _count_active(session, tenant.id)
-        if active_count >= limit:
-            raise HTTPException(status.HTTP_409_CONFLICT, "unit_limit_reached")
-
-
 @router.get("", response_model=list[UnitRead])
 async def list_units(
     tenant: Tenant = Depends(get_current_tenant),
@@ -128,8 +87,6 @@ async def create_unit(
     session: AsyncSession = Depends(get_session),
 ) -> UnitRead:
     address = _require_address(body.address)
-    if body.is_active:
-        await _require_entitled_within_limit(session, tenant)
 
     unit = Unit(
         tenant_id=tenant.id,
@@ -157,10 +114,6 @@ async def update_unit(
     # unit without address editable (name/is_active only).
     if "address" in data:
         data["address"] = _require_address(data["address"])
-
-    activating = data.get("is_active") is True and not unit.is_active
-    if activating:
-        await _require_entitled_within_limit(session, tenant)
 
     if "name" in data:
         unit.name = data["name"]

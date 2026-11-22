@@ -72,6 +72,14 @@ async def active_units(session: AsyncSession, tenant_id: UUID) -> list[Unit]:
     return list(rows)
 
 
+async def has_active_units(session: AsyncSession, tenant_id: UUID) -> bool:
+    """Whether the tenant has at least one ACTIVE unit (the switch for the unit tools/prompt)."""
+    found = await session.scalar(
+        select(Unit.id).where(Unit.tenant_id == tenant_id, Unit.is_active.is_(True)).limit(1)
+    )
+    return found is not None
+
+
 async def links_by_unit(
     session: AsyncSession, professional_id: UUID
 ) -> dict[UUID, ProfessionalUnit]:

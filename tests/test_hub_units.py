@@ -1,6 +1,5 @@
-"""Tests for api/hub/units.py — multi_unit CRUD + gating. Mirrors
-test_hub_professionals.py exactly, against the `multi_unit` addon and
-`limits["units"]`.
+"""Tests for api/hub/units.py — units CRUD. Units are core (TASK-090): no add-on, no limit, so
+every test here runs with get_entitlements wired to blow up if anything consults it.
 """
 
 import os
@@ -25,50 +24,22 @@ from sqlalchemy.ext.asyncio import (  # noqa: E402
 )
 from sqlalchemy.pool import StaticPool  # noqa: E402
 
-from secretaria.api.hub import units as units_api  # noqa: E402
 from secretaria.api.hub.deps import get_current_tenant  # noqa: E402
 from secretaria.core.database import Base, get_session  # noqa: E402
 from secretaria.models import Tenant, Unit  # noqa: E402
-from secretaria.services.entitlements_client import EntitlementSummary  # noqa: E402
-
-_ALL_ADDONS_OFF = {
-    "reactivation_pack": False,
-    "verified_identity": False,
-    "multi_professional": False,
-    "multi_unit": False,
-    "ehr": False,
-    "pix_deposit": False,
-    "analytics_bi": False,
-    "human_backup_24_7": False,
-}
+from secretaria.services import entitlements_client  # noqa: E402
 
 ENDPOINT = "/tenants/me/units"
 
 
-def _summary(**overrides) -> EntitlementSummary:
-    base = dict(
-        tenant_id=str(uuid4()),
-        status="active",
-        active=True,
-        secretaria_enabled=True,
-        plan="bronze",
-        secretaria_tier="basico",
-        addons=dict(_ALL_ADDONS_OFF),
-        limits={},
-    )
-    base.update(overrides)
-    return EntitlementSummary(**base)
-
-
-def _entitled_fake(**overrides):
-    async def _fake(tenant_id, redis=None):
-        return _summary(**overrides)
-
-    return _fake
-
-
 async def _never_called_fake(tenant_id, redis=None):
-    raise AssertionError("get_entitlements must not be called for this operation")
+    raise AssertionError("units never consult entitlements (TASK-090)")
+
+
+@pytest.fixture(autouse=True)
+def _entitlements_never_consulted(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Any entitlement fetch from these endpoints is a failure, whichever module imported it."""
+    monkeypatch.setattr(entitlements_client, "get_entitlements", _never_called_fake)
 
 
 @pytest_asyncio.fixture
@@ -130,18 +101,16 @@ async def _seed_unit(db, tenant: Tenant, **overrides) -> Unit:
 
 
 async def test_list_is_allowed_without_entitlement_check(
-    client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+    client: AsyncClient
 ) -> None:
-    monkeypatch.setattr(units_api, "get_entitlements", _never_called_fake)
     response = await client.get(ENDPOINT)
     assert response.status_code == 200
     assert response.json() == []
 
 
 async def test_list_shape_is_whitelisted(
-    client: AsyncClient, db, tenant, monkeypatch: pytest.MonkeyPatch
+    client: AsyncClient, db, tenant
 ) -> None:
-    monkeypatch.setattr(units_api, "get_entitlements", _never_called_fake)
     await _seed_unit(db, tenant, name="Unidade Centro", address="Rua A, 1")
 
     response = await client.get(ENDPOINT)
@@ -161,18 +130,13 @@ async def test_list_shape_is_whitelisted(
 
 
 # --------------------------------------------------------------------------
-# POST — entitlement + limit gating
+# POST — no add-on, no limit (TASK-090)
 # --------------------------------------------------------------------------
 
 
-async def test_create_active_unit_succeeds_when_entitled(
-    client: AsyncClient, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setattr(
-        units_api,
-        "get_entitlements",
-        _entitled_fake(addons={**_ALL_ADDONS_OFF, "multi_unit": True}, limits={"units": 5}),
-    )
+async def test_create_unit_without_addon_succeeds(client: AsyncClient) -> None:
+    # The clinic holds no `multi_unit` add-on (the autouse fixture makes any entitlement
+    # fetch fail the test): creating a unit is simply allowed.
     response = await client.post(ENDPOINT, json={"name": "Unidade Centro", "address": "Rua A, 1"})
     assert response.status_code == 201
     body = response.json()
@@ -180,44 +144,23 @@ async def test_create_active_unit_succeeds_when_entitled(
     assert body["is_active"] is True
 
 
-async def test_create_not_entitled_returns_403(
-    client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+async def test_create_unit_ignores_units_limit(
+    client: AsyncClient, db, tenant
 ) -> None:
-    monkeypatch.setattr(units_api, "get_entitlements", _entitled_fake())  # addon off
-    response = await client.post(ENDPOINT, json={"name": "Unidade Centro", "address": "Rua A, 1"})
-    assert response.status_code == 403
-    assert response.json()["detail"] == "multi_unit_not_entitled"
+    # No `limits["units"]` is read at all (the autouse fixture fails on any entitlement fetch):
+    # 2 active units already exist and a third and fourth are created.
+    await _seed_unit(db, tenant, name="Existing 1", is_active=True)
+    await _seed_unit(db, tenant, name="Existing 2", is_active=True)
+    for name in ("Unidade Centro", "Unidade Norte"):
+        response = await client.post(ENDPOINT, json={"name": name, "address": "Rua A, 1"})
+        assert response.status_code == 201, response.text
+        assert response.json()["is_active"] is True
+    async with db() as session:
+        active = (await session.scalars(select(Unit).where(Unit.is_active.is_(True)))).all()
+    assert len(active) == 4
 
 
-async def test_create_over_limit_returns_409(
-    client: AsyncClient, db, tenant, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    await _seed_unit(db, tenant, name="Existing", is_active=True)
-    monkeypatch.setattr(
-        units_api,
-        "get_entitlements",
-        _entitled_fake(addons={**_ALL_ADDONS_OFF, "multi_unit": True}, limits={"units": 1}),
-    )
-    response = await client.post(ENDPOINT, json={"name": "Unidade Centro", "address": "Rua A, 1"})
-    assert response.status_code == 409
-    assert response.json()["detail"] == "unit_limit_reached"
-
-
-async def test_create_entitlement_fetch_failure_fails_closed_503(
-    client: AsyncClient, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    async def _fake_none(tenant_id, redis=None):
-        return None
-
-    monkeypatch.setattr(units_api, "get_entitlements", _fake_none)
-    response = await client.post(ENDPOINT, json={"name": "Unidade Centro", "address": "Rua A, 1"})
-    assert response.status_code == 503
-
-
-async def test_create_inactive_unit_skips_entitlement_check(
-    client: AsyncClient, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setattr(units_api, "get_entitlements", _never_called_fake)
+async def test_create_inactive_unit_succeeds(client: AsyncClient) -> None:
     response = await client.post(
         ENDPOINT, json={"name": "Unidade Centro", "address": "Rua A, 1", "is_active": False}
     )
@@ -226,78 +169,38 @@ async def test_create_inactive_unit_skips_entitlement_check(
 
 
 # --------------------------------------------------------------------------
-# PATCH — activation is gated, rename/deactivate are not
+# PATCH — nothing is gated
 # --------------------------------------------------------------------------
 
 
-async def test_patch_rename_without_activation_skips_entitlement_check(
-    client: AsyncClient, db, tenant, monkeypatch: pytest.MonkeyPatch
-) -> None:
+async def test_patch_rename(client: AsyncClient, db, tenant) -> None:
     unit = await _seed_unit(db, tenant, name="Old Name", is_active=True)
-    monkeypatch.setattr(units_api, "get_entitlements", _never_called_fake)
 
     response = await client.patch(f"{ENDPOINT}/{unit.id}", json={"name": "New Name"})
     assert response.status_code == 200
     assert response.json()["name"] == "New Name"
 
 
-async def test_patch_deactivate_skips_entitlement_check(
-    client: AsyncClient, db, tenant, monkeypatch: pytest.MonkeyPatch
-) -> None:
+async def test_patch_deactivate(client: AsyncClient, db, tenant) -> None:
     unit = await _seed_unit(db, tenant, is_active=True)
-    monkeypatch.setattr(units_api, "get_entitlements", _never_called_fake)
 
     response = await client.patch(f"{ENDPOINT}/{unit.id}", json={"is_active": False})
     assert response.status_code == 200
     assert response.json()["is_active"] is False
 
 
-async def test_patch_activate_not_entitled_returns_403(
-    client: AsyncClient, db, tenant, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    unit = await _seed_unit(db, tenant, is_active=False)
-    monkeypatch.setattr(units_api, "get_entitlements", _entitled_fake())  # addon off
-
-    response = await client.patch(f"{ENDPOINT}/{unit.id}", json={"is_active": True})
-    assert response.status_code == 403
-    assert response.json()["detail"] == "multi_unit_not_entitled"
-
-
-async def test_patch_activate_over_limit_returns_409(
-    client: AsyncClient, db, tenant, monkeypatch: pytest.MonkeyPatch
+async def test_patch_activate_without_addon_or_limit_succeeds(
+    client: AsyncClient, db, tenant
 ) -> None:
     await _seed_unit(db, tenant, name="Existing active", is_active=True)
     unit = await _seed_unit(db, tenant, name="To activate", is_active=False)
-    monkeypatch.setattr(
-        units_api,
-        "get_entitlements",
-        _entitled_fake(addons={**_ALL_ADDONS_OFF, "multi_unit": True}, limits={"units": 1}),
-    )
-
-    response = await client.patch(f"{ENDPOINT}/{unit.id}", json={"is_active": True})
-    assert response.status_code == 409
-    assert response.json()["detail"] == "unit_limit_reached"
-
-
-async def test_patch_activate_within_limit_succeeds(
-    client: AsyncClient, db, tenant, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    unit = await _seed_unit(db, tenant, is_active=False)
-    monkeypatch.setattr(
-        units_api,
-        "get_entitlements",
-        _entitled_fake(addons={**_ALL_ADDONS_OFF, "multi_unit": True}, limits={"units": 5}),
-    )
 
     response = await client.patch(f"{ENDPOINT}/{unit.id}", json={"is_active": True})
     assert response.status_code == 200
     assert response.json()["is_active"] is True
 
 
-async def test_patch_unknown_id_is_404(
-    client: AsyncClient, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setattr(units_api, "get_entitlements", _never_called_fake)
+async def test_patch_unknown_id_is_404(client: AsyncClient) -> None:
     response = await client.patch(f"{ENDPOINT}/{uuid4()}", json={"name": "Ghost"})
     assert response.status_code == 404
 
@@ -312,14 +215,9 @@ _ADDRESS_REQUIRED = {
 }
 
 
-def _entitled_ok() -> object:
-    return _entitled_fake(addons={**_ALL_ADDONS_OFF, "multi_unit": True}, limits={"units": 5})
-
-
 async def test_create_unit_without_address_is_422_unit_address_required(
-    client: AsyncClient, db, monkeypatch: pytest.MonkeyPatch
+    client: AsyncClient, db
 ) -> None:
-    monkeypatch.setattr(units_api, "get_entitlements", _entitled_ok())
     response = await client.post(ENDPOINT, json={"name": "Unidade Centro"})
     assert response.status_code == 422
     assert response.json()["detail"] == _ADDRESS_REQUIRED
@@ -328,9 +226,8 @@ async def test_create_unit_without_address_is_422_unit_address_required(
 
 
 async def test_create_unit_with_blank_address_is_422(
-    client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+    client: AsyncClient
 ) -> None:
-    monkeypatch.setattr(units_api, "get_entitlements", _entitled_ok())
     for blank in ("", "   ", None):
         response = await client.post(ENDPOINT, json={"name": "Unidade Centro", "address": blank})
         assert response.status_code == 422, blank
@@ -338,9 +235,8 @@ async def test_create_unit_with_blank_address_is_422(
 
 
 async def test_create_unit_strips_address(
-    client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+    client: AsyncClient
 ) -> None:
-    monkeypatch.setattr(units_api, "get_entitlements", _entitled_ok())
     response = await client.post(
         ENDPOINT, json={"name": "Unidade Centro", "address": "  Rua B, 2  "}
     )
@@ -349,10 +245,9 @@ async def test_create_unit_strips_address(
 
 
 async def test_patch_unit_address_to_blank_is_422_and_nothing_saved(
-    client: AsyncClient, db, tenant, monkeypatch: pytest.MonkeyPatch
+    client: AsyncClient, db, tenant
 ) -> None:
     unit = await _seed_unit(db, tenant, name="Old Name", address="Rua A, 1")
-    monkeypatch.setattr(units_api, "get_entitlements", _never_called_fake)
     for blank in ("", "   ", None):
         response = await client.patch(
             f"{ENDPOINT}/{unit.id}", json={"name": "New Name", "address": blank}
@@ -366,10 +261,9 @@ async def test_patch_unit_address_to_blank_is_422_and_nothing_saved(
 
 
 async def test_patch_unit_name_only_on_legacy_unit_without_address_still_works(
-    client: AsyncClient, db, tenant, monkeypatch: pytest.MonkeyPatch
+    client: AsyncClient, db, tenant
 ) -> None:
     unit = await _seed_unit(db, tenant, name="Legacy", address=None)
-    monkeypatch.setattr(units_api, "get_entitlements", _never_called_fake)
     response = await client.patch(f"{ENDPOINT}/{unit.id}", json={"name": "Legacy 2"})
     assert response.status_code == 200
     assert response.json()["name"] == "Legacy 2"
