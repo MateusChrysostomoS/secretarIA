@@ -1,4 +1,4 @@
-"""Drop `custom_payment_note` from both convênio plan tables (TASK-090) - LAST revision, run it LAST.
+"""Drop `custom_payment_note` from both convênio plan tables (TASK-090) - the LAST revision.
 
 The owner removed the payment text of the "Outro" convênio completely, database included
 (SPEC §3 item 2). The code no longer maps, reads, writes or returns the column (task B6), but the

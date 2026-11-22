@@ -1,4 +1,4 @@
-"""TASK-090 B9: the DROP of `custom_payment_note` is the last revision and nothing maps the column."""
+"""TASK-090 B9: the `custom_payment_note` DROP is the last revision; nothing maps the column."""
 
 import importlib.util
 from pathlib import Path
@@ -87,4 +87,5 @@ def test_upgrade_drops_the_column_and_downgrade_recreates_it_empty(tmp_path):
         for table in TABLES:
             cols = {c["name"]: c for c in sa.inspect(conn).get_columns(table)}
             assert cols["custom_payment_note"]["nullable"] is True
-            assert conn.execute(sa.text(f"SELECT custom_payment_note FROM {table}")).scalar() is None
+            query = sa.text(f"SELECT custom_payment_note FROM {table}")
+            assert conn.execute(query).scalar() is None
