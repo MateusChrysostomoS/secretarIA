@@ -45,7 +45,19 @@ BR_STATE_NAMES: Mapping[str, str] = {
 # The parts every unit address needs (complement and neighborhood are optional).
 REQUIRED_FIELDS: tuple[str, ...] = ("cep", "street", "number", "city", "state")
 
-_NON_DIGITS = re.compile(r"\D")
+# Max length of each free-text part = its `units` column; the derived line must fit
+# `units.address` (String(512)). Checked here so an oversize value is a 422, never a DB error.
+MAX_PART_LENGTHS: Mapping[str, int] = {
+    "street": 255,
+    "number": 30,
+    "complement": 255,
+    "neighborhood": 255,
+    "city": 255,
+}
+MAX_ADDRESS_LENGTH = 512
+
+# ASCII digits only: `\d` would also accept other Unicode digits (e.g. Arabic-Indic).
+_NON_DIGITS = re.compile(r"[^0-9]")
 
 
 @dataclass(frozen=True)
@@ -78,19 +90,39 @@ def normalize_state(raw: str | None) -> str | None:
 
 
 def invalid_fields(p: UnitAddressParts) -> list[str]:
-    """Names (of `REQUIRED_FIELDS`) that are missing or invalid, in a stable order."""
+    """Names of the parts that are missing, invalid or longer than their column, in a stable
+    order (cep, street, number, complement, neighborhood, city, state)."""
     bad: list[str] = []
     if normalize_cep(p.cep) is None:
         bad.append("cep")
-    if not clean_text(p.street):
-        bad.append("street")
-    if not clean_text(p.number):
-        bad.append("number")
-    if not clean_text(p.city):
-        bad.append("city")
+    for name in ("street", "number", "complement", "neighborhood", "city"):
+        value = clean_text(getattr(p, name))
+        required = name in REQUIRED_FIELDS
+        if (required and not value) or (value and len(value) > MAX_PART_LENGTHS[name]):
+            bad.append(name)
     if normalize_state(p.state) not in BR_STATE_NAMES:
         bad.append("state")
     return bad
+
+
+def oversize_line_fields(p: UnitAddressParts) -> list[str]:
+    """When the derived line would exceed `MAX_ADDRESS_LENGTH`, the longest free-text parts
+    (greedily, until dropping them would make it fit); `[]` when it fits."""
+    excess = len(format_unit_address(p)) - MAX_ADDRESS_LENGTH
+    if excess <= 0:
+        return []
+    lengths = {
+        name: len(clean_text(getattr(p, name)) or "")
+        for name in ("street", "complement", "neighborhood", "city")
+    }
+    names: list[str] = []
+    for name, length in sorted(lengths.items(), key=lambda item: item[1], reverse=True):
+        if excess <= 0 or length == 0:
+            break
+        names.append(name)
+        excess -= length
+    order = ("street", "complement", "neighborhood", "city")
+    return [name for name in order if name in names]
 
 
 def format_unit_address(p: UnitAddressParts) -> str:

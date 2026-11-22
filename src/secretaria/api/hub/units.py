@@ -40,6 +40,7 @@ from secretaria.services.unit_address import (
     invalid_fields,
     normalize_cep,
     normalize_state,
+    oversize_line_fields,
 )
 
 logger = get_logger(__name__)
@@ -54,8 +55,9 @@ def _parts_of(unit: Unit) -> UnitAddressParts:
 
 def _validated_parts(raw: UnitAddressParts) -> UnitAddressParts:
     """Clean the parts (strip, CEP to 8 digits, UF upper-case) or raise 422
-    `unit_address_invalid` listing every bad required field. An invalid CEP is reported, never
-    stored."""
+    `unit_address_invalid` listing every bad field: a missing/invalid required part, a part longer
+    than its column, or - when the derived line would not fit `units.address` - the longest
+    parts. An invalid CEP is reported, never stored."""
     cleaned = UnitAddressParts(
         cep=normalize_cep(raw.cep),
         street=clean_text(raw.street),
@@ -65,7 +67,7 @@ def _validated_parts(raw: UnitAddressParts) -> UnitAddressParts:
         city=clean_text(raw.city),
         state=normalize_state(raw.state),
     )
-    bad = invalid_fields(cleaned)
+    bad = invalid_fields(cleaned) or oversize_line_fields(cleaned)
     if bad:
         raise HTTPException(
             422,

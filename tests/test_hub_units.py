@@ -347,12 +347,9 @@ async def test_patch_parts_on_legacy_unit_needs_all_required(
 
 async def test_unit_read_address_incomplete_flag(client: AsyncClient, db, tenant) -> None:
     await _seed_unit(db, tenant, name="A legacy", address="Rua A, 1")
-    await _seed_unit(db, tenant, name="B complete", address="x", **{
-        "cep": "01310100", "street": "Av. P", "number": "1", "city": "SP", "state": "SP",
-    })
-    await _seed_unit(db, tenant, name="C bad uf", address="x", **{
-        "cep": "01310100", "street": "Av. P", "number": "1", "city": "SP", "state": "ZZ",
-    })
+    base = dict(cep="01310100", street="Av. P", number="1", city="SP")
+    await _seed_unit(db, tenant, name="B complete", address="x", state="SP", **base)
+    await _seed_unit(db, tenant, name="C bad uf", address="x", state="ZZ", **base)
     rows = {r["name"]: r for r in (await client.get(ENDPOINT)).json()}
     assert rows["A legacy"]["address_incomplete"] is True
     assert rows["B complete"]["address_incomplete"] is False
@@ -369,3 +366,73 @@ async def test_patch_other_tenants_unit_is_404(client: AsyncClient, db) -> None:
     assert response.status_code == 404
     async with db() as session:
         assert (await session.get(Unit, foreign.id)).address == "Rua Z, 9"
+
+
+# --- Length rules answer the C1 shape, never pydantic's list nor a DB error ---------------
+
+
+async def test_create_unit_with_overlong_street_is_c1_422(client: AsyncClient, db) -> None:
+    response = await client.post(ENDPOINT, json={"name": "U", **_addr(street="x" * 300)})
+    assert response.status_code == 422
+    detail = response.json()["detail"]
+    assert detail["code"] == "unit_address_invalid"
+    assert detail["fields"] == ["street"]
+    async with db() as session:
+        assert (await session.scalars(select(Unit))).all() == []
+
+
+async def test_create_unit_lists_every_part_over_its_column(client: AsyncClient) -> None:
+    response = await client.post(
+        ENDPOINT,
+        json={
+            "name": "U",
+            **_addr(number="9" * 31, complement="c" * 256, neighborhood="n" * 256, city="y" * 256),
+        },
+    )
+    assert response.status_code == 422
+    assert response.json()["detail"]["fields"] == ["number", "complement", "neighborhood", "city"]
+
+
+async def test_patch_overlong_part_is_c1_422(client: AsyncClient) -> None:
+    created = await client.post(ENDPOINT, json={"name": "U", **_addr()})
+    response = await client.patch(
+        f"{ENDPOINT}/{created.json()['id']}", json={"neighborhood": "n" * 256}
+    )
+    assert response.status_code == 422
+    assert response.json()["detail"]["fields"] == ["neighborhood"]
+
+
+async def test_derived_line_over_512_is_c1_422_naming_longest_parts(
+    client: AsyncClient, db
+) -> None:
+    # Each part fits its column, but the joined line (> 512) would not fit units.address.
+    parts = _addr(street="s" * 255, city="c" * 200, neighborhood="b" * 40, complement="k" * 10)
+    response = await client.post(ENDPOINT, json={"name": "U", **parts})
+    assert response.status_code == 422
+    detail = response.json()["detail"]
+    assert detail["code"] == "unit_address_invalid"
+    assert detail["fields"] == ["street"]
+    async with db() as session:
+        assert (await session.scalars(select(Unit))).all() == []
+
+
+async def test_derived_line_over_512_can_name_several_parts(client: AsyncClient) -> None:
+    parts = _addr(
+        street="s" * 255, complement="k" * 255, neighborhood="b" * 255, city="c" * 255
+    )
+    response = await client.post(ENDPOINT, json={"name": "U", **parts})
+    assert response.status_code == 422
+    assert response.json()["detail"]["fields"] == ["street", "complement", "neighborhood"]
+
+
+async def test_derived_line_exactly_512_is_created(client: AsyncClient, db) -> None:
+    # "<street>, 1, <city> - SP, 01310-100": 2 + 1 + 2 + 5 + 4 + 10 = fixed 24 chars of glue.
+    fixed = len("x, 1, y - SP, 01310-100") - 2  # glue without the two variable parts
+    street = "s" * 255
+    city = "c" * (512 - fixed - 255)
+    parts = _addr(street=street, city=city, number="1", complement=None, neighborhood=None)
+    response = await client.post(ENDPOINT, json={"name": "U", **parts})
+    assert response.status_code == 201, response.text
+    assert len(response.json()["address"]) == 512
+    async with db() as session:
+        assert len((await session.scalar(select(Unit))).address) == 512
