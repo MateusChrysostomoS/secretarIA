@@ -47,6 +47,11 @@ from secretaria.models.insurance import (
 from secretaria.models.insurance_acceptance_exception import InsuranceAcceptanceException
 from secretaria.models.professional import Professional
 from secretaria.models.tenant import Tenant
+from secretaria.services.insurance_plan_order import (
+    clinic_order_sort_key,
+    load_clinic_order,
+    plan_key_for_row,
+)
 from secretaria.services.service_catalog import normalize
 
 logger = get_logger(__name__)
@@ -420,6 +425,10 @@ async def _load_independent_insurance(session: AsyncSession, tenant_id: UUID) ->
     pick is deduplicated across doctors by catalog id (two doctors who both
     take "Unimed" show ONE row); a doctor's own "Outro" is never deduplicated
     with anyone else's - it is identified by that row's own id.
+
+    Order (TASK-090 SPEC §4.6): the clinic's one per-doctor-mode order
+    (`services/insurance_plan_order.py`), the same for every doctor; plans never
+    placed follow alphabetically.
     """
     rows = await session.execute(
         select(ProfessionalInsurancePlan, InsuranceCatalog)
@@ -432,6 +441,7 @@ async def _load_independent_insurance(session: AsyncSession, tenant_id: UUID) ->
         )
     )
     plans_by_id: dict[str, dict] = {}
+    order_keys: dict[str, str] = {}
     accepted: dict[str, set[str]] = {}
     for plan, entry in rows.all():
         plan_id = _independent_plan_id(plan.catalog_id, plan.id)
@@ -443,8 +453,13 @@ async def _load_independent_insurance(session: AsyncSession, tenant_id: UUID) ->
                 "note": plan.custom_payment_note if entry is None else None,
                 "mechanism": entry.mechanism if entry is not None else "desconhecido",
             }
+            order_keys[plan_id] = plan_key_for_row(plan.catalog_id, plan.id)
         accepted.setdefault(str(plan.professional_id), set()).add(plan_id)
-    plans = sorted(plans_by_id.values(), key=lambda item: normalize(item["name"]))
+    order = await load_clinic_order(session, tenant_id) if plans_by_id else {}
+    plans = sorted(
+        plans_by_id.values(),
+        key=lambda item: clinic_order_sort_key(order, order_keys[item["id"]], item["name"]),
+    )
     return TenantInsurance(
         plans=plans, accepted_by={key: frozenset(value) for key, value in accepted.items()}
     )

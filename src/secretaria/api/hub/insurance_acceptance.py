@@ -11,6 +11,10 @@ POST /tenants/me/insurance-acceptance/clinic/copy                         (mode 
 GET  /tenants/me/professionals/{id}/insurance-acceptance                  (mode independent)
 PUT  /tenants/me/professionals/{id}/insurance-acceptance/units/{unit_key} (mode independent)
 POST /tenants/me/professionals/{id}/insurance-acceptance/copy             (mode independent)
+PUT  /tenants/me/professionals/{id}/insurance-acceptance/plan-order       (mode independent)
+
+The doctor matrix's columns follow the clinic's ONE per-doctor-mode convênio order (TASK-090,
+services/insurance_plan_order.py) - the same order the patient sees; `plan-order` writes it.
 
 PUT REPLACES every exception of the slice in one transaction (lock, delete, insert, commit);
 copy REPLACES each destination slice with the source slice's exceptions. Every id in a body must
@@ -46,10 +50,12 @@ from secretaria.schemas.insurance_acceptance import (
     MatrixService,
     MatrixSlice,
     MatrixUnitCount,
+    PlanOrderUpdate,
     ProfessionalMatrixCount,
 )
 from secretaria.services import (
     hub_configuration as hubcfg,
+    insurance_plan_order as plan_order,
     professional_service_units as psu,
     professional_units as pu,
     tenant_config as cfg,
@@ -199,6 +205,36 @@ async def _clinic_scope(session: AsyncSession, tenant: Tenant) -> _Scope:
     return _Scope("shared", None, services, [], plans, slices)
 
 
+async def _professional_plan_rows(
+    session: AsyncSession, tenant_id: UUID, professional_id: UUID
+) -> list[tuple[UUID, str, bool, str]]:
+    """The doctor's own plans as (row id, name, is_custom, clinic order key), in the clinic's
+    one per-doctor-mode order (TASK-090 SPEC §4.6) - the same order the patient sees."""
+    rows = [
+        (
+            plan.id,
+            entry.name if entry is not None else str(plan.custom_name or ""),
+            entry is None,
+            plan_order.plan_key_for_row(plan.catalog_id, plan.id),
+        )
+        for plan, entry in await list_professional_plans(session, professional_id)
+    ]
+    order = await plan_order.load_clinic_order(session, tenant_id) if rows else {}
+    rows.sort(key=lambda row: plan_order.clinic_order_sort_key(order, row[3], row[1]))
+    return rows
+
+
+async def _professional_plan_columns(
+    session: AsyncSession, tenant_id: UUID, professional_id: UUID
+) -> list[tuple[UUID, str, bool]]:
+    return [
+        (row_id, name, is_custom)
+        for row_id, name, is_custom, _key in await _professional_plan_rows(
+            session, tenant_id, professional_id
+        )
+    ]
+
+
 async def _professional_scope(
     session: AsyncSession, tenant: Tenant, professional: Professional
 ) -> _Scope:
@@ -206,10 +242,7 @@ async def _professional_scope(
     names = dict(active)
     service_ids, without_id = await _doctor_services(session, tenant, professional, names)
     services = [(sid, names[sid]) for sid in service_ids]
-    plans = [
-        (plan.id, entry.name if entry is not None else str(plan.custom_name or ""), entry is None)
-        for plan, entry in await list_professional_plans(session, professional.id)
-    ]
+    plans = await _professional_plan_columns(session, tenant.id, professional.id)
     options = (await unit_options_for(session, tenant, [professional])).get(professional.id, [])
     marks = await psu.read_marks(session, professional.id)
     if options:
@@ -558,6 +591,54 @@ async def post_professional_matrix_copy(
     professional = await _professional(session, tenant, professional_id)
     await _professional_guard(tenant)
     return await _copy(session, tenant, professional, body)
+
+
+@router.put("/professionals/{professional_id}/insurance-acceptance/plan-order")
+async def put_professional_plan_order(
+    professional_id: str,
+    body: PlanOrderUpdate,
+    tenant: Tenant = Depends(get_current_tenant),
+    session: AsyncSession = Depends(get_session),
+) -> InsuranceMatrixRead:
+    """Reorder the matrix columns (TASK-090 C3): the clinic's ONE convênio order (`independent`).
+
+    `plan_ids` are this doctor's `plans[].id`, left to right, possibly a subset. The order is the
+    clinic's (catalog plans share a place across doctors; each "Outro" has its own), and the plans
+    this doctor does not see keep their places. 404 `professional_not_found` (another clinic's
+    doctor or unknown) / `plan_not_found` (an id that is not one of this doctor's plans, nothing
+    written); 409 `insurance_mode_not_applicable` outside `independent`.
+    """
+    try:
+        professional = await hubcfg.resolve_professional(session, tenant, professional_id)
+    except hubcfg.ProfessionalNotFound:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail="professional_not_found") from None
+    if tenant.insurance_mode != "independent":
+        raise _error(
+            status.HTTP_409_CONFLICT,
+            "insurance_mode_not_applicable",
+            "A ordem por profissional só existe quando os convênios estão no modo "
+            "'lista por profissional'.",
+            mode=tenant.insurance_mode,
+        )
+    keys = {
+        row_id: key
+        for row_id, _name, _custom, key in await _professional_plan_rows(
+            session, tenant.id, professional.id
+        )
+    }
+    wanted = list(dict.fromkeys(body.plan_ids))
+    if any(plan_id not in keys for plan_id in wanted):
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail="plan_not_found")
+    if wanted:
+        await plan_order.save_subset_order(session, tenant.id, [keys[pid] for pid in wanted])
+        await session.commit()
+    logger.info(
+        "hub_insurance_plan_order_saved",
+        tenant_id=str(tenant.id),
+        professional_id=str(professional.id),
+        placed_count=len(wanted),
+    )
+    return await _read(session, tenant.id, await _professional_scope(session, tenant, professional))
 
 
 # ---------------------------------------------------------------------------
