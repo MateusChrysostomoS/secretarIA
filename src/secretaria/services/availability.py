@@ -239,8 +239,14 @@ async def free_slots_for_day(
     not_before: datetime | None = None,
     buffer_minutes: int = 0,
     consultations: Sequence[Window] | None = None,
+    include_grid: bool = False,
 ) -> list[datetime]:
     """Every free slot START on `day` (clinic-local, aware), held windows excluded.
+
+    `include_grid` (TASK-089; only meaningful with a buffer): ALSO keep the starts of the old
+    fixed grid that respect the buffer, next to the snapped ones. Used to MATCH a time the patient
+    typed ("amanhã às 9h"): 09:00 is free and respects the buffer even though the snapped list
+    reads 08:35, 09:05... Never for a list the patient taps from.
 
     `not_before` drops the slots that start earlier (`booking_notice_floor`).
     `buffer_minutes` (`booking_buffer_minutes`) also drops every slot that starts less than
@@ -251,12 +257,11 @@ async def free_slots_for_day(
     Raises `CalendarUnavailableError` exactly like the calendar does.
     """
     tz = calendar.tzinfo
-    slots = await calendar.list_free_slots(
-        day=datetime(day.year, day.month, day.day),
-        slot_minutes=duration_minutes,
-        max_slots=max(max_slots, slot_scan_limit(duration_minutes)),
-    )
     blockers: Sequence[Window] = holds
+    # TASK-089: with a buffer the padded time is part of the walk itself (`extra_busy`) and the
+    # walk SNAPS to its end, so the first time after a consultation is its end + the buffer
+    # (08:35), not the next point of the opening-time grid. Without a buffer: the old grid.
+    walk: dict = {}
     if buffer_minutes > 0:
         if consultations is None:
             first = datetime(day.year, day.month, day.day, tzinfo=tz)
@@ -264,6 +269,25 @@ async def free_slots_for_day(
                 calendar, first, first + timedelta(days=1), buffer_minutes=buffer_minutes
             )
         blockers = padded([*holds, *consultations], buffer_minutes)
+        walk = {"extra_busy": list(blockers), "snap_after_busy": True}
+    slots = await calendar.list_free_slots(
+        day=datetime(day.year, day.month, day.day),
+        slot_minutes=duration_minutes,
+        max_slots=max(max_slots, slot_scan_limit(duration_minutes)),
+        **walk,
+    )
+    if include_grid and buffer_minutes > 0:
+        grid = await calendar.list_free_slots(
+            day=datetime(day.year, day.month, day.day),
+            slot_minutes=duration_minutes,
+            max_slots=max(max_slots, slot_scan_limit(duration_minutes)),
+            extra_busy=list(blockers),
+        )
+        have = {slot["start"] for slot in slots}
+        slots = sorted(
+            [*slots, *(slot for slot in grid if slot["start"] not in have)],
+            key=lambda slot: slot["start"],
+        )
     kept = at_or_after(
         without_holds(slots, blockers, duration_minutes=duration_minutes, tz=tz), not_before, tz
     )
@@ -292,13 +316,17 @@ async def buffered_free_slots(
         extra["slot_minutes"] = slot_minutes
     if buffer_minutes <= 0:
         return await calendar.list_free_slots(day=day, max_slots=max_slots, **extra)
-    slots = await calendar.list_free_slots(
-        day=day, max_slots=slot_scan_limit(slot_minutes or 30), **extra
-    )
     tz = calendar.tzinfo
     first = _aware(day, tz)
     consultations = await offer_consultation_windows(
         calendar, first, first + timedelta(days=1), buffer_minutes=buffer_minutes
+    )
+    # TASK-089: the padded time joins the walk and the walk snaps to its end (see
+    # `free_slots_for_day`), so the first time after a consultation is its end + the buffer.
+    extra["extra_busy"] = list(padded([*held, *consultations], buffer_minutes))
+    extra["snap_after_busy"] = True
+    slots = await calendar.list_free_slots(
+        day=day, max_slots=slot_scan_limit(slot_minutes or 30), **extra
     )
     # The slots of one call share a length: the calendar's own (a slot's "end"), else the asked one.
     length = slot_minutes or 30
@@ -362,6 +390,9 @@ async def available_day_starts(
     scan_extra: dict = {}
     if consultations_known:
         scan_extra["extra_busy"] = padded(consultations_known, buffer_minutes)
+        # TASK-089: the same snapping walk the day's time list uses, so a day is never hidden when
+        # the snapped list would have a time on it (e.g. 09:15 between two long consultations).
+        scan_extra["snap_after_busy"] = True
     days = await calendar.list_available_days(
         start_day=start, days=window_days, slot_minutes=duration_minutes, **scan_extra
     )

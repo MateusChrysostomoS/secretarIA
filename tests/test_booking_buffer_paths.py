@@ -104,7 +104,9 @@ class _Agenda:
             t += timedelta(minutes=30)
         return False
 
-    async def list_available_days(self, start_day, days, slot_minutes=None, extra_busy=None):
+    async def list_available_days(
+        self, start_day, days, slot_minutes=None, extra_busy=None, snap_after_busy=False
+    ):
         """One scan. Like the real calendar, busy time (`busy` / booked visits) and `extra_busy` can
         empty a day - with or without `extra_busy`."""
         first = start_day.date()
@@ -116,18 +118,24 @@ class _Agenda:
             and self._has_free_slot(d, length, extra_busy or ())
         ]
 
-    async def list_free_slots(self, day, slot_minutes=None, max_slots=6, **_):
+    async def list_free_slots(
+        self, day, slot_minutes=None, max_slots=6, extra_busy=None, snap_after_busy=False, **_
+    ):
         d = day.date()
         if d not in self.open_days:
             return []
         length = timedelta(minutes=slot_minutes or 30)
         slots, t = [], datetime(d.year, d.month, d.day, self.hours[0], tzinfo=TZ)
         stop = datetime(d.year, d.month, d.day, self.hours[1], tzinfo=TZ)
+        extra = list(extra_busy or ())
         while t + length <= stop and len(slots) < max_slots:
-            if not self._taken(t, t + length):
+            # TASK-089: like the real calendar, `extra_busy` is taken time and a snapping walk
+            # jumps to the end of what blocked it.
+            hit = [e for s, e in extra if s < t + length and e > t]
+            if not hit and not self._taken(t, t + length):
                 slots.append({"start": t.isoformat(), "end": (t + length).isoformat(),
                               "label": t.strftime("%H:%M")})
-            t += timedelta(minutes=30)
+            t = max(hit) if (hit and snap_after_busy) else t + timedelta(minutes=30)
         return slots
 
     async def has_conflict(self, start, end, ignore_event_id=None):
