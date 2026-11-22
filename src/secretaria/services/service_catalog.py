@@ -401,6 +401,10 @@ def _without_service(entries: Any, catalog: Sequence[Service], service: Service)
     return kept if len(kept) != len(entries) else None
 
 
+class ServiceAlreadyDeleted(Exception):
+    """The service row vanished before this request's DELETE (a concurrent delete won)."""
+
+
 async def delete_service_everywhere(session: AsyncSession, tenant: Any, service: Service) -> None:
     """Delete `service` for the whole clinic (TASK-090). Mutates only: the caller commits.
 
@@ -420,6 +424,9 @@ async def delete_service_everywhere(session: AsyncSession, tenant: Any, service:
 
     Past appointments keep their `appointment_type` text: it is a label, not a reference.
     New lists are assigned, never mutated in place (plain JSON columns do not track that).
+
+    Raises `ServiceAlreadyDeleted` when a concurrent request deleted the row first; the
+    caller must roll back (the route answers 404 `service_not_found`).
     """
     tenant_id = tenant.id
     catalog = await load_service_catalog(session, tenant_id)
@@ -452,7 +459,14 @@ async def delete_service_everywhere(session: AsyncSession, tenant: Any, service:
     await session.execute(
         delete(ProfessionalServiceUnit).where(ProfessionalServiceUnit.service_id == service.id)
     )
-    await session.delete(service)
+    # A Core DELETE (not `session.delete`) so a row that a concurrent request already removed
+    # is visible as rowcount 0 instead of an ORM warning/StaleDataError on flush.
+    gone = await session.execute(
+        delete(Service).where(Service.id == service.id, Service.tenant_id == tenant_id)
+    )
+    if gone.rowcount == 0:
+        raise ServiceAlreadyDeleted(str(service.id))
+    session.expunge(service)
     await session.flush()
 
     for position, row in enumerate(row for row in catalog if row.id != service.id):

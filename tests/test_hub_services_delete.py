@@ -16,7 +16,7 @@ from uuid import uuid4  # noqa: E402
 
 import pytest  # noqa: E402
 import pytest_asyncio  # noqa: E402
-from sqlalchemy import select  # noqa: E402
+from sqlalchemy import delete, select  # noqa: E402
 
 from secretaria.api.hub import deps as hub_deps  # noqa: E402
 from secretaria.core.database import get_session  # noqa: E402
@@ -343,3 +343,47 @@ async def test_past_appointments_keep_appointment_type_text(client, world):
         )
         assert appointment.appointment_type == "Consulta"
         assert appointment.professional_id == w["doc_a"].id
+
+
+async def _stale_copy(w, service: Service) -> Service:
+    """The service as a concurrent request still holds it: loaded, then deleted by another."""
+    async with w["db"]() as session:
+        stale = await session.get(Service, service.id)
+        session.expunge(stale)
+    async with w["db"]() as session:
+        await session.execute(delete(Service).where(Service.id == service.id))
+        await session.commit()
+    return stale
+
+
+async def test_second_concurrent_delete_of_the_same_service_is_404_not_500(
+    client, world, monkeypatch
+):
+    from secretaria.api.hub import services as services_api
+
+    w = world
+    stale = await _stale_copy(w, w["consulta"])
+
+    async def _resolve_stale(session, tenant, service_id):
+        return stale
+
+    monkeypatch.setattr(services_api, "_resolve", _resolve_stale)
+    response = await client.delete(_url(w["consulta"]), headers=HEADERS)
+    assert response.status_code == 404
+    assert response.json()["detail"] == "service_not_found"
+    # Nothing else was touched by the losing request.
+    assert await _names(w, Professional, w["doc_a"].id) == ["Consulta", "Retorno"]
+
+
+async def test_helper_raises_when_the_row_is_already_gone(world):
+    from secretaria.services.service_catalog import (
+        ServiceAlreadyDeleted,
+        delete_service_everywhere,
+    )
+
+    w = world
+    stale = await _stale_copy(w, w["consulta"])
+    async with w["db"]() as session:
+        tenant = await session.get(Tenant, w["tenant"].id)
+        with pytest.raises(ServiceAlreadyDeleted):
+            await delete_service_everywhere(session, tenant, stale)

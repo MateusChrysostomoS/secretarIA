@@ -36,6 +36,7 @@ from uuid import UUID, uuid4
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm.exc import StaleDataError
 
 from secretaria.api.hub.deps import get_current_tenant, require_clinic_manager
 from secretaria.core.catalog_limits import (
@@ -61,6 +62,7 @@ from secretaria.services import (
     hub_unit_terms as unit_terms_service,
 )
 from secretaria.services.service_catalog import (
+    ServiceAlreadyDeleted,
     delete_service_everywhere,
     find_near_duplicates,
     load_service_catalog,
@@ -428,8 +430,13 @@ async def delete_service(
     Another clinic's id is a 404, same as an unknown one.
     """
     service = await _resolve(session, tenant, service_id)
-    await delete_service_everywhere(session, tenant, service)
-    await session.commit()
+    try:
+        await delete_service_everywhere(session, tenant, service)
+        await session.commit()
+    except (ServiceAlreadyDeleted, StaleDataError):
+        # Two managers deleted the same service at once: the loser sees it already gone.
+        await session.rollback()
+        raise HTTPException(status.HTTP_404_NOT_FOUND, detail="service_not_found") from None
     logger.info(
         "service_catalog_deleted",
         tenant_id=str(tenant.id),
