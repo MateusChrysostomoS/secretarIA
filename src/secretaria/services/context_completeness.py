@@ -1,7 +1,7 @@
 """What is still missing in a clinic's context - deterministic, no LLM (TASK-025).
 
-`compute_completeness(tenant, services, professionals)` returns the checklist the manager sees
-next to the context form and a 0-100 score. Required items weigh 1, recommended ones 0.5. A
+`compute_completeness(tenant, services, professionals, units)` returns the checklist the manager
+sees next to the context form and a 0-100 score. Required items weigh 1, recommended ones 0.5. A
 required item that is not filled is `missing`; a recommended one is `optional`. Pure: it reads
 attributes of the objects it is given and touches no database, so it is trivially testable.
 
@@ -65,6 +65,20 @@ def _has_hours(business_hours: Any) -> bool:
 def _has_address(address: Any) -> bool:
     return (
         isinstance(address, dict) and _filled(address.get("line")) and _filled(address.get("city"))
+    )
+
+
+def _has_unit_address(units: list[Any] | None) -> bool:
+    """At least one ACTIVE unit with a structured address (street + city).
+
+    The clinic's address now lives in its units; a legacy `Tenant.address` still counts
+    (`_has_address`) so a clinic set up before the units screen is not nagged.
+    """
+    return any(
+        getattr(unit, "is_active", True)
+        and _filled(getattr(unit, "street", None))
+        and _filled(getattr(unit, "city", None))
+        for unit in units or []
     )
 
 
@@ -178,7 +192,10 @@ def _booking_items(
 
 
 def compute_completeness(
-    tenant: Any, services: list[Any], professionals: list[Any] | None = None
+    tenant: Any,
+    services: list[Any],
+    professionals: list[Any] | None = None,
+    units: list[Any] | None = None,
 ) -> Completeness:
     # JSON column: a row written outside the schema can hold any shape; ignore a bad one.
     stored = getattr(tenant, "clinic_facts", None)
@@ -200,8 +217,8 @@ def compute_completeness(
             "address",
             "Endereço da clínica",
             REQUIRED_WEIGHT,
-            _has_address(getattr(tenant, "address", None)),
-            "Informe pelo menos a rua e a cidade.",
+            _has_unit_address(units) or _has_address(getattr(tenant, "address", None)),
+            "Cadastre uma unidade com pelo menos a rua e a cidade.",
             "address",
         ),
         (

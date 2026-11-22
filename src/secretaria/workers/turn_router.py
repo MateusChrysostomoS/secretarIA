@@ -22,6 +22,7 @@ from secretaria.schemas.webhook import (
 )
 from secretaria.services import deposit_wait
 from secretaria.services.answer_masks import CODE_MASK
+from secretaria.services.clinic_region import load_clinic_region
 from secretaria.services.flow_router import (
     LABEL_CONFIRM,
     STEP_AWAITING_CONFIRMATION,
@@ -208,6 +209,7 @@ async def _route_inbound_turn(
             conversation_id=conversation.id,
             patient_ref=patient_ref,
             channel=channel,
+            region=await load_clinic_region(session, tenant),
         )
 
     # Capture a self-introduced name ("meu nome é ...") when we don't
@@ -627,6 +629,7 @@ async def _route_inbound_turn(
                 inbound_body=body or "",
                 ask_name=ask_name,
                 sole_professional=await _load_sole_professional(session, tenant.id),
+                region=await load_clinic_region(session, tenant),
             )
         # Already asked, still not accepted: re-prompt, with the
         # button attached so the way forward is one tap from the
@@ -869,6 +872,7 @@ async def _route_inbound_turn(
         is_first_contact,
         is_returning_patient,
         await _load_sole_professional(session, tenant.id) if is_first_contact else None,
+        await load_clinic_region(session, tenant) if is_first_contact else None,
     )
 
     # Context-aware opening (indexed reads, worker-side only): adapt

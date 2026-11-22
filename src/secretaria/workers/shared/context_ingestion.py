@@ -22,6 +22,7 @@ from secretaria.models.context_source import (
     STATUS_PROCESSING,
     ContextSource,
 )
+from secretaria.services.clinic_region import load_clinic_region
 from secretaria.services.context_extraction import (
     DRAFT_KEYS,
     ContextExtraction,
@@ -31,7 +32,7 @@ from secretaria.services.context_extraction import (
     draft_missing_messages,
     extract_context,
 )
-from secretaria.services.greeting_template import clinic_description_budget, tenant_city
+from secretaria.services.greeting_template import clinic_description_budget
 from secretaria.services.insurance_catalog import list_catalog, list_tenant_plans
 from secretaria.services.safe_fetch import FetchError, UnsafeUrlError, fetch_public_page
 from secretaria.services.service_catalog import load_service_catalog
@@ -133,6 +134,8 @@ async def _load_inputs(sid: UUID) -> dict:
         )
         insurance_catalog = await list_catalog(session)
         tenant_plans = await list_tenant_plans(session, source.tenant_id)
+        region = await load_clinic_region(session, tenant)
+        place, preposition = (region.name, region.preposition) if region else ("", "em")
         return {
             "kind": source.kind,
             "url": source.url,
@@ -174,7 +177,7 @@ async def _load_inputs(sid: UUID) -> dict:
             "address": tenant.address,
             "description": tenant.clinic_description,
             # THIS clinic's greeting slot
-            "budget": clinic_description_budget(tenant.clinic_name, tenant_city(tenant.address)),
+            "budget": clinic_description_budget(tenant.clinic_name, place, None, preposition),
             "saved_messages": {
                 "returning_greeting_message": tenant.returning_greeting_message,
                 "post_consult_message": tenant.post_consult_message,

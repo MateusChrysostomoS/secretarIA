@@ -15,7 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from secretaria.api.hub.deps import get_current_tenant
 from secretaria.core.database import get_session
-from secretaria.models import Professional, Tenant
+from secretaria.models import Professional, Tenant, Unit
 from secretaria.services.context_completeness import compute_completeness
 from secretaria.services.service_catalog import load_service_catalog
 
@@ -63,7 +63,12 @@ async def get_context_completeness(
             .order_by(Professional.created_at)
         )
     )
-    result = compute_completeness(tenant, services, professionals)
+    units = list(
+        await session.scalars(
+            select(Unit).where(Unit.tenant_id == tenant.id, Unit.is_active.is_(True))
+        )
+    )
+    result = compute_completeness(tenant, services, professionals, units)
     return CompletenessRead(
         score=result.score,
         items=[CompletenessItemRead(**vars(item)) for item in result.items],

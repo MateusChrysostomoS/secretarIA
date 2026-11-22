@@ -2,17 +2,22 @@
 
 GET   /tenants/me/units      - list.
 POST  /tenants/me/units      - create.
-PATCH /tenants/me/units/{id} - update (name, address, is_active).
+PATCH /tenants/me/units/{id} - update (name, structured address, is_active).
 
 Units are NOT a paid add-on any more (TASK-090, owner decision): any clinic can create and
 activate units, with no limit on how many. Nothing here consults entitlements or
 `limits["units"]` (no 403 `multi_unit_not_entitled`, no 409 `unit_limit_reached`, no 503 from
 an entitlement fetch).
 
-A unit always has an address: create without a (non-blank) address, or a PATCH that
-sends a blank/null address, is rejected with 422
-{"detail": {"code": "unit_address_required", "message": ...}}. A PATCH that omits
-`address` is untouched (legacy units without one stay editable).
+The address is structured (contract C1; see services/unit_address.py):
+  - Input parts: cep (mask accepted, stored as 8 digits), street, number, complement,
+    neighborhood, city, state (UF). An `address` text sent by the client is ignored; the
+    stored/returned `address` line is derived from the parts.
+  - Create, or a PATCH that sends ANY address part, validates the RESULT (for a PATCH: the
+    existing parts merged with the sent ones): cep, street, number, city and state must be
+    valid, else 422 {"detail": {"code": "unit_address_invalid", "message": ..., "fields": [...]}}.
+  - A PATCH of only name/is_active never validates, so a legacy unit (text address only)
+    stays editable. On read, `address_incomplete` flags those units.
 """
 
 from uuid import UUID
@@ -28,20 +33,57 @@ from secretaria.models import Tenant
 from secretaria.models.unit import Unit
 from secretaria.schemas.unit import UnitCreate, UnitRead, UnitUpdate
 from secretaria.services.professional_units import count_professionals_by_unit
+from secretaria.services.unit_address import (
+    UnitAddressParts,
+    clean_text,
+    format_unit_address,
+    invalid_fields,
+    normalize_cep,
+    normalize_state,
+    oversize_line_fields,
+)
 
 logger = get_logger(__name__)
 router = APIRouter(prefix="/tenants/me/units", tags=["hub-units"])
 
+_PART_FIELDS = ("cep", "street", "number", "complement", "neighborhood", "city", "state")
 
-def _require_address(raw: str | None) -> str:
-    """A unit always has an address: strip it and refuse blank/missing (422, structured)."""
-    address = (raw or "").strip()
-    if not address:
+
+def _parts_of(unit: Unit) -> UnitAddressParts:
+    return UnitAddressParts(**{name: getattr(unit, name) for name in _PART_FIELDS})
+
+
+def _validated_parts(raw: UnitAddressParts) -> UnitAddressParts:
+    """Clean the parts (strip, CEP to 8 digits, UF upper-case) or raise 422
+    `unit_address_invalid` listing every bad field: a missing/invalid required part, a part longer
+    than its column, or - when the derived line would not fit `units.address` - the longest
+    parts. An invalid CEP is reported, never stored."""
+    cleaned = UnitAddressParts(
+        cep=normalize_cep(raw.cep),
+        street=clean_text(raw.street),
+        number=clean_text(raw.number),
+        complement=clean_text(raw.complement),
+        neighborhood=clean_text(raw.neighborhood),
+        city=clean_text(raw.city),
+        state=normalize_state(raw.state),
+    )
+    bad = invalid_fields(cleaned) or oversize_line_fields(cleaned)
+    if bad:
         raise HTTPException(
             422,
-            {"code": "unit_address_required", "message": "Informe o endereço da unidade."},
+            {
+                "code": "unit_address_invalid",
+                "message": "Confira o endereço da unidade: CEP, rua, número, cidade e estado.",
+                "fields": bad,
+            },
         )
-    return address
+    return cleaned
+
+
+def _apply_parts(unit: Unit, parts: UnitAddressParts) -> None:
+    for name in _PART_FIELDS:
+        setattr(unit, name, getattr(parts, name))
+    unit.address = format_unit_address(parts)
 
 
 def _read_model(unit: Unit, professionals_count: int = 0) -> UnitRead:
@@ -49,6 +91,8 @@ def _read_model(unit: Unit, professionals_count: int = 0) -> UnitRead:
         id=str(unit.id),
         name=unit.name,
         address=unit.address,
+        **{name: getattr(unit, name) for name in _PART_FIELDS},
+        address_incomplete=bool(invalid_fields(_parts_of(unit))),
         is_active=unit.is_active,
         created_at=unit.created_at,
         professionals_count=professionals_count,
@@ -87,14 +131,10 @@ async def create_unit(
     tenant: Tenant = Depends(get_current_tenant),
     session: AsyncSession = Depends(get_session),
 ) -> UnitRead:
-    address = _require_address(body.address)
+    parts = _validated_parts(UnitAddressParts(**body.model_dump(include=set(_PART_FIELDS))))
 
-    unit = Unit(
-        tenant_id=tenant.id,
-        name=body.name,
-        address=address,
-        is_active=body.is_active,
-    )
+    unit = Unit(tenant_id=tenant.id, name=body.name, is_active=body.is_active)
+    _apply_parts(unit, parts)
     session.add(unit)
     await session.commit()
     await session.refresh(unit)
@@ -111,15 +151,16 @@ async def update_unit(
 ) -> UnitRead:
     unit = await _get_unit(session, tenant, unit_id)
     data = body.model_dump(exclude_unset=True)
-    # Sending `address` (even blank/null) must carry a real one; omitting it leaves a legacy
-    # unit without address editable (name/is_active only).
-    if "address" in data:
-        data["address"] = _require_address(data["address"])
+
+    # Any address part sent => validate the MERGED result (existing parts + sent parts); a
+    # PATCH of only name/is_active leaves a legacy unit (text address only) editable.
+    sent_parts = {k: v for k, v in data.items() if k in _PART_FIELDS}
+    if sent_parts:
+        merged = {**{name: getattr(unit, name) for name in _PART_FIELDS}, **sent_parts}
+        _apply_parts(unit, _validated_parts(UnitAddressParts(**merged)))
 
     if "name" in data:
         unit.name = data["name"]
-    if "address" in data:
-        unit.address = data["address"]
     if "is_active" in data:
         unit.is_active = data["is_active"]
 

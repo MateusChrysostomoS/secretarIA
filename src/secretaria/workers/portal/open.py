@@ -30,6 +30,7 @@ from secretaria.services import reminder_hooks
 from secretaria.services.channel_sender import (
     CHANNEL_BRAIN_MESSAGE,
 )
+from secretaria.services.clinic_region import load_clinic_region
 from secretaria.services.entitlements_client import get_entitlements
 from secretaria.services.flow_router import reactivation_gap_minutes
 from secretaria.services.payments import adjustment_suspension
@@ -213,6 +214,7 @@ async def _open_brain_message_conversation(
                     patient_ref=external_id,
                     channel=CHANNEL_BRAIN_MESSAGE,
                     sole_professional=await _load_sole_professional(session, tenant.id),
+                    region=await load_clinic_region(session, tenant),
                 )
         except IntegrityError:
             # A concurrent open (or a first inbound) raced us to the

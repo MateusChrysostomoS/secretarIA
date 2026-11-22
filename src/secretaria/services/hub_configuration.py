@@ -52,10 +52,10 @@ from secretaria.services import (
     reminder_schedule,
     tenant_config as cfg,
 )
+from secretaria.services.clinic_region import load_clinic_region
 from secretaria.services.greeting_template import (
     clinic_description_budget,
     greeting_preview_template,
-    tenant_city,
 )
 from secretaria.services.operating_channel import available_operating_channels
 from secretaria.services.payments import settings as payment_settings
@@ -386,7 +386,13 @@ async def apply_tenant_config(session: AsyncSession, tenant: Tenant, data: dict)
     # so a PUT that changes `clinic_name` and `clinic_description` together is
     # judged against the name it is actually saving, not the stored one.
     if "clinic_description" in data:
-        budget = clinic_description_budget(tenant.clinic_name, tenant_city(tenant.address))
+        region = await load_clinic_region(session, tenant)
+        budget = clinic_description_budget(
+            tenant.clinic_name,
+            region.name if region else "",
+            None,
+            region.preposition if region else "em",
+        )
         typed = len((tenant.clinic_description or "").strip())
         if typed > budget:
             raise ClinicDescriptionTooLong(
@@ -482,6 +488,9 @@ def config_source_fields(professional: Professional) -> dict[str, str]:
 
 
 async def tenant_read_model(session: AsyncSession, tenant: Tenant) -> TenantConfigRead:
+    region = await load_clinic_region(session, tenant)
+    place = region.name if region else ""
+    preposition = region.preposition if region else "em"
     connected = await cfg.has_google_refresh_token(session, tenant.id)
     asaas_connected = await cfg.has_asaas_api_key(session, tenant.id)
     return TenantConfigRead(
@@ -495,10 +504,10 @@ async def tenant_read_model(session: AsyncSession, tenant: Tenant) -> TenantConf
         # receives cannot drift. The alternative — re-typing the frame in the
         # frontend — guarantees they eventually do.
         greeting_preview_template=greeting_preview_template(
-            tenant.clinic_name, tenant_city(tenant.address)
+            tenant.clinic_name, place, preposition
         ),
         clinic_description_max=clinic_description_budget(
-            tenant.clinic_name, tenant_city(tenant.address)
+            tenant.clinic_name, place, None, preposition
         ),
         returning_greeting_message=tenant.returning_greeting_message,
         persona_notes=tenant.persona_notes,
