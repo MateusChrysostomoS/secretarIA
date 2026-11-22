@@ -27,6 +27,10 @@ from secretaria.services.clinic_region import (  # noqa: E402
     load_clinic_region,
     region_of_units,
 )
+from secretaria.services.unit_address import (  # noqa: E402
+    BR_STATE_NAMES,
+    BR_STATE_PREPOSITIONS,
+)
 from secretaria.workers.shared.greeting import greeting_place  # noqa: E402
 
 
@@ -46,6 +50,48 @@ def test_same_city_accents_and_case_equal() -> None:
 def test_same_state_different_cities_gives_state_name() -> None:
     region = region_of_units([_unit("Belo Horizonte", "MG"), _unit("Uberlândia", "mg")])
     assert region == Region("state", "Minas Gerais", "em")
+
+
+EXPECTED_STATE_PHRASES = {
+    "AC": "no Acre",
+    "AL": "em Alagoas",
+    "AP": "no Amapá",
+    "AM": "no Amazonas",
+    "BA": "na Bahia",
+    "CE": "no Ceará",
+    "DF": "no Distrito Federal",
+    "ES": "no Espírito Santo",
+    "GO": "em Goiás",
+    "MA": "no Maranhão",
+    "MT": "no Mato Grosso",
+    "MS": "no Mato Grosso do Sul",
+    "MG": "em Minas Gerais",
+    "PA": "no Pará",
+    "PB": "na Paraíba",
+    "PR": "no Paraná",
+    "PE": "em Pernambuco",
+    "PI": "no Piauí",
+    "RJ": "no Rio de Janeiro",
+    "RN": "no Rio Grande do Norte",
+    "RS": "no Rio Grande do Sul",
+    "RO": "em Rondônia",
+    "RR": "em Roraima",
+    "SC": "em Santa Catarina",
+    "SP": "em São Paulo",
+    "SE": "em Sergipe",
+    "TO": "no Tocantins",
+}
+
+
+def test_every_state_has_a_preposition() -> None:
+    assert set(EXPECTED_STATE_PHRASES) == set(BR_STATE_NAMES) == set(BR_STATE_PREPOSITIONS)
+
+
+@pytest.mark.parametrize("uf", sorted(EXPECTED_STATE_PHRASES))
+def test_state_region_carries_the_states_own_preposition(uf: str) -> None:
+    region = region_of_units([_unit("Cidade Um", uf), _unit("Cidade Dois", uf.lower())])
+    assert region is not None and region.level == "state"
+    assert f"{region.preposition} {region.name}" == EXPECTED_STATE_PHRASES[uf]
 
 
 def test_different_states_gives_brasil() -> None:
@@ -192,7 +238,7 @@ def test_description_is_cut_to_the_budget_of_the_rendered_region() -> None:
         conversation_id=uuid4(),
         patient_ref="x",
         channel="whatsapp",
-        region=Region("state", "Rio Grande do Norte", "em"),
+        region=Region("state", "Rio Grande do Norte", "no"),
     )
-    assert ", em Rio Grande do Norte." in reply.greeting_override
+    assert ", no Rio Grande do Norte." in reply.greeting_override
     assert len(reply.greeting_override) <= MAX_INTERACTIVE_BODY_CHARS

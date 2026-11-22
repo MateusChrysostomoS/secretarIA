@@ -42,6 +42,38 @@ BR_STATE_NAMES: Mapping[str, str] = {
     "TO": "Tocantins",
 }
 
+# How pt-BR says "in <state>": "na Bahia", "no Paraná", "em São Paulo". The greeting prints
+# `<preposition> <name>`, so a state without its own entry here could not be named correctly.
+BR_STATE_PREPOSITIONS: Mapping[str, str] = {
+    "AC": "no",
+    "AL": "em",
+    "AP": "no",
+    "AM": "no",
+    "BA": "na",
+    "CE": "no",
+    "DF": "no",
+    "ES": "no",
+    "GO": "em",
+    "MA": "no",
+    "MT": "no",
+    "MS": "no",
+    "MG": "em",
+    "PA": "no",
+    "PB": "na",
+    "PR": "no",
+    "PE": "em",
+    "PI": "no",
+    "RJ": "no",
+    "RN": "no",
+    "RS": "no",
+    "RO": "em",
+    "RR": "em",
+    "SC": "em",
+    "SP": "em",
+    "SE": "em",
+    "TO": "no",
+}
+
 # The parts every unit address needs (complement and neighborhood are optional).
 REQUIRED_FIELDS: tuple[str, ...] = ("cep", "street", "number", "city", "state")
 

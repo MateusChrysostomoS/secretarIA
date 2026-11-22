@@ -487,6 +487,20 @@ def test_place_already_named_in_description_is_not_repeated() -> None:
     assert rendered.count("Minas Gerais") == 1
 
 
+def test_place_is_matched_as_a_whole_word_not_a_substring() -> None:
+    # "Pará" folds to "para", which is also the preposition inside the description.
+    rendered = render_greeting(
+        "Clinic", "Atendemos para toda a família.", city="Pará", preposition="no"
+    )
+    assert "no Pará" in rendered
+    # ...while a real mention (any case) is still recognised, and so is a whole phrase.
+    named = render_greeting("Clinic", "Atendemos no PARÁ.", city="Pará", preposition="no")
+    assert "no Pará" not in named
+    # A longer word that merely contains the place is not a mention either.
+    contained = render_greeting("Clinic", "Atendemos em Paraná.", city="Pará", preposition="no")
+    assert "no Pará" in contained
+
+
 def test_default_preposition_keeps_the_old_wording() -> None:
     assert render_greeting("Clinic", "x", city="Recife") == render_greeting(
         "Clinic", "x", city="Recife", preposition="em"
@@ -501,8 +515,9 @@ def test_preview_template_carries_the_preposition() -> None:
 @pytest.mark.parametrize(
     ("place", "preposition"),
     [
-        ("Rio Grande do Norte", "em"),
-        ("Rio Grande do Sul", "em"),
+        ("Rio Grande do Norte", "no"),
+        ("Rio Grande do Sul", "no"),
+        ("Mato Grosso do Sul", "no"),
         ("Brasil", "no"),
         ("Campos dos Goytacazes", "em"),
     ],

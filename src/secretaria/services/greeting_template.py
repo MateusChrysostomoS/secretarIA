@@ -185,6 +185,24 @@ def _fold(text: str) -> str:
     return "".join(ch for ch in decomposed if not unicodedata.combining(ch))
 
 
+def _names_place(description: str, place: str) -> bool:
+    """True when `description` mentions `place` as whole words (case-insensitive).
+
+    Accent-insensitive ("sao paulo" names "São Paulo"), except for a single accented
+    word: "Pará" folds to "para", the preposition, so it only matches its accented form.
+    """
+    place = " ".join(place.split())
+    if not place:
+        return False
+    cased = unicodedata.normalize("NFC", place).casefold()
+    if " " not in place and _fold(place) != cased:
+        needle, haystack = cased, unicodedata.normalize("NFC", description).casefold()
+    else:
+        needle, haystack = _fold(place), _fold(description)
+    haystack = " ".join(haystack.split())
+    return re.search(r"(?<!\w)" + re.escape(needle) + r"(?!\w)", haystack) is not None
+
+
 def _is_masculine(name: str) -> bool:
     first = _fold(name).split(None, 1)[0].rstrip(".") if name.strip() else ""
     return first in _MASCULINE_FIRST_WORDS
@@ -272,7 +290,7 @@ def _identification(
         if match:
             punct = match.group()
             desc = desc[: match.start()].rstrip()
-    if city and desc and _fold(city) in _fold(desc):
+    if city and desc and _names_place(desc, city):
         city = ""
     parts = [p for p in (desc, f"{preposition} {city}" if city else "") if p]
     if not parts:
