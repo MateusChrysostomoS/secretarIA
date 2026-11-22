@@ -245,9 +245,11 @@ def professionals_offering(
 
     out: list[Any] = []
     for professional in professionals or []:
-        entries = getattr(professional, "appointment_types", None) or getattr(
-            tenant, "appointment_types", None
-        )
+        # NULL inherits the clinic's catalog; an own `[]` (TASK-089: a professional just invited)
+        # is "no services", exactly as `professional_appointment_types` reads it.
+        entries = getattr(professional, "appointment_types", None)
+        if entries is None:
+            entries = getattr(tenant, "appointment_types", None)
         for entry in resolve_entries(entries, services):
             if not entry.get("is_active", True):
                 continue
@@ -285,9 +287,10 @@ def offering_map(
         out[str(service.id)] = []
 
     for professional in professionals or []:
-        entries = getattr(professional, "appointment_types", None) or getattr(
-            tenant, "appointment_types", None
-        )
+        # Same NULL-versus-`[]` rule as `professionals_offering` above (TASK-089).
+        entries = getattr(professional, "appointment_types", None)
+        if entries is None:
+            entries = getattr(tenant, "appointment_types", None)
         seen: set[str] = set()
         for entry in resolve_entries(entries, services):
             if not entry.get("is_active", True):

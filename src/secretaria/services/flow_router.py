@@ -9179,7 +9179,13 @@ def rebooking_candidates(
     * Nobody else offers it -> the FULL roster plus a fixed explanatory line.
       Never a silently short list, never an empty one.
     """
-    others = [p for p in professionals if p.id != cancelled_professional_id]
+    # TASK-089: a professional with an own empty service list (just invited) is not a doctor to
+    # rebook with, not even as the "full roster" fallback below.
+    others = [
+        p
+        for p in professionals
+        if p.id != cancelled_professional_id and getattr(p, "appointment_types", None) != []
+    ]
     if not others:
         return [], None
     offering = (

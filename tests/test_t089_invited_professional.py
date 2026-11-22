@@ -26,6 +26,7 @@ from sqlalchemy import update  # noqa: E402
 from secretaria.models import Professional  # noqa: E402
 from secretaria.services import provisioning  # noqa: E402
 from secretaria.services.flow_router import _professionals_offering  # noqa: E402
+from secretaria.services.service_catalog import professionals_offering  # noqa: E402
 from tests._local_agenda import seed_professional, seed_tenant  # noqa: E402
 from tests._reminder_fixtures import db  # noqa: E402, F401
 
@@ -89,3 +90,26 @@ async def test_the_service_flow_does_not_offer_a_professional_with_no_services(d
         invited = await session.get(Professional, invited_id)
         offering = _professionals_offering(tenant, [owner, invited], "Consulta")
     assert [p.name for p in offering] == ["Dra. Dona"]
+
+
+async def test_the_catalog_helpers_read_an_empty_own_list_as_no_services(db):
+    tenant = await seed_tenant(db)
+    tenant.appointment_types = [{"name": "Consulta", "duration_min": 30, "is_active": True}]
+    owner = await seed_professional(db, tenant, "Dra. Dona")  # NULL: inherits
+    invited_id, _ = await _attach(db, tenant, "Dr. Convidado")
+    async with db() as session:
+        invited = await session.get(Professional, invited_id)
+    assert [p.name for p in professionals_offering("Consulta", [owner, invited], tenant, [])] == [
+        "Dra. Dona"
+    ]
+    # remarcação ("Outro médico"): the newcomer is not a candidate, not even as the fallback
+    from secretaria.services.flow_router import rebooking_candidates
+
+    others, prefix = rebooking_candidates(
+        tenant,
+        [owner, invited],
+        cancelled_professional_id=owner.id,
+        service_name="Consulta",
+        services=[],
+    )
+    assert others == [] and prefix is None
