@@ -163,7 +163,7 @@ def test_every_calendar_touching_tool_is_classified():
     )
     universe = {
         *(t.name for t in graph._BASE_TOOLS),
-        *(t.name for t in reg.agent_tools_for(everything)),
+        *(t.name for t in reg.agent_tools_for(everything, has_active_units=True)),
         *_HANDBACKS,
         "start_guided_booking",
     }

@@ -100,7 +100,7 @@ def _config() -> TenantRuntimeConfig:
 def _universe() -> set[str]:
     """Every tool name a turn can be built with, v1 or v2 - read off the real objects."""
     names = {t.name for t in graph._BASE_TOOLS}
-    names |= {t.name for t in reg.agent_tools_for(ALL_ADDONS)}
+    names |= {t.name for t in reg.agent_tools_for(ALL_ADDONS, has_active_units=True)}
     for tenant in (TENANT_ON, TENANT_OFF):
         names |= {t.name for t in _flow_handback_tools(tenant, BOOKING_TOPOLOGY_SOLE, [])}
     return names
@@ -141,7 +141,8 @@ def _rendered() -> str:
 @pytest.mark.parametrize("topology", TOPOLOGIES)
 def test_a_switch_off_turn_gets_exactly_the_v1_prompt(topology):
     config = _config()
-    extras = _flow_handback_tools(TENANT_OFF, topology, reg.agent_tools_for(ALL_ADDONS))
+    plugin_tools = reg.agent_tools_for(ALL_ADDONS, has_active_units=True)
+    extras = _flow_handback_tools(TENANT_OFF, topology, plugin_tools)
     with _turn(v2=False, topology=topology, extras=extras, config=config):
         assert _rendered() == secretary_system_prompt(config)
         assert graph._turn_system_prompt(config) == secretary_system_prompt(config)
@@ -151,7 +152,10 @@ def test_a_switch_off_turn_gets_exactly_the_v1_prompt(topology):
 @pytest.mark.parametrize("topology", TOPOLOGIES)
 def test_a_v2_turn_prompt_names_only_its_own_tools(topology, addons):
     config = _config()
-    extras = _flow_handback_tools(TENANT_ON, topology, reg.agent_tools_for(addons))
+    plugin_tools = reg.agent_tools_for(
+        addons, has_active_units=addons.addons.get("multi_unit") is True
+    )
+    extras = _flow_handback_tools(TENANT_ON, topology, plugin_tools)
     turn_names = {t.name for t in graph.effective_tools(topology, extras, toolset_v2=True)}
     with _turn(v2=True, topology=topology, extras=extras, config=config):
         prompt = _rendered()
@@ -163,6 +167,29 @@ def test_a_v2_turn_prompt_names_only_its_own_tools(topology, addons):
     for gone in (*ai_tools.AI_TOOLSET_V2_WITHHELD, *ai_tools.AI_TOOLSET_V2_RETIRED):
         assert not re.search(rf"\b{gone}\b", prompt)
     assert "get_availability" in prompt
+
+
+@pytest.mark.parametrize("topology", TOPOLOGIES)
+def test_a_clinic_without_active_units_keeps_the_prompt_it_had_before_units_went_core(topology):
+    """TASK-090: `multi_unit` is always entitled, yet a clinic with no active unit must render the
+    exact v2 prompt of the toolset it had before - the legacy set is the full one minus the two
+    unit tools - and the unit line only appears once the clinic has a unit."""
+    config = _config()
+    unit_tools = {"list_units", "create_event_at_unit"}
+    with_units = reg.agent_tools_for(ALL_ADDONS, has_active_units=True)
+    legacy = [t for t in with_units if t.name not in unit_tools]
+    without_units = reg.agent_tools_for(ALL_ADDONS, has_active_units=False)
+    assert [t.name for t in without_units] == [t.name for t in legacy]
+
+    def prompt_for(plugin_tools):
+        extras = _flow_handback_tools(TENANT_ON, topology, plugin_tools)
+        with _turn(v2=True, topology=topology, extras=extras, config=config):
+            return _rendered()
+
+    no_units_prompt = prompt_for(without_units)
+    assert no_units_prompt == prompt_for(legacy)
+    assert "list_units" not in no_units_prompt
+    assert "list_units" in prompt_for(with_units)
 
 
 def test_a_v2_turn_without_get_availability_never_hears_of_it():

@@ -231,7 +231,8 @@ def test_multi_unit_tools_follow_the_clinics_units_not_an_addon():
     assert expected.isdisjoint(without_units)
     # An inactive subscription still gets no tool at all.
     inactive = _summary(addons=dict(_ALL_ADDONS_OFF), active=False)
-    assert expected.isdisjoint({t.name for t in reg.agent_tools_for(inactive)})
+    inactive_tools = reg.agent_tools_for(inactive, has_active_units=True)
+    assert expected.isdisjoint({t.name for t in inactive_tools})
 
 
 async def test_create_event_at_unit_returns_the_patient_link_too(db):

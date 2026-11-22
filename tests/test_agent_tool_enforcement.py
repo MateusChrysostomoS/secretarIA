@@ -155,7 +155,10 @@ def test_multi_professional_never_gets_a_tenant_level_calendar_tool():
 def test_multi_professional_with_the_addon_gets_owner_scoped_tools_instead():
     """The safe alternative replaces the unsafe one — it does not sit beside it."""
     entitled = _summary(multi_professional=True)
-    tools = [*graph.base_tools_for(BOOKING_TOPOLOGY_MULTI), *reg.agent_tools_for(entitled)]
+    tools = [
+        *graph.base_tools_for(BOOKING_TOPOLOGY_MULTI),
+        *reg.agent_tools_for(entitled, has_active_units=False),
+    ]
     names = _names(tools)
     assert names.isdisjoint(_TENANT_LEVEL_CALENDAR_TOOLS)
     assert {
@@ -187,7 +190,7 @@ def test_multi_professional_manages_existing_appointments_through_the_flow():
     entitled = _summary(multi_professional=True)
     tools = [
         *graph.base_tools_for(BOOKING_TOPOLOGY_MULTI),
-        *reg.agent_tools_for(entitled),
+        *reg.agent_tools_for(entitled, has_active_units=False),
         manage_existing_appointment,
     ]
     names = _names(tools)

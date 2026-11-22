@@ -434,7 +434,8 @@ async def turn(db, monkeypatch, request):
         config.appointment_types,
         with_refs=True,
     )
-    extras = _flow_handback_tools(clinic, BOOKING_TOPOLOGY_SOLE, reg.agent_tools_for(ALL_ADDONS))
+    plugin_tools = reg.agent_tools_for(ALL_ADDONS, has_active_units=True)
+    extras = _flow_handback_tools(clinic, BOOKING_TOPOLOGY_SOLE, plugin_tools)
     own_ref = appointment_ref(_at(3, 10), TZ)
     calls = _scripted_calls(own_ref, appointment_ref(_at(2, 10), TZ))
     seen = SimpleNamespace(

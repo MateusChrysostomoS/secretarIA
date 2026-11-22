@@ -367,9 +367,14 @@ def test_select_professional_tool_is_addon_gated():
 
     entitled = {
         t.name
-        for t in reg.agent_tools_for(_summary({**addons_off, "multi_professional": True}))
+        for t in reg.agent_tools_for(
+            _summary({**addons_off, "multi_professional": True}), has_active_units=False
+        )
     }
-    not_entitled = {t.name for t in reg.agent_tools_for(_summary(dict(addons_off)))}
+    not_entitled = {
+        t.name
+        for t in reg.agent_tools_for(_summary(dict(addons_off)), has_active_units=False)
+    }
     assert mp.select_professional_and_continue.name in entitled
     assert mp.select_professional_and_continue.name not in not_entitled
 

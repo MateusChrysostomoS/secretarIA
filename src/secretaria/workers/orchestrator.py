@@ -468,7 +468,20 @@ async def _send_bot_reply_inner(reply: _ReplyContext, redis=None) -> None:
                     # resolves, not only when flows are on: the agent's
                     # professional context + sentinel hand-backs need it too.
                     professional_rows = await list_active_professionals(session, tenant.id)
-                    has_active_units = await clinic_has_active_units(session, tenant.id)
+                    # Its own try: a failure here only leaves the unit tools off for this turn
+                    # (the legacy toolset) - it must never skip the catalog/insurance/unit-option
+                    # loads and the flow snapshot below. The savepoint keeps a database error
+                    # from aborting the surrounding transaction on Postgres.
+                    try:
+                        async with session.begin_nested():
+                            has_active_units = await clinic_has_active_units(session, tenant.id)
+                    except Exception as exc:
+                        has_active_units = False
+                        logger.warning(
+                            "worker_active_units_check_failed",
+                            error=type(exc).__name__,
+                            conversation_id=str(reply.conversation_id),
+                        )
                     # ONE read of the clinic's canonical catalog per turn. Each
                     # professional's entries are resolved through it HERE, so
                     # the pure router downstream sees the clinic's single

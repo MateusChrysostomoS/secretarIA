@@ -76,7 +76,7 @@ def _clean_registry():
 def test_empty_registry_yields_nothing():
     summary = _summary(addons={**_ALL_ADDONS_OFF, "pix_deposit": True})
     assert reg.enabled_plugins(summary) == []
-    assert reg.agent_tools_for(summary) == []
+    assert reg.agent_tools_for(summary, has_active_units=False) == []
 
 
 def test_register_is_keyed_by_id_and_idempotent():
@@ -99,7 +99,7 @@ def test_disabled_plugin_contributes_nothing():
     reg.register(PluginSpec(id="ehr", entitlement_keys=("ehr",), agent_tools=(_fake_ehr_tool,)))
     not_entitled = _summary(addons=dict(_ALL_ADDONS_OFF))
     assert reg.enabled_plugins(not_entitled) == []
-    assert reg.agent_tools_for(not_entitled) == []
+    assert reg.agent_tools_for(not_entitled, has_active_units=False) == []
 
 
 def test_agent_tools_for_flattens_across_enabled_plugins():
@@ -111,7 +111,7 @@ def test_agent_tools_for_flattens_across_enabled_plugins():
     reg.register(PluginSpec(id="ehr", entitlement_keys=("ehr",), agent_tools=(_fake_ehr_tool,)))
 
     summary = _summary(addons={**_ALL_ADDONS_OFF, "pix_deposit": True, "ehr": True})
-    tools = reg.agent_tools_for(summary)
+    tools = reg.agent_tools_for(summary, has_active_units=False)
     assert sorted(t.name for t in tools) == sorted([_fake_pix_tool.name, _fake_ehr_tool.name])
 
 

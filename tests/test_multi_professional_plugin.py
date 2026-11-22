@@ -500,8 +500,8 @@ def test_multi_professional_tools_present_only_when_entitled():
     entitled = _summary(addons={**_ALL_ADDONS_OFF, "multi_professional": True})
     not_entitled = _summary(addons=dict(_ALL_ADDONS_OFF))
 
-    entitled_names = {t.name for t in reg.agent_tools_for(entitled)}
-    not_entitled_names = {t.name for t in reg.agent_tools_for(not_entitled)}
+    entitled_names = {t.name for t in reg.agent_tools_for(entitled, has_active_units=False)}
+    not_entitled_names = {t.name for t in reg.agent_tools_for(not_entitled, has_active_units=False)}
 
     expected = {
         mp.list_professionals.name,

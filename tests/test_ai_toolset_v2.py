@@ -228,7 +228,7 @@ def _todays_tool_names(topology):
 
 @pytest.mark.parametrize("topology", TOPOLOGIES)
 def test_switch_off_is_exactly_todays_composition(topology):
-    extras = reg.agent_tools_for(ALL_ADDONS)
+    extras = reg.agent_tools_for(ALL_ADDONS, has_active_units=True)
     assert graph.effective_tools(topology, extras) == [*graph.base_tools_for(topology), *extras]
     tools = _turn_tools(TENANT_OFF, topology)
     assert _names(tools) == _todays_tool_names(topology)
@@ -250,7 +250,7 @@ def test_switch_on_swaps_the_busy_readers_for_get_availability_and_the_blind_wri
 @pytest.mark.parametrize("topology", TOPOLOGIES)
 def test_switch_on_strips_a_withheld_or_legacy_tool_even_when_a_caller_passes_it(topology):
     extras = [
-        *reg.agent_tools_for(ALL_ADDONS),
+        *reg.agent_tools_for(ALL_ADDONS, has_active_units=True),
         ai_tools.create_event,
         ai_tools.cancel_event,
         ai_tools.check_availability,
@@ -303,7 +303,7 @@ def test_the_v2_tools_are_offered_only_through_the_switch(topology):
 
 
 def test_the_switch_yields_a_distinct_cached_agent_per_set():
-    extras = reg.agent_tools_for(ALL_ADDONS)
+    extras = reg.agent_tools_for(ALL_ADDONS, has_active_units=True)
     v1 = graph.build_agent(extras, BOOKING_TOPOLOGY_SOLE)
     v2 = graph.build_agent(extras, BOOKING_TOPOLOGY_SOLE, toolset_v2=True)
     assert v1 is not v2
@@ -332,7 +332,7 @@ async def test_run_agent_threads_the_switch_and_always_resets_it(monkeypatch):
             "oi",
             context={"conversation_id": str(uuid4())},
             tenant_config=_config(),
-            extra_tools=reg.agent_tools_for(ALL_ADDONS),
+            extra_tools=reg.agent_tools_for(ALL_ADDONS, has_active_units=True),
             booking_topology=BOOKING_TOPOLOGY_SOLE,
             toolset_v2=flag,
         )
@@ -440,7 +440,8 @@ def test_the_retired_list_is_exactly_the_two_older_handbacks():
 
 @pytest.mark.parametrize("topology", TOPOLOGIES)
 def test_switch_on_retires_them_even_when_a_caller_passes_them(topology):
-    extras = [*reg.agent_tools_for(ALL_ADDONS), ai_tools.start_guided_booking]
+    plugin_tools = reg.agent_tools_for(ALL_ADDONS, has_active_units=True)
+    extras = [*plugin_tools, ai_tools.start_guided_booking]
     assert _names(graph.effective_tools(topology, extras, toolset_v2=True)).isdisjoint(_RETIRED)
     # Switch off: today's set, both still there (the v1 prompt names them).
     assert _RETIRED <= _names(graph.effective_tools(topology, extras))

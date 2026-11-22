@@ -430,7 +430,7 @@ async def test_unit_tools_switch_on_from_the_clinics_active_units(
     async def _fake_run_agent(message, context, **kwargs):
         return "Oi!"
 
-    def _fake_agent_tools_for(summary, *, has_active_units=True):
+    def _fake_agent_tools_for(summary, *, has_active_units):
         seen.append(has_active_units)
         return []
 
@@ -441,6 +441,49 @@ async def test_unit_tools_switch_on_from_the_clinics_active_units(
     await tasks._send_bot_reply(_reply_context(conversation, patient, _LLM_ANSWER))
 
     assert seen == [with_unit]
+
+
+async def test_a_failing_active_units_check_only_turns_the_unit_tools_off(
+    monkeypatch: pytest.MonkeyPatch, db
+) -> None:
+    """The units query has its own try: when it raises, the catalog / insurance / unit-option
+    loads and the flow snapshot of the same turn still happen, the unit tools stay off, and the
+    warning carries no PII."""
+    tenant, patient, conversation = await _make_conversation(db, flow_state=FlowState.LLM)
+    seen: list[bool] = []
+    loaded: list[str] = []
+
+    async def _boom(session, tenant_id):
+        raise RuntimeError("units table unreachable")
+
+    def _spy(name, original):
+        async def _wrapper(*args, **kwargs):
+            loaded.append(name)
+            return await original(*args, **kwargs)
+
+        return _wrapper
+
+    async def _fake_get_entitlements(tenant_id, redis):
+        return _summary()
+
+    async def _fake_run_agent(message, context, **kwargs):
+        return "Oi!"
+
+    def _fake_agent_tools_for(summary, *, has_active_units):
+        seen.append(has_active_units)
+        return []
+
+    monkeypatch.setattr(orchestrator, "clinic_has_active_units", _boom)
+    for name in ("load_service_catalog", "load_tenant_insurance", "attach_unit_options"):
+        monkeypatch.setattr(orchestrator, name, _spy(name, getattr(orchestrator, name)))
+    monkeypatch.setattr(workers_ns, "get_entitlements", _fake_get_entitlements)
+    monkeypatch.setattr(workers_ns, "run_agent", _fake_run_agent)
+    monkeypatch.setattr(workers_ns, "agent_tools_for", _fake_agent_tools_for)
+
+    await tasks._send_bot_reply(_reply_context(conversation, patient, _LLM_ANSWER))
+
+    assert seen == [False]
+    assert loaded == ["load_service_catalog", "load_tenant_insurance", "attach_unit_options"]
 
 
 # --------------------------------------------------------------------------

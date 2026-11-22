@@ -8,10 +8,11 @@ Units are NOT a paid add-on any more (TASK-090, owner decision): any clinic can 
 activate units, with no limit on how many. Nothing here consults entitlements or
 `limits["units"]` (no 403 `multi_unit_not_entitled`, no 409 `unit_limit_reached`, no 503 from
 an entitlement fetch).
-  - A unit always has an address: create without a (non-blank) address, or a PATCH that
-    sends a blank/null address, is rejected with 422
-    {"detail": {"code": "unit_address_required", "message": ...}}. A PATCH that omits
-    `address` is untouched (legacy units without one stay editable).
+
+A unit always has an address: create without a (non-blank) address, or a PATCH that
+sends a blank/null address, is rejected with 422
+{"detail": {"code": "unit_address_required", "message": ...}}. A PATCH that omits
+`address` is untouched (legacy units without one stay editable).
 """
 
 from uuid import UUID
