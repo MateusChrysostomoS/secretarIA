@@ -82,6 +82,10 @@ def _has_unit_address(units: list[Any] | None) -> bool:
     )
 
 
+def _has_active_unit(units: list[Any] | None) -> bool:
+    return any(getattr(unit, "is_active", True) for unit in units or [])
+
+
 def _has_guidance(service: Any) -> bool:
     return _filled(getattr(service, "requirements", None)) or _filled(
         getattr(service, "long_description", None)
@@ -218,7 +222,11 @@ def compute_completeness(
             "Endereço da clínica",
             REQUIRED_WEIGHT,
             _has_unit_address(units) or _has_address(getattr(tenant, "address", None)),
-            "Cadastre uma unidade com pelo menos a rua e a cidade.",
+            # A clinic whose units are text-only/incomplete completes one; with no unit at all
+            # it registers the first.
+            "Complete o endereço da unidade."
+            if _has_active_unit(units)
+            else "Cadastre uma unidade com pelo menos a rua e a cidade.",
             "address",
         ),
         (

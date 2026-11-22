@@ -308,3 +308,26 @@ def test_the_legacy_tenant_address_still_satisfies_the_address_item() -> None:
     assert _status(compute_completeness(tenant, [], None, []))["address"] == "done"
     inactive = compute_completeness(tenant, [], None, [_unit(active=False)])
     assert _status(inactive)["address"] == "done"
+
+
+def _address_hint(result) -> str | None:
+    return next(item.hint for item in result.items if item.key == "address")
+
+
+def test_the_address_hint_asks_to_register_a_unit_when_there_is_none() -> None:
+    assert _address_hint(compute_completeness(_tenant(), [], None, [])) == (
+        "Cadastre uma unidade com pelo menos a rua e a cidade."
+    )
+    # Only inactive units: the clinic has none in use, so it still has to register one.
+    inactive = compute_completeness(_tenant(), [], None, [_unit(active=False)])
+    assert _address_hint(inactive) == "Cadastre uma unidade com pelo menos a rua e a cidade."
+
+
+@pytest.mark.parametrize(
+    "unit",
+    [_unit(street=None), _unit(city=None), _unit(street="  ", city=None)],
+    ids=["text-only-no-street", "no-city", "blank"],
+)
+def test_the_address_hint_asks_to_complete_an_incomplete_unit(unit) -> None:
+    result = compute_completeness(_tenant(), [], None, [unit])
+    assert _address_hint(result) == "Complete o endereço da unidade."
