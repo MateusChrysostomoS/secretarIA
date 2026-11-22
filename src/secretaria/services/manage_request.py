@@ -509,6 +509,8 @@ async def _land_new_day(
             duration_minutes=duration,
             holds=holds,
             buffer_minutes=minutes,
+            # TASK-089: a time the patient typed matches the old grid too, not only the snapped list.
+            include_grid=True,
             # The moved appointment is left out of the windows that pad: read here without it.
             consultations=(
                 await offer_consultation_windows(

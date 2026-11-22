@@ -92,21 +92,25 @@ class _Agenda:
             (s, e) for s, e in self.consultation_list if availability.overlaps(start, end, s, e)
         ]
 
-    def _walk(self, d, length, max_slots, extra_busy=()):
+    def _walk(self, d, length, max_slots, extra_busy=(), snap=False):
         slots, t = [], datetime(d.year, d.month, d.day, self.hours[0], tzinfo=TZ)
         stop = datetime(d.year, d.month, d.day, self.hours[1], tzinfo=TZ)
         blocked = [*self.busy, *extra_busy]
         while t + length <= stop and len(slots) < max_slots:
-            if not any(availability.overlaps(t, t + length, s, e) for s, e in blocked):
+            hit = [e for s, e in blocked if availability.overlaps(t, t + length, s, e)]
+            if not hit:
                 slots.append({
                     "start": t.isoformat(),
                     "end": (t + length).isoformat(),
                     "label": t.strftime("%H:%M"),
                 })
-            t += timedelta(minutes=30)
+            # TASK-089: like the real calendar, a snapping walk jumps to the end of what blocked it.
+            t = max(hit) if (hit and snap) else t + timedelta(minutes=30)
         return slots
 
-    async def list_available_days(self, start_day, days, slot_minutes=None, extra_busy=None):
+    async def list_available_days(
+        self, start_day, days, slot_minutes=None, extra_busy=None, snap_after_busy=False
+    ):
         """One scan. Like the real calendar, `busy`/`extra_busy` empty a day."""
         self.day_scans += 1
         first = start_day.date()
@@ -115,15 +119,19 @@ class _Agenda:
             datetime(d.year, d.month, d.day, tzinfo=TZ)
             for d in self.open_days
             if first <= d < first + timedelta(days=days)
-            and self._walk(d, length, 1, extra_busy or ())
+            and self._walk(d, length, 1, extra_busy or (), snap_after_busy)
         ]
 
-    async def list_free_slots(self, day, slot_minutes=None, max_slots=6):
+    async def list_free_slots(
+        self, day, slot_minutes=None, max_slots=6, extra_busy=None, snap_after_busy=False
+    ):
         d = day.date()
         self.slot_reads.append(d)
         if d not in self.open_days:
             return []
-        return self._walk(d, timedelta(minutes=slot_minutes or 30), max_slots)
+        return self._walk(
+            d, timedelta(minutes=slot_minutes or 30), max_slots, extra_busy or (), snap_after_busy
+        )
 
 
 def _doctor(buffer_minutes):
@@ -179,7 +187,8 @@ async def test_slot_adjacent_to_appointment_dropped_with_buffer_15():
     slots = await availability.free_slots_for_day(
         calendar, day=D0, duration_minutes=30, buffer_minutes=15
     )
-    assert _labels(slots) == ["08:00", "08:30", "09:00", "11:00", "11:30"]
+    # TASK-089: the first time after the consultation (10:00-10:30) is its end + 15 = 10:45.
+    assert _labels(slots) == ["08:00", "08:30", "09:00", "10:45", "11:15"]
 
 
 async def test_slot_exactly_at_buffer_boundary_is_kept():
@@ -193,7 +202,7 @@ async def test_slot_exactly_at_buffer_boundary_is_kept():
     one_minute_more = await availability.free_slots_for_day(
         calendar, day=D0, duration_minutes=30, buffer_minutes=31
     )
-    assert _labels(one_minute_more) == ["08:00", "08:30", "11:30"]
+    assert _labels(one_minute_more) == ["08:00", "08:30", "11:01"]  # TASK-089: end + 31 min
 
 
 async def test_buffer_applies_before_and_after_existing_appointment():

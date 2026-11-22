@@ -1102,12 +1102,21 @@ class CalendarService:
         delta: timedelta,
         now: datetime,
         max_slots: int,
+        snap_after_busy: bool = False,
     ) -> list[dict]:
         """Free slots inside `windows`, given an already-fetched busy list.
 
         Pure (no I/O) so the same walk answers both "which times are free on
         this day?" (`list_free_slots`) and "does this day have ANY free time?"
         (`list_available_days`, with max_slots=1) off ONE calendar read.
+
+        `snap_after_busy` (TASK-089, the doctor's buffer between consultations): a slot that
+        overlaps taken time makes the walk JUMP to the end of that taken time instead of
+        advancing one slot, so the first time after a consultation (plus its buffer) is
+        offered exactly there (08:00-08:30 + 5 min => 08:35), not at the next point of a grid
+        that starts at opening time. No free start is ever skipped: a slot starting between
+        the blocked one and the end of the taken time would overlap that time as well. Off
+        (the default) the walk is the fixed grid it always was.
         """
         slots: list[dict] = []
         for window_start, window_end in windows:
@@ -1117,7 +1126,13 @@ class CalendarService:
                 if cursor < now:
                     cursor = slot_end
                     continue
-                overlaps = any(bs < slot_end and be > cursor for bs, be in busy_ranges)
+                blockers = [be for bs, be in busy_ranges if bs < slot_end and be > cursor]
+                overlaps = bool(blockers)
+                if overlaps and snap_after_busy:
+                    # Back to the walk's own zone: an agenda row's window may come in UTC and the
+                    # slot's label/ISO are the cursor's wall clock.
+                    cursor = max(blockers).astimezone(cursor.tzinfo)
+                    continue
                 if not overlaps:
                     slots.append(
                         {
@@ -1141,6 +1156,7 @@ class CalendarService:
         close_hour: int = 18,
         max_slots: int = 6,
         extra_busy: list[tuple[datetime, datetime]] | None = None,
+        snap_after_busy: bool = False,
     ) -> list[dict]:
         """Return free [start, end) slots on `day` within business hours.
 
@@ -1169,6 +1185,7 @@ class CalendarService:
             # Never offer a slot that has already started (matters for "hoje").
             datetime.now(self._tz),
             max_slots,
+            snap_after_busy=snap_after_busy,
         )
 
     async def list_available_days(
@@ -1179,8 +1196,12 @@ class CalendarService:
         open_hour: int = 8,
         close_hour: int = 18,
         extra_busy: list[tuple[datetime, datetime]] | None = None,
+        snap_after_busy: bool = False,
     ) -> list[datetime]:
         """Days in [start_day, start_day + `days`) with at least one free slot.
+
+        `snap_after_busy` is `list_free_slots`'s (TASK-089): the same walk, so the day list and
+        the day's time list agree.
 
         Returns clinic-local midnight datetimes, in chronological order, ready
         to hand straight back to `list_free_slots(day=...)`. Days the clinic is
@@ -1213,7 +1234,9 @@ class CalendarService:
         return [
             day_local
             for day_local, windows in day_windows
-            if self._walk_free_slots(windows, busy_ranges, delta, now, max_slots=1)
+            if self._walk_free_slots(
+                windows, busy_ranges, delta, now, max_slots=1, snap_after_busy=snap_after_busy
+            )
         ]
 
     async def create_event(

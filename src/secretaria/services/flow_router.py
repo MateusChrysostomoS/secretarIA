@@ -5304,21 +5304,12 @@ async def _enter_slot_picker(
     buffer_minutes, moved_event_id = _picker_buffer(
         conversation, professionals, branch, buffer_rule
     )
-    try:
-        slots = await calendar.list_free_slots(
-            day=target,
-            slot_minutes=duration_minutes,
-            max_slots=(
-                slot_scan_limit(duration_minutes)
-                if reserved or floor is not None or buffer_minutes > 0
-                else SLOT_PICKER_MAX_SLOTS
-            ),
-        )
-    except CalendarUnavailableError:
-        return _calendar_unavailable(conversation, branch, branch.day_step)
-
-    # The doctor's buffer around his consultations (the whole day was read, so the times
-    # after the padding still fill the page). Held times are padded below, after "held" labels.
+    # The doctor's buffer around his consultations (the whole day is read, so the times after
+    # the padding still fill the page). TASK-089: the padded consultations join the walk itself
+    # and the walk SNAPS to the end of the padding, so the first time after a consultation is its
+    # end + the buffer (08:35), not the next point of the opening-time grid. Held times are
+    # padded below, after the "held" labels.
+    walk: dict = {}
     if buffer_minutes > 0:
         day_start = target if target.tzinfo else target.replace(tzinfo=calendar.tzinfo)
         consultations = await offer_consultation_windows(
@@ -5328,12 +5319,23 @@ async def _enter_slot_picker(
             buffer_minutes=buffer_minutes,
             ignore_event_id=moved_event_id,
         )
-        slots = without_holds(
-            slots,
-            padded(consultations, buffer_minutes),
-            duration_minutes=duration_minutes,
-            tz=calendar.tzinfo,
+        walk = {
+            "extra_busy": padded(consultations, buffer_minutes),
+            "snap_after_busy": True,
+        }
+    try:
+        slots = await calendar.list_free_slots(
+            day=target,
+            slot_minutes=duration_minutes,
+            max_slots=(
+                slot_scan_limit(duration_minutes)
+                if reserved or floor is not None or buffer_minutes > 0
+                else SLOT_PICKER_MAX_SLOTS
+            ),
+            **walk,
         )
+    except CalendarUnavailableError:
+        return _calendar_unavailable(conversation, branch, branch.day_step)
 
     # The doctor's minimum notice: a slot starting too soon is not offered at all. The
     # whole day was read, so the times after the floor still fill the page.

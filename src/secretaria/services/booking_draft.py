@@ -980,6 +980,9 @@ async def _land_day(
             holds=holds,
             not_before=floor,
             buffer_minutes=buffer_rule.minutes or 0,
+            # TASK-089: a time the patient typed matches the old grid too ("9h"), not only the
+            # snapped list (08:35, 09:05...).
+            include_grid=True,
         )
     except CalendarUnavailableError:
         unavailable = fr._calendar_unavailable(state, fr.BOOKING_DAY_BRANCH, fr.STEP_AWAITING_DAY)
