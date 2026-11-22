@@ -6,6 +6,7 @@ POST  /tenants/me/services        - create one canonical service; with `offer`,
                                     same transaction.
 PATCH /tenants/me/services/{id}   - rename / edit copy / retire.
 PUT   /tenants/me/services/order  - the clinic's order for the patient's list (TASK-081).
+DELETE /tenants/me/services/{id}  - delete a service for the whole clinic (TASK-090); managers only.
 
 This is the ONE place a service's name and descriptive copy are edited. A
 professional never types a service name again: they pick an id from here and
@@ -36,7 +37,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from secretaria.api.hub.deps import get_current_tenant
+from secretaria.api.hub.deps import get_current_tenant, require_clinic_manager
 from secretaria.core.catalog_limits import (
     SERVICES_PER_CLINIC,
     SERVICES_PER_PROFESSIONAL,
@@ -60,6 +61,7 @@ from secretaria.services import (
     hub_unit_terms as unit_terms_service,
 )
 from secretaria.services.service_catalog import (
+    delete_service_everywhere,
     find_near_duplicates,
     load_service_catalog,
     normalize,
@@ -409,3 +411,27 @@ async def update_service(
     )
     catalog = await load_service_catalog(session, tenant.id)
     return _read_model(service, await _offering(session, tenant, catalog))
+
+
+@router.delete("/{service_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_service(
+    service_id: str,
+    tenant: Tenant = Depends(require_clinic_manager),
+    session: AsyncSession = Depends(get_session),
+) -> None:
+    """Delete a service for the whole clinic (TASK-090 C2). Clinic managers only (403 otherwise).
+
+    Unlike retiring (`PATCH is_active=false`, reversible), this removes the row and every
+    link to it in one transaction (services/service_catalog.py::delete_service_everywhere):
+    each professional's price/duration/unit settings for it, and its entry in every
+    professional's list. Convenio plans stay; past appointments keep their service label.
+    Another clinic's id is a 404, same as an unknown one.
+    """
+    service = await _resolve(session, tenant, service_id)
+    await delete_service_everywhere(session, tenant, service)
+    await session.commit()
+    logger.info(
+        "service_catalog_deleted",
+        tenant_id=str(tenant.id),
+        service_id=service_id,
+    )
