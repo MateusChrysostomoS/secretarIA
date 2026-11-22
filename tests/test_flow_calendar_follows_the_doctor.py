@@ -66,9 +66,11 @@ class _BusyAwareAgenda(_Agenda):
     """`_Agenda` whose day list drops a day with no free time - what the real agenda does (the
     plain fake lists every open day)."""
 
-    async def list_available_days(self, start_day, days, slot_minutes=None, extra_busy=None):
+    async def list_available_days(
+        self, start_day, days, slot_minutes=None, extra_busy=None, snap_after_busy=False
+    ):
         listed = await super().list_available_days(
-            start_day, days, slot_minutes, extra_busy=extra_busy
+            start_day, days, slot_minutes, extra_busy=extra_busy, snap_after_busy=snap_after_busy
         )
         return [d for d in listed if await self.list_free_slots(d, slot_minutes)]
 
