@@ -316,7 +316,9 @@ class PatientInsurancePlanOut(BaseModel):
 
     TASK-085 R D-R12: no per-plan payment text and no per-plan deposit any more - a convenio never
     exempts the sinal, which is the clinic's one rule (`PatientDepositOut`). TASK-085 R U1b: only
-    the plans with a note are listed, so `clinic_note` is always a non-empty string."""
+    the plans with a note are listed, so `clinic_note` is always a non-empty string.
+    TASK-090: the notes no longer exist, so the overview's `plans` is always empty; this shape is
+    kept only for deploy-window compatibility (follow-up: remove it with the BMF sheet)."""
 
     model_config = ConfigDict(extra="forbid")
 

@@ -223,15 +223,19 @@ def test_prompt_tells_model_to_hand_off_on_insurance_payment_rules(monkeypatch, 
     monkeypatch.setattr(prompts_v2, "_clinic_today", lambda _tz: date(2026, 11, 22))
     v1 = secretary_system_prompt(_config(plans))
     v2 = secretary_system_prompt_v2(_config(plans), tool_names=V2_NAMES)
-    # v1, every clinic: the short rule next to the other hand-off reasons.
+    # Every clinic, with or without convênios: the short rule next to the other hand-off reasons.
     assert prompts.INSURANCE_PAYMENT_HANDOFF_RULE in v1
-    # Both prompts, with convênios: the full "never explain" sentence in the features block (the
-    # v2 prompt has a size ceiling; without convênios it relies on the tool's description).
+    assert prompts_v2.INSURANCE_PAYMENT_HANDOFF_RULE_V2 in v2
+    v2_line = next(line for line in v2.splitlines() if line.startswith("- request_human_handoff"))
+    assert prompts_v2.INSURANCE_PAYMENT_HANDOFF_RULE_V2 in v2_line
+    # Both prompts, with convênios: the full "never explain" sentence in the features block.
     for prompt in (v1, v2):
         assert (prompts.INSURANCE_PAYMENT_HANDOFF in prompt) is bool(plans)
     rule = prompts.INSURANCE_PAYMENT_HANDOFF_RULE
     for words in ("reembolso", "coparticipação", "não explique", f'reason "{REASON}"'):
         assert words in rule
+    for words in ("reembolso", "coparticipação", "cobertura", f'reason "{REASON}"', "sem explicar"):
+        assert words in prompts_v2.INSURANCE_PAYMENT_HANDOFF_RULE_V2
     full = prompts.INSURANCE_PAYMENT_HANDOFF
     for words in ("não explique", "não dê exemplos", "request_human_handoff", REASON):
         assert words in full

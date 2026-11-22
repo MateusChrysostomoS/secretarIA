@@ -76,8 +76,7 @@ def test_no_source_file_names_the_payment_note():
     offenders = [
         str(path.relative_to(SRC))
         for path in SRC.rglob("*.py")
-        if "custom_payment_note" in path.read_text(encoding="utf-8")
-        or "payment_note" in path.read_text(encoding="utf-8")
+        if "custom_payment_note" in (text := path.read_text(encoding="utf-8")) or BLOCK in text
     ]
     assert offenders == []
 
@@ -341,6 +340,20 @@ async def test_the_before_pix_request_ignores_a_stale_note_in_a_queued_request(m
     )
     assert ok is True and len(sent) == 2
     assert all(BLOCK not in body and OLD_NOTE not in body for body in sent)
+
+
+def test_the_fontes_import_produces_no_convenio_payment_text():
+    """The source import (Fontes) neither asks the model for how a convênio works nor proposes an
+    "Outro" with a payment text; `custom_note` stays on the stored wire shape, always None."""
+    from secretaria.services import context_catalog_proposal as ccp
+    from secretaria.services.context_extraction import SYSTEM_PROMPT
+
+    assert "how_it_works" not in SYSTEM_PROMPT and "como funciona (reembolso" not in SYSTEM_PROMPT
+    assert "how_it_works" not in ccp.ExtractedInsurancePlan.model_fields
+    old = ccp.ExtractedInsurancePlan.model_validate(
+        {"name": "Plano X", "how_it_works": "reembolso", "evidence": "Aceitamos Plano X."}
+    )
+    assert old.model_dump() == {"name": "Plano X", "evidence": "Aceitamos Plano X."}
 
 
 def test_the_flow_never_reads_a_plan_note():

@@ -166,9 +166,9 @@ def _format_safety_rules() -> str:
 
 
 # TASK-090 (owner, 2026-11-22): a convênio payment-rule question goes straight to a person, for
-# every clinic, in the v1 prompt next to the other hand-off reasons. The longer
-# INSURANCE_PAYMENT_HANDOFF below rides with the clinic's convênios in BOTH prompts (the v2 one
-# has no room for this line: see prompts_v2._format_tools_v2).
+# every clinic, in the v1 prompt next to the other hand-off reasons (the v2 prompt carries its
+# short form, prompts_v2.INSURANCE_PAYMENT_HANDOFF_RULE_V2). The longer
+# INSURANCE_PAYMENT_HANDOFF below rides with the clinic's convênios in BOTH prompts.
 INSURANCE_PAYMENT_HANDOFF_RULE = (
     "Se ele perguntar a regra de pagamento de um convênio (reembolso, coparticipação, se o "
     "convênio cobre, como ou quanto paga pelo convênio), não explique: use "

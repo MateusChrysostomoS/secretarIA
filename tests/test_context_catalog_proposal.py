@@ -129,6 +129,7 @@ def _good() -> ContextExtraction:
             ExtractedInsurancePlan(name="Amil", evidence=PLANS_LINE),
             ExtractedInsurancePlan(
                 name="Outros planos (reembolso)",
+                # TASK-090: a model that still sends the retired key is ignored, never copied.
                 how_it_works="reembolso para outros planos",
                 evidence="Também trabalhamos com a modalidade de reembolso para outros planos.",
             ),
@@ -208,7 +209,8 @@ def test_convenios_match_the_catalog_and_default_to_shared_by_all() -> None:
     catalog_plans = {p.name: p.catalog_id for p in insurance.plans if p.catalog_id}
     assert catalog_plans == {"Bradesco Saúde": "c-bra", "SulAmérica": "c-sul", "Amil": "c-amil"}
     other = _by_name(insurance.plans, "Outros planos (reembolso)")
-    assert other.catalog_id is None and "reembolso" in (other.custom_note or "")
+    # TASK-090: an "Outro" is just its name - no payment text is copied from the source.
+    assert other.catalog_id is None and other.custom_note is None
     texts = [n.text for n in proposal.notes]
     assert any("todos os profissionais aceitam todos os convênios" in t for t in texts)
     assert any("“Outros planos (reembolso)”" in t and "Outro" in t for t in texts)
@@ -383,7 +385,7 @@ def test_a_plan_that_extends_a_catalog_name_is_not_forced_into_it() -> None:
     )
     proposal = _proposal(extraction, source="Atendemos Unimed Paulistana por reembolso.")
     plan = proposal.insurance.plans[0]
-    assert plan.catalog_id is None and plan.custom_note
+    assert plan.catalog_id is None and plan.custom_note is None  # TASK-090: no payment text
 
 
 def test_guidance_for_a_service_this_source_creates_is_not_listed_twice() -> None:

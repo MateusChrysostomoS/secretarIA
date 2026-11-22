@@ -18,6 +18,8 @@ removed with it (owner: "TIRE ISSO").
 TASK-090 (owner, 2026-11-22): the "Outro" convênio no longer has a payment text, so `plans` is
 always empty (and `flow_router.insurance_plans_have_clinic_notes` always False, so the Portal never
 offers the sheet). A patient who asks how payment works is handed off to a person instead.
+The endpoint is kept only for deploy-window compatibility (follow-up: remove it with the BMF
+sheet and the brain-api relay).
 
 Never returned: row or catalog ids, doctors (names or ids), `accepted_by`, anything about a
 patient. The caller is internal-key only. Read-only: nothing here writes or moves money.

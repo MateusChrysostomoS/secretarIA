@@ -68,8 +68,10 @@ class ExtractedService(BaseModel):
 
 
 class ExtractedInsurancePlan(BaseModel):
+    # TASK-090 (owner, 2026-11-22): no "how it works" payment text any more - a convênio is just
+    # its name; the patient's payment questions go to a person. An old extraction that still has
+    # `how_it_works` is read fine (unknown keys are ignored).
     name: str
-    how_it_works: str | None = None
     evidence: str
 
 
@@ -280,10 +282,7 @@ def verify_plan(plan: ExtractedInsurancePlan, source_norm: str) -> ExtractedInsu
     tokens = _significant(plan.name) or [fold(plan.name)]
     if not any(t in fold(plan.evidence) for t in tokens):
         return None
-    note = _clean(plan.how_it_works)
-    if note and not _grounded(note, plan.evidence):
-        note = None
-    return plan.model_copy(update={"name": plan.name.strip(), "how_it_works": note})
+    return plan.model_copy(update={"name": plan.name.strip()})
 
 
 def clean_model_notes(notes: list[str]) -> list[str]:
@@ -338,7 +337,10 @@ class ProposedPlan:
     catalog_id: str | None
     catalog_name: str | None
     loose: bool  # matched by a shorter spelling ("Bradesco" -> "Bradesco Saúde")
-    custom_note: str | None  # a plan outside the catalog: how the clinic says it works
+    # Always None since TASK-090 (the "Outro" convênio has no payment text). Kept on the stored
+    # proposal's wire shape only so the Portal's Fontes screen keeps parsing it (follow-up:
+    # remove with the BMF side).
+    custom_note: str | None
     status: str  # "new" | "same"
     evidence: str
 
@@ -602,7 +604,7 @@ def _build_insurance(
                     catalog_id=None,
                     catalog_name=None,
                     loose=False,
-                    custom_note=(plan.how_it_works or plan.evidence)[:2000],
+                    custom_note=None,
                     status="same" if wanted in have else "new",
                     evidence=plan.evidence,
                 )
