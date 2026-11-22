@@ -282,3 +282,29 @@ def test_an_address_that_is_not_a_mapping_counts_as_missing(address) -> None:
 def test_a_faq_that_is_not_a_list_neither_counts_nor_breaks(faq) -> None:
     result = compute_completeness(_tenant(clinic_facts={"faq": faq}), [])
     assert _status(result)["faq"] == "optional"
+
+
+def _unit(street="Rua A", city="Recife", active=True):
+    return SimpleNamespace(street=street, city=city, is_active=active)
+
+
+def test_an_active_unit_with_street_and_city_satisfies_the_address_item() -> None:
+    result = compute_completeness(_tenant(), [], None, [_unit()])
+    assert _status(result)["address"] == "done"
+
+
+@pytest.mark.parametrize(
+    "unit",
+    [_unit(street=None), _unit(city=None), _unit(street="  "), _unit(active=False)],
+    ids=["no-street", "no-city", "blank-street", "inactive"],
+)
+def test_a_unit_without_street_city_or_active_does_not_count(unit) -> None:
+    result = compute_completeness(_tenant(), [], None, [unit])
+    assert _status(result)["address"] == "missing"
+
+
+def test_the_legacy_tenant_address_still_satisfies_the_address_item() -> None:
+    tenant = _tenant(address={"line": "Rua A", "city": "Recife"})
+    assert _status(compute_completeness(tenant, [], None, []))["address"] == "done"
+    inactive = compute_completeness(tenant, [], None, [_unit(active=False)])
+    assert _status(inactive)["address"] == "done"

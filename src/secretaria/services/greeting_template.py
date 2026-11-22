@@ -224,11 +224,14 @@ def _identification(
     city: str,
     professional_name: str = "",
     professional_specialty: str = "",
+    preposition: str = "em",
 ) -> str:
     """The tail of "Sou a SecretarIA, assistente virtual <tail>".
 
-    "do/da <nome>, <descrição>, em <cidade>" — description and city are each
-    optional. The city is left out when the description already names it
+    "do/da <nome>, <descrição>, em <cidade>" — description and place are each
+    optional. The place is a city ("em Campinas"), a state ("em Minas Gerais") or the
+    country ("no Brasil", `preposition="no"`); see services/clinic_region.py.
+    The place is left out when the description already names it
     (Instituto Gicovate's description ends "..., em Campos dos Goytacazes",
     which printed the city twice). The description's own closing punctuation
     is moved after the city so the sentence ends once ("..., em Belo
@@ -271,7 +274,7 @@ def _identification(
             desc = desc[: match.start()].rstrip()
     if city and desc and _fold(city) in _fold(desc):
         city = ""
-    parts = [p for p in (desc, f"em {city}" if city else "") if p]
+    parts = [p for p in (desc, f"{preposition} {city}" if city else "") if p]
     if not parts:
         return base + "."
     return f"{base}, " + ", ".join(parts) + (punct or ".")
@@ -283,6 +286,7 @@ def render_greeting(
     patient_name: str | None = None,
     city: str | None = None,
     sole_professional: tuple[str, str | None] | None = None,
+    preposition: str = "em",
 ) -> str:
     """Render the frame for one tenant. Pure; never raises on missing input.
 
@@ -314,7 +318,12 @@ def render_greeting(
         welcome_target=_welcome_target(name),
         patient_suffix=f", {patient}" if patient else "",
         identification=_identification(
-            name, description, (city or "").strip(), pro_name, pro_specialty
+            name,
+            description,
+            (city or "").strip(),
+            pro_name,
+            pro_specialty,
+            preposition,
         ),
     )
     # Defensive: never leave trailing spaces at the end of a line.
@@ -343,6 +352,7 @@ def clinic_description_budget(
     clinic_name: str | None,
     city: str | None = None,
     sole_professional: tuple[str, str | None] | None = None,
+    preposition: str = "em",
 ) -> int:
     """How many characters of description still fit for THIS clinic.
 
@@ -365,7 +375,11 @@ def clinic_description_budget(
     INCLUDING the separators a real description reinstates.
     """
     probe = render_greeting(
-        clinic_name, _BUDGET_PROBE, city=city, sole_professional=sole_professional
+        clinic_name,
+        _BUDGET_PROBE,
+        city=city,
+        sole_professional=sole_professional,
+        preposition=preposition,
     )
     frame_cost = len(probe) - len(_BUDGET_PROBE)
     return max(0, MAX_INTERACTIVE_BODY_CHARS - frame_cost)
@@ -380,11 +394,13 @@ def clinic_description_budget(
 PREVIEW_PLACEHOLDER = "{{descricao}}"
 
 
-def greeting_preview_template(clinic_name: str | None, city: str | None = None) -> str:
+def greeting_preview_template(
+    clinic_name: str | None, city: str | None = None, preposition: str = "em"
+) -> str:
     """The frame for this clinic with `PREVIEW_PLACEHOLDER` in the slot.
 
     Byte-for-byte what `render_greeting` produces, except the clinic's own text
     is replaced by the token — so whatever the hub renders around the token IS
     the message the patient receives, including the clinic's name.
     """
-    return render_greeting(clinic_name, PREVIEW_PLACEHOLDER, city=city)
+    return render_greeting(clinic_name, PREVIEW_PLACEHOLDER, city=city, preposition=preposition)
