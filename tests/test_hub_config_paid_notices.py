@@ -65,23 +65,44 @@ async def test_get_config_exposes_the_flag_off_by_default(client: AsyncClient):
     assert body["paid_notices_auto_approved"] is False
 
 
-async def test_the_configuration_save_r5_uses_turns_it_on_and_echoes_it(
-    client: AsyncClient,
-    db,  # noqa: F811
-    clinic,  # noqa: F811
-):
+async def _seed(db, tenant_id, value: bool) -> None:  # noqa: F811
+    async with db() as session:
+        (await session.get(Tenant, tenant_id)).paid_notices_auto_approved = value
+        await session.commit()
+
+
+async def test_the_configuration_save_cannot_turn_it_on(client: AsyncClient, db, clinic):  # noqa: F811
+    # TASK-090: the standing "approve billed notices" is revoke-only - a save that
+    # says true is accepted (200) but ignored; the stored value stays false.
     response = await client.put(
         CONFIGURATION, json={"tenant": {"paid_notices_auto_approved": True}}
     )
 
     assert response.status_code == 200, response.text
-    assert response.json()["tenant"]["paid_notices_auto_approved"] is True
-    assert await _stored(db, clinic.id) is True
+    assert response.json()["tenant"]["paid_notices_auto_approved"] is False
+    assert await _stored(db, clinic.id) is False
+    assert (await client.get(CONFIG)).json()["paid_notices_auto_approved"] is False
+
+
+async def test_the_legacy_config_save_cannot_turn_it_on(client: AsyncClient, db, clinic):  # noqa: F811
+    response = await client.put(CONFIG, json={"paid_notices_auto_approved": True})
+
+    assert response.status_code == 200, response.text
+    assert response.json()["paid_notices_auto_approved"] is False
+    assert await _stored(db, clinic.id) is False
+
+
+async def test_a_stored_true_is_still_read_back(client: AsyncClient, db, clinic):  # noqa: F811
+    await _seed(db, clinic.id, True)
+
     assert (await client.get(CONFIG)).json()["paid_notices_auto_approved"] is True
+    # ...and the configuration save echoes it back untouched.
+    saved = await client.put(CONFIGURATION, json={"tenant": {"persona_notes": "x"}})
+    assert saved.json()["tenant"]["paid_notices_auto_approved"] is True
 
 
-async def test_the_legacy_config_save_turns_it_back_off(client: AsyncClient, db, clinic):  # noqa: F811
-    await client.put(CONFIGURATION, json={"tenant": {"paid_notices_auto_approved": True}})
+async def test_a_save_can_still_turn_a_stored_true_off(client: AsyncClient, db, clinic):  # noqa: F811
+    await _seed(db, clinic.id, True)
 
     response = await client.put(CONFIG, json={"paid_notices_auto_approved": False})
 
@@ -91,12 +112,24 @@ async def test_the_legacy_config_save_turns_it_back_off(client: AsyncClient, db,
 
 
 async def test_a_save_that_omits_it_leaves_it_untouched(client: AsyncClient, db, clinic):  # noqa: F811
-    await client.put(CONFIGURATION, json={"tenant": {"paid_notices_auto_approved": True}})
+    await _seed(db, clinic.id, True)
 
     response = await client.put(CONFIGURATION, json={"tenant": {"persona_notes": "Gentil"}})
 
     assert response.status_code == 200
     assert await _stored(db, clinic.id) is True
+
+
+async def test_the_simulator_overlay_ignores_a_true_draft(db, clinic):  # noqa: F811
+    from secretaria.workers.shared.flow_simulation_input import overlay_tenant
+
+    async with db() as session:
+        tenant = await session.get(Tenant, clinic.id)
+        flag = "paid_notices_auto_approved"
+        assert getattr(overlay_tenant(tenant, {flag: True}), flag) is False
+        tenant.paid_notices_auto_approved = True
+        assert getattr(overlay_tenant(tenant, {flag: False}), flag) is False
+        assert overlay_tenant(tenant, {}).paid_notices_auto_approved is True
 
 
 async def test_null_is_refused_and_nothing_changes(client: AsyncClient, db, clinic):  # noqa: F811

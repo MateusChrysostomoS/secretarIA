@@ -168,8 +168,15 @@ TENANT_SCALAR_FIELDS: tuple[str, ...] = (
     "payment_provider",
     "deposit_timing",
     "deposit_hold_ttl_minutes",
-    "paid_notices_auto_approved",
+    # `paid_notices_auto_approved` is NOT here: it is revoke-only (TASK-090), see
+    # REVOKE_ONLY_TENANT_FIELDS / tenant_scalar_updates.
 )
+
+# Fields a save may switch OFF but never ON. The clinic's standing "approve billed WhatsApp
+# notices" is no longer offered anywhere, so the server refuses to turn it back on (a
+# stale client sending true gets 200 and the stored value is left alone); a clinic that
+# still holds a true can be switched off, and reads keep returning the stored value.
+REVOKE_ONLY_TENANT_FIELDS: tuple[str, ...] = ("paid_notices_auto_approved",)
 
 PROFESSIONAL_CONFIG_FIELDS: tuple[str, ...] = (
     "specialty",
@@ -365,6 +372,18 @@ def _apply_extra_reminder(tenant: Tenant, data: dict) -> None:
     tenant.reminder_extra_lead_minutes = extra_reminder.legacy_lead_minutes(days)
 
 
+def tenant_scalar_updates(data: dict) -> dict:
+    """The `{column: value}` assignments `data` is allowed to make on a tenant.
+
+    Plain scalar fields pass through; a revoke-only field passes only when it is False.
+    """
+    updates = {name: data[name] for name in TENANT_SCALAR_FIELDS if name in data}
+    for name in REVOKE_ONLY_TENANT_FIELDS:
+        if data.get(name) is False:
+            updates[name] = False
+    return updates
+
+
 async def apply_tenant_config(session: AsyncSession, tenant: Tenant, data: dict) -> None:
     """Apply a validated TenantConfigUpdate dump onto `tenant`. No commit.
 
@@ -379,9 +398,8 @@ async def apply_tenant_config(session: AsyncSession, tenant: Tenant, data: dict)
     gate cannot run any earlier.
     """
     previous_extra = _extra_reminder_state(tenant)
-    for field_name in TENANT_SCALAR_FIELDS:
-        if field_name in data:
-            setattr(tenant, field_name, data[field_name])
+    for field_name, value in tenant_scalar_updates(data).items():
+        setattr(tenant, field_name, value)
     _apply_extra_reminder(tenant, data)
 
     # Budget check for the greeting's clinic slot. Runs on the PATCHED tenant

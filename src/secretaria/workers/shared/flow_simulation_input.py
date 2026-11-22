@@ -20,7 +20,7 @@ from secretaria.models import Professional, Tenant
 from secretaria.services.calendar import CalendarService
 from secretaria.services.hub_configuration import (
     PROFESSIONAL_CONFIG_FIELDS,
-    TENANT_SCALAR_FIELDS,
+    tenant_scalar_updates,
 )
 from secretaria.services.insurance_catalog import load_tenant_insurance
 from secretaria.services.list_options import needs_unit_options
@@ -48,9 +48,8 @@ def _copy_of(row: Any) -> SimpleNamespace:
 
 def overlay_tenant(tenant: Tenant, draft: dict | None) -> SimpleNamespace:
     view = _copy_of(tenant)
-    for name in TENANT_SCALAR_FIELDS:
-        if draft and name in draft:
-            setattr(view, name, draft[name])
+    for name, value in tenant_scalar_updates(draft or {}).items():
+        setattr(view, name, value)
     return view
 
 
