@@ -1,5 +1,7 @@
 # CHECKPOINT — Lembretes R7: ações da clínica na agenda avisam o paciente (TASK-044)
 
+> **Nota TASK-090 (2026-11-22, local):** `paid_notices_auto_approved` foi zerado para `false` pela migração `f2b8d4c6e0a3`, e um Salvar só consegue desligá-lo (um `true` vindo do cliente é ignorado) até o dono liberar a função ("Em breve" no front). Ver [CHECKPOINT_contexto_ajustes_finais.md](CHECKPOINT_contexto_ajustes_finais.md).
+
 Spec: `docs/superpowers/specs/2026-10-09-acoes-clinica-avisos-paciente-design.md`.
 Plano: `docs/superpowers/plans/2026-10-09-lembretes-r7-avisos-acoes-clinica.md`.
 

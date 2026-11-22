@@ -1,5 +1,7 @@
 # CHECKPOINT — Catálogo canônico de convênios + aceitação por profissional + convênio primeiro no fluxo
 
+> **Superado em parte por TASK-090 (2026-11-22, local):** (1) o toggle `collect_insurance` não decide mais nada — a pergunta do convênio é fixa quando a clínica tem convênio e modo escolhido (a coluna fica; a API aceita e ignora o campo; a leitura devolve `true`); (2) `custom_payment_note` foi removida (código; coluna dropada pela revisão `b4d0f6e8a2c5`): o "Outro" só tem nome, o bloco "Sobre o pagamento do convênio" saiu da confirmação e do Pix, e dúvida de pagamento vira chamada humana (`insurance_payment_question`); (3) nova ordem única da clínica no modo `independent` (`insurance_plan_order`). Ver [CHECKPOINT_contexto_ajustes_finais.md](CHECKPOINT_contexto_ajustes_finais.md).
+
 > **Atualização 2026-11-21 — TASK-088: a ordem "convênio primeiro" de 2026-09-23 foi SUBSTITUÍDA pelo dono em 2026-11-20.**
 > O fluxo agora é `pra quem → serviço → médico → unidade → convênio → dia → horário`: o convênio é a **última**
 > escolha, filtrado pela combinação (serviço, médico, unidade) já conhecida; nenhum aceito → Particular direto com um
