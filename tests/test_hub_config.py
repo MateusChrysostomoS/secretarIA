@@ -126,7 +126,7 @@ async def test_get_config_omits_greeting_buttons(client: AsyncClient) -> None:
 # --------------------------------------------------------------------------
 
 
-async def test_put_address_and_collect_insurance_succeeds_while_disconnected(
+async def test_put_address_and_legacy_collect_insurance_succeeds_while_disconnected(
     client: AsyncClient, tenant
 ) -> None:
     """The tenant fixture has phone_number_id=None and no Calendar connected -
@@ -148,7 +148,8 @@ async def test_put_address_and_collect_insurance_succeeds_while_disconnected(
     assert response.status_code == 200
     body = response.json()
     assert body["address"]["city"] == "São Paulo"
-    assert body["collect_insurance"] is True
+    # TASK-090: accepted but ignored - the stored legacy flag does not change.
+    assert body["collect_insurance"] is False
     assert body["is_active"] is False  # untouched
 
 
@@ -511,3 +512,32 @@ async def test_get_config_appointment_type_without_requirements_key_still_reads(
     body = response.json()
     assert body["appointment_types"][0]["name"] == "Consulta"
     assert "requirements" not in body["appointment_types"][0]
+
+
+async def test_config_update_accepts_and_ignores_collect_insurance(
+    client: AsyncClient, db, tenant
+) -> None:
+    """TASK-090: an old front may still send `collect_insurance: false`. The PUT
+    answers 200, the flag is not written, and the convênio question stays on
+    (it depends only on the clinic having convênios)."""
+    from types import SimpleNamespace
+
+    from secretaria.services.flow_router import _insurance_step_skip_reason
+
+    async with db() as session:
+        row = await session.get(Tenant, tenant.id)
+        row.collect_insurance = True
+        row.insurance_mode = "shared"
+        row.insurances = ["Unimed"]
+        await session.commit()
+
+    response = await client.put(CONFIG, json={"collect_insurance": False})
+    assert response.status_code == 200
+
+    async with db() as session:
+        stored = await session.get(Tenant, tenant.id)
+        assert stored.collect_insurance is True  # the column is no longer writable
+        snapshot = SimpleNamespace(
+            insurance_mode=stored.insurance_mode, insurances=stored.insurances
+        )
+    assert _insurance_step_skip_reason(snapshot) is None

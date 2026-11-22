@@ -331,7 +331,6 @@ async def test_draft_context_reloads_clinic_settings_instead_of_using_the_turn_s
     async with db() as session:
         fresh = await session.get(Tenant, stale_tenant.id)
         fresh.appointment_types = [{"name": "Serviço novo", "duration_min": 20, "is_active": True}]
-        fresh.collect_insurance = True
         fresh.insurance_mode = "shared"
         fresh.insurances = ["Plano novo"]
         await session.commit()
@@ -340,7 +339,6 @@ async def test_draft_context_reloads_clinic_settings_instead_of_using_the_turn_s
     )
     ctx = await draft_resolution._load_draft_context(reply, stale_tenant)
     assert [item["name"] for item in ctx.tenant_snapshot.appointment_types] == ["Serviço novo"]
-    assert ctx.tenant_snapshot.collect_insurance is True
     assert ctx.tenant_snapshot.insurance_mode == "shared"
     assert ctx.tenant_snapshot.insurances == ["Plano novo"]
 

@@ -161,7 +161,7 @@ async def test_saves_tenant_and_professional_in_one_call(
 
     t, p = await _reload(db, tenant.id, professional.id)
     assert t.clinic_description == "depois"
-    assert t.collect_insurance is True
+    assert t.collect_insurance is False  # TASK-090: accepted but ignored
     assert p.specialty == "depois"
     assert p.business_hours == HOURS_B
 

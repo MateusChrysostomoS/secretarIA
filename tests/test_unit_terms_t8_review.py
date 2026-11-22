@@ -701,16 +701,15 @@ def test_terms_line_keeps_the_minutes_together_and_has_no_money():
     )
 
 
-# ============== TASK-086 T9 review minor 6: the final convenio guard with the step turned off
+# ============== TASK-086 T9 review minor 6 (reworked by TASK-090): the final convenio guard
 #
-# The clinic turned the convenio question off while the conversation still carried a convenio
-# that the matrix now refuses at the confirmation. The guard used to reopen the convenio list -
-# a question the clinic no longer asks. It now opens the "nao atende este convenio" step (other
-# doctor / other service; never "Trocar convenio" with the step off), nothing booked.
+# The clinic could once turn the convenio question off via `collect_insurance`; the guard then
+# opened the "nao atende este convenio" step instead of the list. TASK-090 made the question
+# immutable (asked whenever the clinic has convenios), so the legacy flag must change nothing.
 
 
 @pytest.mark.asyncio
-async def test_t086_final_guard_with_the_convenio_step_off_never_reopens_the_list():
+async def test_t086_final_guard_ignores_the_legacy_collect_flag():
     centro, sul, _norte = m086._units()
     ana = m086._doctor(units=[centro, sul])
     tenant = m086._tenant("shared", m086._matrix("shared", ana, (m086.ECO_ID, sul, m086.UNIMED)))
@@ -728,20 +727,9 @@ async def test_t086_final_guard_with_the_convenio_step_off_never_reopens_the_lis
     )
     assert result.appointment is None and result.booking_hold is None
     assert agenda.log["created"] == [] and gate.decided == []
-    assert result.flow_step == fr.STEP_AWAITING_PLAN_REFUSED
-    assert (result.flow_selected_type, result.flow_selected_professional_id) == (
-        "Ecocardiograma",
-        ana.id,
-    )
-    assert result.flow_selected_unit_id is None
-    [menu] = result.bubbles
-    assert fr.LABEL_PLAN_CHANGE_INSURANCE not in menu.labels
-    assert fr.LABEL_PLAN_OTHER_SERVICE in menu.labels
-    assert menu.body.startswith(
-        "Desculpe, o convênio Unimed não é mais aceito para Ecocardiograma com Dra. Ana na "
-        "unidade Zona Sul. Nada foi agendado."
-    )
-    assert "Escolha outro convênio" not in menu.body
+    # TASK-090: the legacy flag no longer turns the question off - the clinic has convênios,
+    # so the guard reopens the convênio list exactly as with the flag on.
+    assert result.flow_step == fr.STEP_AWAITING_INSURANCE
 
 
 @pytest.mark.asyncio

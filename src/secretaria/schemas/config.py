@@ -209,7 +209,9 @@ class TenantConfigUpdate(BaseModel):
     # `greeting_buttons` already gets here. Convênio has its own dedicated
     # endpoints now: api/hub/insurance.py.
     #
-    # Whether the bot should ask patients for their insurance during booking.
+    # TASK-090: ACCEPTED but IGNORED (an old front may still send it). The convênio
+    # question during booking is immutable: asked whenever the clinic has convênios.
+    # See services/hub_configuration.py::TENANT_SCALAR_FIELDS (not listed there).
     collect_insurance: bool | None = None
     # --- Pix deposit (sinal) policy — services/payments/deposit_lifecycle.py ---
     pix_deposit_enabled: bool | None = None
@@ -406,6 +408,7 @@ class TenantConfigRead(BaseModel):
     # not an object must not turn the whole configuration read into a 500.
     address: Any = None
     clinic_facts: Any = None
+    # Legacy, returned only for old fronts; it no longer drives anything (TASK-090).
     collect_insurance: bool
     is_active: bool
     # True when a Google Calendar refresh token is stored for this tenant.

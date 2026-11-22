@@ -155,7 +155,9 @@ TENANT_SCALAR_FIELDS: tuple[str, ...] = (
     "initial_flows",
     "address",
     "clinic_facts",
-    "collect_insurance",
+    # `collect_insurance` is no longer writable (TASK-090): the convênio question
+    # depends only on the clinic having convênios. The config schema still accepts
+    # the key and drops it here.
     "pix_deposit_enabled",
     "pix_deposit_percent",
     "pix_refund_window_hours",

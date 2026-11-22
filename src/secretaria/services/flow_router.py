@@ -239,7 +239,6 @@ INSURANCE_QUESTION = "Você vai usar convênio? Escolha uma opção:"
 # Structured reasons for `insurance_step_skipped` (see _insurance_step_skip_reason).
 # Count-only observability: which CONFIGURATION silenced the step, never which
 # plan a patient picked.
-INSURANCE_SKIP_DISABLED = "disabled"
 INSURANCE_SKIP_EMPTY_CATALOG = "empty_catalog"
 # TASK-008: the clinic has not chosen one of the three acceptance modes yet
 # (services/tenant_config.py::insurance_mode_configured). Same effective
@@ -1285,7 +1284,7 @@ def flows_enabled(tenant: Tenant) -> bool:
     The flow is not a per-clinic choice: it is the same flow for everyone, and it
     already adapts itself to the clinic's own DATA (2+ active professionals swap the
     menu for the multi-doctor trio and insert the choose-a-doctor step — see
-    `menu_buttons_for` / `_is_multi_professional`; `collect_insurance` inserts the
+    `menu_buttons_for` / `_is_multi_professional`; having convênios inserts the
     convênio step; the services catalog drives the options list). So "which flow"
     is derived, never configured, and the gate had nothing left to gate.
 
@@ -3739,10 +3738,10 @@ def insurance_plan_names(tenant: Tenant) -> list[str]:
 def _insurance_step_skip_reason(tenant: Tenant) -> str | None:
     """Why the convênio step must be skipped for this tenant, or None to ask.
 
-    `collect_insurance` and the clinic's plans are CLINIC-wide settings (the
+    The clinic's acceptance mode and plans are CLINIC-wide settings (the
     hub edits them once for the whole clinic) and the answer never filters
     doctors, services or slots. So the step depends on the clinic's
-    configuration and NOTHING else: zero, one and many active professionals all
+    convênio configuration and NOTHING else: zero, one and many active professionals all
     get the same question - since TASK-088 right before the days, once service,
     doctor and unit are known (`_insurance_gate`).
 
@@ -3751,9 +3750,13 @@ def _insurance_step_skip_reason(tenant: Tenant) -> str | None:
     with a single professional — the common case — could switch the toggle on
     in the hub and never be asked, so the saved setting produced no behaviour
     and the booking lost operational information the clinic had asked for.
+
+    TASK-090 owner decision: the question is IMMUTABLE. It is asked whenever
+    the clinic has at least one convênio (and has chosen an acceptance mode)
+    and never when it has none. The old `tenants.collect_insurance` toggle no
+    longer influences anything: the column stays for compatibility, nothing
+    reads it.
     """
-    if not bool(getattr(tenant, "collect_insurance", False)):
-        return INSURANCE_SKIP_DISABLED
     if getattr(tenant, "insurance_mode", None) is None:
         return INSURANCE_SKIP_NO_MODE
     if not _tenant_insurances(tenant):
@@ -6868,8 +6871,8 @@ async def enter_guided_booking(
     point that asks them, in that order, for every path that reaches the days.
 
     **It deliberately does NOT skip an unanswered convênio.** The literal
-    ask was "open the day list", but `collect_insurance` is a clinic-wide
-    setting the hub saved on purpose, and `_insurance_step_skip_reason` is the
+    ask was "open the day list", but the convênio question is a clinic-wide
+    rule (asked whenever the clinic has convênios), and `_insurance_step_skip_reason` is the
     single place that decides whether it applies (`_insurance_gate` asks it). Skipping it here
     would mean a booking loses information the clinic asked for on every OTHER booking,
     purely because this patient happened to arrive through the LLM - an
