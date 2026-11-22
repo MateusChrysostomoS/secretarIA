@@ -45,6 +45,9 @@ depends_on: str | None = None
 
 SEDE_NAME = "Sede"
 _MAX_ADDRESS = 512  # units.address column
+# Max length of each copied part = its `units` column, so an oversized legacy value is cut
+# instead of failing the whole migration on Postgres.
+_MAX_PART = {"street": 255, "number": 30, "complement": 255, "neighborhood": 255, "city": 255}
 
 _UF_BY_NAME = {
     "acre": "AC",
@@ -164,6 +167,10 @@ def sede_parts(address: object) -> dict[str, str | None] | None:
         "city": city,
         "state": _uf(address.get("state")),
     }
+    for name, limit in _MAX_PART.items():
+        value = parts[name]
+        if value is not None:
+            parts[name] = value[:limit].rstrip() or None
     return parts
 
 

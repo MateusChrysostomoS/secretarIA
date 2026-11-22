@@ -180,6 +180,35 @@ def test_incomplete_address_still_creates_the_sede_with_what_exists(tmp_path):
         ]
 
 
+def test_oversized_legacy_values_are_capped_to_the_unit_columns(tmp_path):
+    engine = _engine(tmp_path)
+    with engine.begin() as conn:
+        tid = _tenant(
+            conn,
+            {
+                "line": "R" * 400 + ", 12",
+                "complement": "c" * 400,
+                "neighborhood": "b" * 400,
+                "city": "x" * 400,
+                "state": "SP",
+                "postal_code": "01310-100",
+            },
+        )
+        # No trailing number: the WHOLE line is the street, and must still be cut to 255.
+        whole = _tenant(conn, {"line": "S" * 600, "city": "Recife"})
+        _run(conn, MIGRATION.upgrade)
+        for owner in (tid, whole):
+            ((_name, _active, address, _cep, street, number, complement, hood, city, _uf),) = (
+                _units(conn, owner)
+            )
+            assert len(address) <= 512
+            assert len(street) <= 255 and len(complement or "") <= 255
+            assert len(hood or "") <= 255 and len(city) <= 255 and len(number or "") <= 30
+        ((_n, _a, _addr, _c, street, number, complement, hood, city, _u),) = _units(conn, tid)
+        assert (street, number) == ("R" * 255, "12")
+        assert (complement, hood, city) == ("c" * 255, "b" * 255, "x" * 255)
+
+
 def test_tenant_with_a_unit_is_untouched_even_if_inactive(tmp_path):
     engine = _engine(tmp_path)
     with engine.begin() as conn:
