@@ -22,7 +22,7 @@ DEPLOY ORDER - the database moves FIRST (the new code reads the table):
 Rollback: old code on both services first, then `alembic downgrade` (drops the table).
 
 Revision ID: a3c9e5d7f1b4
-Revises: f9a1d7c4e2b6
+Revises: f2b8d4c6e0a3
 Create Date: 2026-11-22
 """
 
@@ -32,8 +32,7 @@ import sqlalchemy as sa
 from alembic import op
 
 revision: str = "a3c9e5d7f1b4"
-# TASK-090: re-chain at integration
-down_revision: str | None = "f9a1d7c4e2b6"
+down_revision: str | None = "f2b8d4c6e0a3"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
