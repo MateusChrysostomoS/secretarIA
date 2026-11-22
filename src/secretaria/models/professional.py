@@ -107,6 +107,17 @@ class Professional(Base):
     # changes.
     buffer_minutes: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
+    # TASK-091: True = this professional was ADDED to a clinic that already had professionals
+    # (the invite, or the hub's POST), so they configure themselves and are born EMPTY (own `[]`
+    # services, own `{}` hours, no unit links, no own convênio list) instead of inheriting the
+    # clinic. Only a flagged professional is hidden from patients until
+    # `services/professional_readiness.py` says they are ready to book; everyone created before
+    # the column existed - the owner included - stays False and behaves exactly as before
+    # (default False, never backfilled).
+    requires_self_setup: Mapped[bool] = mapped_column(
+        Boolean, server_default=text("false"), default=False
+    )
+
     # TASK-083: the shared calendar identity of this PERSON across clinics. Every
     # `professionals` row of one brain-api account points at the same `agendas` row
     # (services/agenda_linking.py), and services/agenda.py reads the siblings' busy time

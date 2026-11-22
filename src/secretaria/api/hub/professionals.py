@@ -79,7 +79,7 @@ from secretaria.schemas.professional import (
     ProfessionalRead,
     ProfessionalUpdate,
 )
-from secretaria.services import hub_configuration as hubcfg
+from secretaria.services import hub_configuration as hubcfg, provisioning
 from secretaria.services.calendar import (
     CalendarUnavailableError,
     GoogleScopeInsufficientError,
@@ -203,6 +203,9 @@ async def create_professional(
         name=body.name,
         google_calendar_id=body.google_calendar_id,
         is_active=body.is_active,
+        # TASK-091: the same starting point as the invite (nothing inherited when the clinic
+        # already has professionals).
+        **await provisioning.new_professional_fields(session, tenant.id),
     )
     session.add(professional)
     await session.commit()
