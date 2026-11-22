@@ -1092,7 +1092,7 @@ class FlowRouterResult:
     # can re-open the picker) and then sends the Pix; if that send fails it voids the charge.
     # Mutually exclusive with `appointment` and `booking_hold`.
     # {"deposit_id", "amount_cents", "copy_paste", "expires_at", "start_at", "end_at",
-    #  "service", "minutes", "payment_note"}
+    #  "service", "minutes"}
     deposit_request: dict | None = None
     # When set, the matching appointment row should be moved (RESCHEDULED):
     # {"google_event_id", "start_at", "end_at"}.
@@ -3855,14 +3855,15 @@ INSURANCE_PINNED_ROWS: tuple[tuple[str, str, str | None], ...] = (
 
 
 def insurance_plans_have_clinic_notes(plans: list) -> bool:
-    """Does any of these plans carry the clinic's own note (TASK-085 R U1b)?
+    """Does any of these plans carry the clinic's own payment note (TASK-085 R U1b)?
 
-    The clinic's "Outro" plans and, in `independent` mode, a doctor's own "Outro" carry
-    `note`; catalog plans and legacy names never do. One non-blank note is enough for the
-    Portal to offer "Ver regras de pagamento dos convênios" (owner, 2026-11-18) - the same
-    plans `patient_insurance_overview` then lists.
+    Always False since TASK-090 (owner, 2026-11-22): the "Outro" convênio no longer has a
+    payment text, so the Portal never offers "Ver regras de pagamento dos convênios" - a
+    patient who asks how payment works is handed off to a person instead. Kept (with the
+    `has_clinic_notes` pointer it feeds) so the card's wire shape does not change for the
+    Portal; `plans` is ignored, so even a snapshot taken before the deploy says False.
     """
-    return any(isinstance(plan.get("note"), str) and plan["note"].strip() for plan in plans)
+    return False
 
 
 def portal_insurance_rows(plans: list) -> list[tuple[str, str, str | None]]:
@@ -7507,7 +7508,6 @@ async def _handle_confirmation(
             )
         if decision.outcome == "awaiting_payment" and decision.payment is not None:
             payment = decision.payment
-            plan = _selected_plan(tenant, insurance)
             return FlowRouterResult(
                 action="reply",
                 flow_state=FlowState.AWAITING_DEPOSIT,
@@ -7532,9 +7532,6 @@ async def _handle_confirmation(
                     "end_at": payment.end_at,
                     "service": payment.service,
                     "minutes": payment.minutes,
-                    "payment_note": (
-                        str(plan["note"]).strip() if plan and plan.get("note") else None
-                    ),
                 },
             )
         if decision.outcome == "commit" and decision.deposit_waived_reason is not None:
@@ -7641,12 +7638,9 @@ async def _handle_confirmation(
     # (stored above as `google_event_link`, and the right link for the clinic)
     # would open a permission error for the patient. See
     # services/calendar.py::build_patient_calendar_link.
-    # TASK-008 §4.3: a custom "Outro" convênio carries its own payment
-    # explanation, shown here right after the patient chose it. Catalog plans
-    # have no patient-facing note (`mechanism`/`note` there are internal
-    # metadata, never product copy - see models/insurance.py).
-    plan = _selected_plan(tenant, insurance)
-    payment_note = str(plan["note"]).strip() if plan and plan.get("note") else None
+    # TASK-090 (owner, 2026-11-22): no convênio payment text here any more - the "Outro"
+    # note is gone, and a patient who asks how payment works is handed off to a person
+    # (ai/tools.py `insurance_payment_question`).
     # TASK-083 follow-up (owner, 2026-11-13): the event the patient adds from the link carries
     # the same details - service, doctor, date, unit and address - in its "Detalhes".
     link_details = build_patient_link_details(
@@ -7671,7 +7665,6 @@ async def _handle_confirmation(
             tz=calendar.tzinfo,
             location=getattr(unit, "location", None) if unit is not None else None,
         )
-        + (f"\n\n💳 Sobre o pagamento do convênio:\n{payment_note}" if payment_note else "")
     )
     return FlowRouterResult(
         action="reply",

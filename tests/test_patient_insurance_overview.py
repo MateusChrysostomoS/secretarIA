@@ -8,7 +8,10 @@ pagamento" card through brain-api. What is worth pinning, and the failure each t
   convenio never exempts the sinal, which is the clinic's one rule (`deposit`);
 - TASK-085 R U1b: only the convenios WITH the clinic's own note are listed (the sheet exists to
   show those notes; the Portal offers it only when one exists);
-- one clinic never sees another's list; the route needs the internal key.
+- TASK-090 (owner, 2026-11-22): the "Outro" convênio has no payment text any more, so NO plan is
+  ever listed - `plans` stays (wire shape) and is always empty; a patient who asks how payment
+  works with a convênio is handed off to a person;
+- one clinic never sees another's rule; the route needs the internal key.
 """
 
 import os
@@ -95,19 +98,13 @@ async def _tenant(db, **fields) -> Tenant:
 
 
 async def _shared_clinic(db, *, deposit: bool = True) -> Tenant:
-    """Shared mode: Unimed (catalog, no note) + the clinic's own "GEAP" (with a note)."""
+    """Shared mode: Unimed (catalog) + the clinic's own "GEAP" ("Outro")."""
     tenant = await _tenant(
         db, insurance_mode="shared", pix_deposit_enabled=deposit, pix_deposit_percent=30
     )
     async with db() as session:
         session.add(TenantInsurancePlan(tenant_id=tenant.id, catalog_id=UNIMED))
-        session.add(
-            TenantInsurancePlan(
-                tenant_id=tenant.id,
-                custom_name="GEAP",
-                custom_payment_note="Pagamento na recepção.",
-            )
-        )
+        session.add(TenantInsurancePlan(tenant_id=tenant.id, custom_name="GEAP"))
         await session.commit()
     return tenant
 
@@ -122,15 +119,12 @@ def _row(professional, tenant, catalog_id) -> ProfessionalInsurancePlan:
     )
 
 
-async def test_the_patient_sees_the_convenios_with_a_clinic_note_and_the_one_sinal(client, db):
+async def test_the_patient_sees_the_one_sinal_and_no_convenio_payment_text(client, db):
     tenant = await _shared_clinic(db)
     resp = await _get(client, tenant.id)
     assert resp.status_code == 200, resp.text
-    # Unimed has no clinic note: it is only a name, already in the convenio list (U1b).
-    assert resp.json() == {
-        "deposit": {"enabled": True, "percent": 30},
-        "plans": [{"name": "GEAP", "clinic_note": "Pagamento na recepção."}],
-    }
+    # TASK-090: neither the catalog plan nor the clinic's "Outro" carries a payment text.
+    assert resp.json() == {"deposit": {"enabled": True, "percent": 30}, "plans": []}
     assert "Varia por plano" not in resp.text and "Pagamento: confirme" not in resp.text
 
 
@@ -156,12 +150,10 @@ async def test_with_the_deposit_off_the_clinic_rule_says_off_and_no_percent(clie
     tenant = await _shared_clinic(db, deposit=False)
     body = (await _get(client, tenant.id)).json()
     assert body["deposit"] == {"enabled": False, "percent": None}
-    assert [plan["name"] for plan in body["plans"]] == ["GEAP"]
+    assert body["plans"] == []
 
 
-async def test_independent_mode_unites_active_doctors_and_never_names_them(
-    client, db
-):
+async def test_independent_mode_lists_no_plan_and_never_names_a_doctor(client, db):
     tenant = await _tenant(
         db, insurance_mode="independent", pix_deposit_enabled=True, pix_deposit_percent=40
     )
@@ -181,13 +173,11 @@ async def test_independent_mode_unites_active_doctors_and_never_names_them(
                     professional_id=beto.id,
                     tenant_id=tenant.id,
                     custom_name="Plano do Consultorio",
-                    custom_payment_note="Reembolso pelo plano.",
                 ),
                 ProfessionalInsurancePlan(
                     professional_id=gone.id,
                     tenant_id=tenant.id,
                     custom_name="Plano Inativo",
-                    custom_payment_note="Nao deve aparecer.",
                 ),
             ]
         )
@@ -195,10 +185,8 @@ async def test_independent_mode_unites_active_doctors_and_never_names_them(
     resp = await _get(client, tenant.id)
     body = resp.json()
     assert body["deposit"] == {"enabled": True, "percent": 40}
-    # Only an ACTIVE doctor's own "Outro" carries a note; catalog rows have none (U1b).
-    assert body["plans"] == [
-        {"name": "Plano do Consultorio", "clinic_note": "Reembolso pelo plano."}
-    ]
+    # TASK-090: a doctor's own "Outro" has no payment text either.
+    assert body["plans"] == []
     assert "Sigilo" not in resp.text and "Plano Inativo" not in resp.text
 
 
@@ -215,19 +203,18 @@ async def test_a_legacy_name_without_a_row_has_no_note_so_it_is_not_listed(clien
     assert body["plans"] == []
 
 
-async def test_one_clinic_never_sees_another_clinics_list(client, db):
+async def test_one_clinic_never_sees_another_clinics_rule(client, db):
     mine = await _shared_clinic(db)
-    other = await _tenant(db, insurance_mode="shared", pix_deposit_enabled=True)
+    other = await _tenant(
+        db, insurance_mode="shared", pix_deposit_enabled=True, pix_deposit_percent=55
+    )
     async with db() as session:
-        session.add(
-            TenantInsurancePlan(
-                tenant_id=other.id, custom_name="Plano Vizinho", custom_payment_note="Nota."
-            )
-        )
+        session.add(TenantInsurancePlan(tenant_id=other.id, custom_name="Plano Vizinho"))
         await session.commit()
-    names = [p["name"] for p in (await _get(client, mine.id)).json()["plans"]]
-    assert "Plano Vizinho" not in names
-    assert [p["name"] for p in (await _get(client, other.id)).json()["plans"]] == ["Plano Vizinho"]
+    resp = await _get(client, mine.id)
+    assert resp.json()["deposit"] == {"enabled": True, "percent": 30}
+    assert "Plano Vizinho" not in resp.text
+    assert (await _get(client, other.id)).json()["deposit"] == {"enabled": True, "percent": 55}
 
 
 async def test_an_unknown_clinic_is_404_and_the_route_needs_the_internal_key(client, db):

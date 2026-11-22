@@ -35,10 +35,11 @@ def test_initial_sinal_request_is_one_text_ending_with_the_code():
         amount_cents=6000,
         minutes=30,
         until_text="10:30",
-        payment_note="nota do convênio",
         copy_paste=CODE,
     )
-    assert "R$ 60,00" in text and "nota do convênio" in text
+    assert "R$ 60,00" in text
+    # TASK-090: no convênio payment block in the Pix ask any more.
+    assert "Sobre o pagamento do convênio" not in text
     assert text.rstrip().endswith(FENCED)
     assert text.count(CODE) == 1
 
@@ -53,7 +54,7 @@ def test_initial_sinal_request_without_a_code_has_no_fence():
 def test_after_mode_sinal_request_ends_with_the_code():
     tenant = SimpleNamespace(clinic_name="Clinica")
     appointment = SimpleNamespace(appointment_type="Consulta")
-    text = deposit_lifecycle._deposit_request_text(tenant, appointment, 6000, CODE, "nota")
+    text = deposit_lifecycle._deposit_request_text(tenant, appointment, 6000, CODE)
     assert text.rstrip().endswith(FENCED) and text.count(CODE) == 1
 
 

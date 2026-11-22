@@ -470,10 +470,7 @@ async def test_clinic_custom_plan_appears_in_patient_list_and_can_toggle_deposit
         )
         solo = await _professional(session, tenant, "Dra. Única")
         plan = await create_tenant_custom_plan(
-            session,
-            tenant,
-            custom_name="Convênio da Prefeitura",
-            custom_payment_note="Pagamento via reembolso, envie a nota fiscal em até 30 dias.",
+            session, tenant, custom_name="Convênio da Prefeitura"
         )
         await session.commit()
         plan_id = str(plan.id)
@@ -482,7 +479,6 @@ async def test_clinic_custom_plan_appears_in_patient_list_and_can_toggle_deposit
             {
                 "id": plan_id,
                 "name": "Convênio da Prefeitura",
-                "note": "Pagamento via reembolso, envie a nota fiscal em até 30 dias.",
                 "mechanism": "desconhecido",  # custom plans have no catalog entry
             }
         ]
@@ -501,12 +497,7 @@ async def test_professional_custom_plan_independent_mode(db):
     async with db() as session:
         tenant = await _tenant(session, insurance_mode="independent")
         ana = await _professional(session, tenant, "Dra. Ana")
-        plan = await create_professional_custom_plan(
-            session,
-            ana,
-            custom_name="Plano da Dra. Ana",
-            custom_payment_note="50% de desconto à vista.",
-        )
+        plan = await create_professional_custom_plan(session, ana, custom_name="Plano da Dra. Ana")
         await session.commit()
         pairs = await list_professional_plans(session, ana.id)
         assert len(pairs) == 1
@@ -514,19 +505,17 @@ async def test_professional_custom_plan_independent_mode(db):
         assert pairs[0][1] is None  # no catalog entry - it's custom
 
 
-async def test_custom_plan_payment_note_appears_in_confirmation_and_deposit_ask():
-    """§4.3: the payment note shows at confirmation and again with the Pix ask. Pure
-    text-composition check, no DB needed for the confirmation half; deposit-ask half checked
-    separately below (needs DB)."""
+async def test_the_deposit_ask_never_carries_a_convenio_payment_block():
+    """TASK-090 (owner, 2026-11-22): the "Outro" convênio has no payment text any more, so the
+    Pix ask never shows "Sobre o pagamento do convênio" (it used to repeat the note there)."""
     text = deposit_lifecycle._deposit_request_text(
         tenant=type("T", (), {"clinic_name": "Clinica"})(),
         appointment=type("A", (), {"appointment_type": "Consulta"})(),
         amount_cents=6000,
         copy_paste="00020126...",
-        payment_note="Pagamento via reembolso, envie a nota fiscal em até 30 dias.",
     )
-    assert "💳 Sobre o pagamento do convênio:" in text
-    assert "Pagamento via reembolso" in text
+    assert "Sobre o pagamento do convênio" not in text
+    assert "💳" not in text
 
 
 async def test_custom_plan_never_exempts_the_deposit(db, monkeypatch):
@@ -546,9 +535,7 @@ async def test_custom_plan_never_exempts_the_deposit(db, monkeypatch):
                 {"name": "Consulta", "duration_min": 30, "is_active": True, "price": "R$ 200,00"}
             ],
         )
-        plan = await create_tenant_custom_plan(
-            session, tenant, custom_name="Outro", custom_payment_note="Nota."
-        )
+        plan = await create_tenant_custom_plan(session, tenant, custom_name="Outro")
         await session.flush()
         # A row saved while the option existed.
         await set_legacy_flag(session, "tenant_insurance_plans", plan.id, False)

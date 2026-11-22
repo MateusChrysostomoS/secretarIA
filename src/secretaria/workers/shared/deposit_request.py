@@ -75,7 +75,6 @@ async def _send_deposit_request_notice(
                 amount_cents=request["amount_cents"],
                 minutes=request["minutes"],
                 until_text=until_text,
-                payment_note=request.get("payment_note"),
                 copy_paste=request["copy_paste"],
             ),
         ),

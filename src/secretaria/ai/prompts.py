@@ -165,6 +165,17 @@ def _format_safety_rules() -> str:
     )
 
 
+# TASK-090 (owner, 2026-11-22): a convênio payment-rule question goes straight to a person, for
+# every clinic, in the v1 prompt next to the other hand-off reasons. The longer
+# INSURANCE_PAYMENT_HANDOFF below rides with the clinic's convênios in BOTH prompts (the v2 one
+# has no room for this line: see prompts_v2._format_tools_v2).
+INSURANCE_PAYMENT_HANDOFF_RULE = (
+    "Se ele perguntar a regra de pagamento de um convênio (reembolso, coparticipação, se o "
+    "convênio cobre, como ou quanto paga pelo convênio), não explique: use "
+    'request_human_handoff com reason "insurance_payment_question".'
+)
+
+
 def _format_service_priorities() -> str:
     """The unconditional "COMO ATENDER" block: the order the agent serves the patient in.
 
@@ -188,7 +199,8 @@ def _format_service_priorities() -> str:
         "abaixo). Se nenhuma opção da clínica corresponde exatamente ao que ele "
         "descreveu, diga isso com franqueza nessa mensagem.\n"
         "3) POR ÚLTIMO, uma pessoa da equipe. Se o paciente pedir explicitamente uma "
-        "pessoa, ou o assunto exigir avaliação humana, use request_human_handoff. Se você "
+        "pessoa, ou o assunto exigir avaliação humana, use request_human_handoff. "
+        f"{INSURANCE_PAYMENT_HANDOFF_RULE} Se você "
         "não tem a informação ou não consegue fazer o que ele pediu (depois de tentar de "
         "verdade), use offer_human_handoff: o sistema pergunta a ele, com botões, se quer "
         "um atendente. Nunca prometa \"vou confirmar com a equipe\" sem essa ferramenta.\n"
@@ -352,7 +364,8 @@ def _format_conversation_state(config: TenantRuntimeConfig) -> str:
         "offer_human_handoff (pergunta, com botões, se ele quer um atendente).\n"
         "- Chamar a equipe humana (request_human_handoff) é ÚLTIMO RECURSO: só quando o "
         "paciente pede explicitamente uma pessoa, quando o assunto exige avaliação "
-        "humana, ou depois de você tentar ajudar de verdade. Nunca por dúvida comum."
+        "humana, ou depois de você tentar ajudar de verdade. Nunca por dúvida comum. "
+        f"{INSURANCE_PAYMENT_HANDOFF_RULE}"
     )
 
 
@@ -525,13 +538,15 @@ INSURANCE_ACCEPTANCE_VARIES = (
     "que um convênio vale para um serviço; quem confere é o fluxo."
 )
 
-# Per-plan payment notes are rendered by the booking flow. This block adds no plan data.
-INSURANCE_PAYMENT_UNKNOWN = (
-    "Se perguntarem como funciona o pagamento com convênio, diga que você não sabe como cada "
-    "convênio funciona com o pagamento nesta clínica (cobertura, coparticipação, se há algo "
-    "a pagar), pois isso depende de cada convênio e de cada clínica. Diga que a clínica confirma "
-    "as condições. Não prometa cobertura nem valor para quem vai usar convênio. Se a clínica já "
-    "informou uma condição de pagamento, repasse somente o que ela informou."
+# TASK-090 (owner, 2026-11-22): the secretária never explains how payment works with a convênio
+# (there is no per-plan payment text any more) - a person from the team answers that. Rendered
+# with the clinic's convênios; this block adds no plan data.
+INSURANCE_PAYMENT_HANDOFF = (
+    "Você não explica regra de pagamento de convênio. Se perguntarem sobre reembolso, "
+    "coparticipação, se o convênio cobre, como ou quanto se paga pelo convênio, ou quem paga, "
+    "não explique, não dê exemplos e não diga como costuma ser: chame request_human_handoff com "
+    'reason "insurance_payment_question" e uma pessoa da equipe continua a conversa. Não '
+    "prometa cobertura nem valor para quem vai usar convênio."
 )
 
 
@@ -561,7 +576,7 @@ def _format_clinic_features(config: TenantRuntimeConfig) -> str:
         "convênio, só confirme os cadastrados; se perguntarem por outro, diga que não consta "
         "e ofereça a recepção."
         + (
-            f" {INSURANCE_ACCEPTANCE_VARIES} {INSURANCE_PAYMENT_UNKNOWN}"
+            f" {INSURANCE_ACCEPTANCE_VARIES} {INSURANCE_PAYMENT_HANDOFF}"
             if features.insurance_plan_count
             else ""
         )

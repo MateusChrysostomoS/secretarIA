@@ -108,7 +108,6 @@ async def _tenant_plans(session: AsyncSession, tenant: Tenant) -> list[TenantIns
             catalog_id=str(entry.id) if entry is not None else None,
             name=entry.name if entry is not None else str(plan.custom_name or ""),
             is_custom=entry is None,
-            custom_payment_note=plan.custom_payment_note if entry is None else None,
             sort_order=plan.sort_order,
         )
         for plan, entry in await list_tenant_plans(session, tenant.id)
@@ -272,12 +271,7 @@ async def post_tenant_insurance_plan_custom(
         )
     tenant_id = tenant.id
     before = await _visible_plan_count(session, tenant_id)
-    plan = await create_tenant_custom_plan(
-        session,
-        tenant,
-        custom_name=body.custom_name,
-        custom_payment_note=body.custom_payment_note,
-    )
+    plan = await create_tenant_custom_plan(session, tenant, custom_name=body.custom_name)
     await _refuse_growth(session, tenant_id, before)
     await session.commit()
     return TenantInsurancePlanRead(
@@ -285,7 +279,6 @@ async def post_tenant_insurance_plan_custom(
         catalog_id=None,
         name=plan.custom_name or "",
         is_custom=True,
-        custom_payment_note=plan.custom_payment_note,
     )
 
 
@@ -339,7 +332,6 @@ async def _independent_selectable(
             catalog_id=None,
             name=str(plan.custom_name or ""),
             is_custom=True,
-            custom_payment_note=plan.custom_payment_note,
         )
         for plan, entry in await list_professional_plans(session, professional.id)
         if entry is None
@@ -512,10 +504,7 @@ async def post_professional_insurance_plan_custom(
     tenant_id = tenant.id
     before = await _visible_plan_count(session, tenant_id)
     plan = await create_professional_custom_plan(
-        session,
-        professional,
-        custom_name=body.custom_name,
-        custom_payment_note=body.custom_payment_note,
+        session, professional, custom_name=body.custom_name
     )
     await _refuse_growth(session, tenant_id, before)
     await session.commit()
@@ -524,5 +513,4 @@ async def post_professional_insurance_plan_custom(
         catalog_id=None,
         name=plan.custom_name or "",
         is_custom=True,
-        custom_payment_note=plan.custom_payment_note,
     )

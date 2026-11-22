@@ -17,8 +17,10 @@ reviewing that round:
   still have no match, so adding a catalog row can reconcile them without a
   code migration.
 - **Convênio "Outro"**: a clinic (or, in `independent` mode, a professional)
-  can register a plan outside the catalog - `custom_name` +
-  `custom_payment_note`, shown to the patient in place of catalog metadata.
+  can register a plan outside the catalog - just a `custom_name`. TASK-090
+  (owner, 2026-11-22): it no longer carries a payment text; a patient who asks
+  how payment works with a convênio is handed off to a person
+  (ai/tools.py `insurance_payment_question`).
 
 Three tables, three levels:
 
@@ -34,7 +36,7 @@ Three tables, three levels:
   TASK-085 R D-R12/U1b (owner, 2026-11-18): a convênio never exempts the sinal,
   so the old per-plan "não cobra sinal" option is deleted (see LEGACY COLUMNS
   below). TASK-008: `catalog_id`
-  is now nullable - a row with `custom_name`/`custom_payment_note` instead is
+  is now nullable - a row with `custom_name` instead is
   the clinic's own "Outro" convênio, exactly one of the two must be set.
 - `professional_insurance_plans` - what ONE doctor accepts. TASK-008 gives it
   three mutually-exclusive shapes (`ck_professional_insurance_plans_exactly_one_source`),
@@ -79,6 +81,11 @@ still reads them; both are `NOT NULL DEFAULT true` (migrations c9f4e2a7b815,
 d4f8a2c6e913), so an insert by this code, which never names them, gets `true`.
 Follow-up: drop both columns with a migration in a later release (an Alembic
 autogenerate already proposes that drop - leave it out of unrelated migrations).
+
+The same goes for the "Outro" payment-note column of both tables (TASK-090, owner 2026-11-22: the
+"Outro" convênio has no payment text anymore). Unmapped here, nullable in the database
+(migration d4f8a2c6e913), so an insert that never names it stores NULL; the column is
+dropped by its own later migration, applied only after this code is deployed.
 """
 
 import uuid
@@ -173,8 +180,8 @@ class InsuranceCatalog(Base):
 class TenantInsurancePlan(Base):
     """A convênio this clinic accepts: a catalog entry, or the clinic's own "Outro".
 
-    The table still has one LEGACY COLUMN this model does not map (see the module's
-    LEGACY COLUMNS note).
+    The table still has LEGACY COLUMNS this model does not map (`charge_deposit`,
+    the "Outro" payment note - see the module's LEGACY COLUMNS note).
     """
 
     __tablename__ = "tenant_insurance_plans"
@@ -195,10 +202,6 @@ class TenantInsurancePlan(Base):
     # The clinic's own convênio name, outside the catalog. Exactly one of
     # (catalog_id, custom_name) is set - see the CHECK constraint above.
     custom_name: Mapped[str | None] = mapped_column(String(120), nullable=True)
-    # How the clinic says payment works for this custom convênio. Shown to the
-    # patient at booking confirmation, and again with the Pix-deposit ask
-    # (services/payments/deposit_lifecycle.py).
-    custom_payment_note: Mapped[str | None] = mapped_column(Text, nullable=True)
     # The clinic's chosen position in the patient's convênio list (0 = first). NULL =
     # never placed: such plans follow every placed one, alphabetically. Set only by
     # `insurance_catalog.set_tenant_plan_order` (Instituto Gicovate, 2026-11-09).
@@ -244,7 +247,6 @@ class ProfessionalInsurancePlan(Base):
     )
     # mode independent: this doctor's OWN "Outro" convênio.
     custom_name: Mapped[str | None] = mapped_column(String(120), nullable=True)
-    custom_payment_note: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 

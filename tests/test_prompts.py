@@ -360,9 +360,12 @@ def test_legacy_prompt_keeps_calendar_path_without_flow_state():
 # Re-rendered 2026-10-29 (TASK-072): the fixed "AO RESPONDER" block (several questions in one reply,
 # an unavailable time is never "reserved"); the DADOS/RECURSOS blocks only render with turn facts.
 # Re-rendered 2026-10-29 (TASK-072 reteste): a handoff offer's text carries the answered parts.
+# Re-rendered 2026-11-22 (TASK-090): a convênio payment-rule question goes to a person
+# (prompts.INSURANCE_PAYMENT_HANDOFF_RULE, +219 chars in COMO ATENDER and, in "full", again in
+# the ESTADO DA CONVERSA rules).
 _V1_DIGESTS = {
-    "minimal": (14368, "c8d0af33fd3299e87b490f6fd49c2d71a622eec2fcd73d7af3404280ef4b74c4"),
-    "full": (20099, "b5bf6b4b4e1441a19302b647905b97ac3a27abeecc112456169293d8fea554af"),
+    "minimal": (14587, "ef1ac67b88e0d286d8719ff76a9546cc63ebcd917b6116e95033a319b495dc18"),
+    "full": (20537, "ed94d83442ee90360b18d3b9bb4052f5c346b1eae207417b8d9303915e43bc2a"),
 }
 
 

@@ -33,16 +33,15 @@ class TenantInsurancePlanRead(BaseModel):
 
     `id` (a `tenant_insurance_plans` row id) is the identifier every write
     endpoint below keys on - `catalog_id` alone cannot, since a custom line has
-    none. `is_custom` tells the hub which set of fields to show
-    (`custom_payment_note` vs. the catalog's own mechanism/note, read
-    separately from `GET /insurance-catalog`).
+    none. `is_custom` tells the hub the line is the clinic's (or doctor's) own
+    "Outro". It carries no payment text (TASK-090: a patient asking how payment
+    works is handed off to a person).
     """
 
     id: str
     catalog_id: str | None = None
     name: str
     is_custom: bool
-    custom_payment_note: str | None = None
     # Position the clinic chose in the patient's list (0 = first); None = not placed,
     # follows the placed ones alphabetically. The list itself comes back in this order.
     sort_order: int | None = None
@@ -72,13 +71,13 @@ class TenantInsurancePlansUpdate(BaseModel):
 class TenantInsurancePlanCustomCreate(BaseModel):
     """POST /tenants/me/insurance-plans/custom - the clinic's "Outro" convênio.
 
-    Unknown keys are ignored (an older Portal's retired sinal flag - see TenantInsurancePlanIn).
+    Unknown keys are ignored (an older Portal's retired sinal flag - see TenantInsurancePlanIn
+    - and its retired payment note, TASK-090).
     """
 
     model_config = ConfigDict(extra="ignore")
 
     custom_name: str = Field(min_length=1, max_length=120)
-    custom_payment_note: str = Field(min_length=1, max_length=2000)
 
 
 class TenantInsurancePlanOrderUpdate(BaseModel):
@@ -143,13 +142,13 @@ class ProfessionalInsurancePlansUpdate(BaseModel):
 class ProfessionalInsuranceCustomCreate(BaseModel):
     """POST .../professionals/{id}/insurance-plans/custom - independent mode only.
 
-    Unknown keys are ignored (an older Portal's retired sinal flag - see TenantInsurancePlanIn).
+    Unknown keys are ignored (an older Portal's retired sinal flag - see TenantInsurancePlanIn
+    - and its retired payment note, TASK-090).
     """
 
     model_config = ConfigDict(extra="ignore")
 
     custom_name: str = Field(min_length=1, max_length=120)
-    custom_payment_note: str = Field(min_length=1, max_length=2000)
 
 
 # ---------------------------------------------------------------------------

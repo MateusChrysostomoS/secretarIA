@@ -250,6 +250,10 @@ def _format_tools_v2(names: frozenset[str]) -> str:
             "- request_human_handoff: ÚLTIMO RECURSO: quando o paciente pede uma pessoa "
             "ou quando o assunto exige avaliação humana. Nunca por dúvida comum."
         )
+        # TASK-090: the convênio payment-rule hand-off is NOT repeated here (this prompt has a
+        # hard size ceiling): it rides in the shared "RECURSOS DESTA CLÍNICA" block whenever the
+        # clinic has convênios (prompts.INSURANCE_PAYMENT_HANDOFF) and in the tool's own
+        # description (ai/tools.py::request_human_handoff).
     lines.append(
         "- PRIMEIRO ENTENDA e responda à dúvida ou acolha brevemente o que o paciente "
         "contou. Não deduza procedimentos a partir de sintomas. Se nenhuma opção "

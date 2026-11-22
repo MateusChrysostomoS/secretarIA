@@ -30,6 +30,8 @@ _REASON_TEXT = {
     "patient_requested_human": "O paciente pediu para falar com uma pessoa.",
     "clinical_sensitive": "A conversa trata de um assunto que exige avaliação humana.",
     "could_not_help": "A secretária virtual não conseguiu resolver o pedido do paciente.",
+    # TASK-090 (owner, 2026-11-22): the secretária never explains a convênio's payment rule.
+    "insurance_payment_question": "O paciente perguntou sobre a regra de pagamento do convênio.",
 }
 
 _ATTEMPTS = 3

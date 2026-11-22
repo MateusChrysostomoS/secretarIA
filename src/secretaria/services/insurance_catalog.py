@@ -227,13 +227,14 @@ class TenantInsurance:
     """What the pure flow router needs about one clinic's convênios.
 
     `plans` keeps catalog order (by name) as plain dicts, `{"id": str, "name":
-    str, "note": str | None, "mechanism": str}`, so it travels on the tenant snapshot like
+    str, "mechanism": str}`, so it travels on the tenant snapshot like
     `appointment_types` does. `id` is the row's own identity - a
     `tenant_insurance_plans.id` (shared/clinic_with_exceptions modes) or a
     `professional_insurance_plans.id`/catalog id (independent mode, see
     `_load_independent_insurance`) - never a bare catalog id, because a custom
-    "Outro" plan has none. `note` is `custom_payment_note` for a custom plan,
-    else None (catalog metadata is never patient-facing prose). `mechanism` is the catalog
+    "Outro" plan has none. No plan carries a payment text any more (TASK-090, owner
+    2026-11-22: the "Outro" note is gone; catalog metadata never was patient-facing
+    prose). `mechanism` is the catalog
     entry's payment mechanism ("desconhecido" for a custom plan or a legacy string); the patient no
     longer sees it (TASK-085 R D-R12 removed the list row's payment text) and it never decides
     whether a deposit is charged.
@@ -440,7 +441,6 @@ async def _load_independent_insurance(session: AsyncSession, tenant_id: UUID) ->
             plans_by_id[plan_id] = {
                 "id": plan_id,
                 "name": name,
-                "note": plan.custom_payment_note if entry is None else None,
                 "mechanism": entry.mechanism if entry is not None else "desconhecido",
             }
         accepted.setdefault(str(plan.professional_id), set()).add(plan_id)
@@ -523,13 +523,12 @@ async def _load_clinic_insurance(session: AsyncSession, tenant_id: UUID) -> Tena
         {
             "id": str(plan.id),
             "name": _plan_display_name(plan, entry),
-            "note": plan.custom_payment_note if entry is None else None,
             "mechanism": entry.mechanism if entry is not None else "desconhecido",
         }
         for plan, entry in await list_tenant_plans(session, tenant_id)
     ]
     plans.extend(
-        {"id": None, "name": name, "note": None, "mechanism": "desconhecido"}
+        {"id": None, "name": name, "mechanism": "desconhecido"}
         for name in await _legacy_only_names(session, tenant_id)
     )
 
@@ -732,17 +731,13 @@ async def create_tenant_custom_plan(
     tenant: Tenant,
     *,
     custom_name: str,
-    custom_payment_note: str | None,
 ) -> TenantInsurancePlan:
-    """The clinic's "Outro" convênio (TASK-008 §3.3) - outside the catalog.
+    """The clinic's "Outro" convênio (TASK-008 §3.3) - outside the catalog. Just a name
+    (TASK-090: no payment text).
 
     Never touched by `set_tenant_plans`' replace semantics. No commit.
     """
-    plan = TenantInsurancePlan(
-        tenant_id=tenant.id,
-        custom_name=custom_name.strip()[:120],
-        custom_payment_note=(custom_payment_note or "").strip()[:2000] or None,
-    )
+    plan = TenantInsurancePlan(tenant_id=tenant.id, custom_name=custom_name.strip()[:120])
     session.add(plan)
     await session.flush()
     logger.info("hub_insurance_custom_plan_created", tenant_id=str(tenant.id))
@@ -754,9 +749,9 @@ async def create_professional_custom_plan(
     professional: Professional,
     *,
     custom_name: str,
-    custom_payment_note: str | None,
 ) -> ProfessionalInsurancePlan:
-    """A doctor's OWN "Outro" convênio - `independent` mode only (caller-gated).
+    """A doctor's OWN "Outro" convênio - `independent` mode only (caller-gated). Just a
+    name (TASK-090: no payment text).
 
     No commit.
     """
@@ -764,7 +759,6 @@ async def create_professional_custom_plan(
         professional_id=professional.id,
         tenant_id=professional.tenant_id,
         custom_name=custom_name.strip()[:120],
-        custom_payment_note=(custom_payment_note or "").strip()[:2000] or None,
     )
     session.add(plan)
     await session.flush()
@@ -1082,7 +1076,7 @@ async def reconcile_unmatched_insurances(
 class AppointmentPlan:
     """One convênio row as the agenda shows it: an identity and a name.
 
-    Never carries `custom_payment_note` or catalog metadata - the read model is
+    Never carries a payment text or catalog metadata - the read model is
     the wrong place to widen what leaves the clinic's own screen. No sinal flag
     either (TASK-085 R D-R12: a convênio never exempts the sinal).
     """
