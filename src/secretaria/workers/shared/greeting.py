@@ -54,6 +54,7 @@ from secretaria.services.service_catalog import (
 from secretaria.services.service_terms import resolve_entry_at_unit
 from secretaria.services.tenant_config import (
     active_appointment_types,
+    list_active_professionals,
     professional_appointment_types,
     professional_business_hours,
 )
@@ -118,6 +119,7 @@ def _first_contact_reply(
     channel: str,
     inbound_body: str = "",
     ask_name: bool = False,
+    sole_professional: tuple[str, str | None] | None = None,
 ) -> _ReplyContext:
     """The very first thing a clinic says to a patient who owes consent.
 
@@ -154,7 +156,10 @@ def _first_contact_reply(
         patient_ref=patient_ref,
         inbound_body=inbound_body,
         greeting_override=render_greeting(
-            tenant.clinic_name, _fit_clinic_description(tenant), city=tenant_city(tenant.address)
+            tenant.clinic_name,
+            _fit_clinic_description(tenant, sole_professional),
+            city=tenant_city(tenant.address),
+            sole_professional=sole_professional,
         ),
         greeting_buttons=[],
         send_consent_notice=not ask_name,
@@ -167,6 +172,7 @@ def _select_greeting(
     patient: Patient,
     is_first_contact: bool,
     is_returning_patient: bool,
+    sole_professional: tuple[str, str | None] | None = None,
 ) -> str | None:
     """Pick the greeting to send on first contact, or None.
 
@@ -191,12 +197,31 @@ def _select_greeting(
     # the no-name frame.
     return render_greeting(
         tenant.clinic_name,
-        _fit_clinic_description(tenant),
+        _fit_clinic_description(tenant, sole_professional),
         patient_name=patient.name if policy_for(patient.channel).greets_by_name else None,
         city=tenant_city(tenant.address),
+        sole_professional=sole_professional,
     )
 
-def _fit_clinic_description(tenant: Tenant) -> str:
+
+async def _load_sole_professional(
+    session: AsyncSession, tenant_id: UUID
+) -> tuple[str, str | None] | None:
+    """`(name, specialty)` when the clinic has exactly ONE active professional.
+
+    The first-contact greeting then presents the assistant as that
+    professional's instead of repeating the clinic name already in the line
+    above it. Any other roster (none, or two and more) returns None.
+    """
+    professional = sole_active_professional(await list_active_professionals(session, tenant_id))
+    if professional is None or not (professional.name or "").strip():
+        return None
+    return professional.name, professional.specialty
+
+
+def _fit_clinic_description(
+    tenant: Tenant, sole_professional: tuple[str, str | None] | None = None
+) -> str:
     """The clinic's description, cut to what still fits for THIS clinic.
 
     `services/tenant_config.py` already refuses an over-budget description on
@@ -207,7 +232,9 @@ def _fit_clinic_description(tenant: Tenant) -> str:
     truncate, so Meta 400s and the patient receives NOTHING.
     """
     description = (tenant.clinic_description or "").strip()
-    budget = clinic_description_budget(tenant.clinic_name, tenant_city(tenant.address))
+    budget = clinic_description_budget(
+        tenant.clinic_name, tenant_city(tenant.address), sole_professional
+    )
     return truncate_plain(description, budget)
 
 def _greeting_buttons_for(

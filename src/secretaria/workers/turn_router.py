@@ -80,6 +80,7 @@ from secretaria.workers.shared.greeting import (
     _asks_name_at_first_contact,
     _first_contact_reply,
     _greeting_buttons_for,
+    _load_sole_professional,
     _load_upcoming_greeting_data,
     _menu_vocabulary,
     _select_greeting,
@@ -625,6 +626,7 @@ async def _route_inbound_turn(
                 channel=channel,
                 inbound_body=body or "",
                 ask_name=ask_name,
+                sole_professional=await _load_sole_professional(session, tenant.id),
             )
         # Already asked, still not accepted: re-prompt, with the
         # button attached so the way forward is one tap from the
@@ -862,7 +864,11 @@ async def _route_inbound_turn(
     # patient, else the first-contact greeting. Tenants without a
     # greeting fall through to the improvised LLM opener.
     greeting_override = _select_greeting(
-        tenant, patient, is_first_contact, is_returning_patient
+        tenant,
+        patient,
+        is_first_contact,
+        is_returning_patient,
+        await _load_sole_professional(session, tenant.id) if is_first_contact else None,
     )
 
     # Context-aware opening (indexed reads, worker-side only): adapt

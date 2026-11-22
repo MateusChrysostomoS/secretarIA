@@ -47,6 +47,7 @@ from secretaria.workers.shared.db import (
 )
 from secretaria.workers.shared.greeting import (
     _first_contact_reply,
+    _load_sole_professional,
 )
 from secretaria.workers.shared.jobs import (
     _claim_event,
@@ -211,6 +212,7 @@ async def _open_brain_message_conversation(
                     conversation_id=conversation.id,
                     patient_ref=external_id,
                     channel=CHANNEL_BRAIN_MESSAGE,
+                    sole_professional=await _load_sole_professional(session, tenant.id),
                 )
         except IntegrityError:
             # A concurrent open (or a first inbound) raced us to the
