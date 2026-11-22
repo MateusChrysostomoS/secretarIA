@@ -2398,7 +2398,15 @@ async def manage_existing_appointment_v2(
 manage_existing_appointment_v2.metadata = {"cache_variant": "manage_v2"}
 
 
-HANDOFF_REASONS = ("patient_requested_human", "clinical_sensitive", "could_not_help")
+# `insurance_payment_question` (TASK-090, owner 2026-11-22): the secretária never explains how
+# payment works with a convênio - it hands the conversation straight to a person (direct, like
+# `patient_requested_human`; the e-mail says why: services/handoff_notification.py).
+HANDOFF_REASONS = (
+    "patient_requested_human",
+    "clinical_sensitive",
+    "could_not_help",
+    "insurance_payment_question",
+)
 
 
 class HumanHandoffRequested(Exception):
@@ -2609,14 +2617,19 @@ async def save_patient_name(name: str) -> dict:
 @tool
 async def request_human_handoff(reason: str) -> dict:
     """ÚLTIMO RECURSO: passa a conversa DIRETO para uma pessoa da equipe. Use SOMENTE
-    quando o paciente pediu explicitamente para falar com uma pessoa, ou quando o assunto
-    exige avaliação humana. Se você apenas não tem a informação ou não consegue fazer o
-    que ele pediu, use offer_human_handoff (pergunta ao paciente antes). NUNCA por uma
-    dúvida comum sobre a clínica, serviços, horários ou convênios.
+    quando o paciente pediu explicitamente para falar com uma pessoa, quando o assunto
+    exige avaliação humana, ou quando ele pergunta a regra de pagamento de um convênio
+    (reembolso, coparticipação, se o convênio cobre, como ou quanto paga pelo convênio,
+    quem paga) - isso você NUNCA explica. Se você apenas não tem a informação ou não
+    consegue fazer o que ele pediu, use offer_human_handoff (pergunta ao paciente antes).
+    NUNCA por uma dúvida comum sobre a clínica, serviços, horários ou quais convênios
+    são aceitos.
 
     Args:
         reason: Exatamente um de: "patient_requested_human" (o paciente pediu uma
-            pessoa), "clinical_sensitive" (assunto que exige avaliação humana).
+            pessoa), "clinical_sensitive" (assunto que exige avaliação humana),
+            "insurance_payment_question" (o paciente perguntou a regra de pagamento
+            de um convênio).
     """
     normalized = (reason or "").strip()
     if normalized not in HANDOFF_REASONS:

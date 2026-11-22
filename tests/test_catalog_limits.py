@@ -101,7 +101,7 @@ def _types(n: int, prefix: str = "Serviço") -> list[dict]:
 
 
 def _custom(name: str) -> dict:
-    return {"custom_name": name, "custom_payment_note": "Reembolso pelo paciente."}
+    return {"custom_name": name}
 
 
 def _assert_limit(response, *, limit: int, count: int) -> None:

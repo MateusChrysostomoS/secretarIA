@@ -36,7 +36,6 @@ from secretaria.core.logging import get_logger
 from secretaria.models import Appointment, Patient, Professional, Tenant
 from secretaria.models.appointment import LIVE_APPOINTMENT_STATUSES
 from secretaria.models.clinic_payment_account import PROVIDER_ASAAS
-from secretaria.models.insurance import ProfessionalInsurancePlan, TenantInsurancePlan
 from secretaria.models.payment_attention_item import (
     REASON_PAID_THEN_CANCELLED,
     REASON_REFUND_DUE_POLICY,
@@ -332,10 +331,11 @@ def _deposit_request_text(
     appointment: Appointment,
     amount_cents: int,
     copy_paste: str | None,
-    payment_note: str | None = None,
     *,
     opening: str | None = None,
 ) -> str:
+    # TASK-090 (owner, 2026-11-22): no convênio payment text here any more - the "Outro"
+    # note is gone; a patient who asks how payment works is handed off to a person.
     appt_type = appointment.appointment_type or "sua consulta"
     # TASK-085 R D-R6: an edit that re-charges the sinal opens the SAME single message with why.
     lines = [opening, ""] if opening else []
@@ -345,40 +345,12 @@ def _deposit_request_text(
     ]
     lines.append("Sua reserva fica garantida assim que o pagamento for confirmado.")
     lines.append("O código Pix vence ainda hoje.")
-    if payment_note:
-        # TASK-008 §4.3: a custom "Outro" convênio's payment explanation,
-        # repeated here (it already appeared once at booking confirmation) so
-        # it is not buried in an earlier message by the time the Pix ask
-        # arrives.
-        lines.append("")
-        lines.append(f"💳 Sobre o pagamento do convênio:\n{payment_note}")
     # ONE message: the code is its last lines (fenced - see `pix_message`).
     tail = pix_code_tail(copy_paste)
     if tail:
         lines.append("")
         lines.extend(tail)
     return "\n".join(lines)
-
-
-async def _insurance_payment_note(session: AsyncSession, appointment: Appointment) -> str | None:
-    """`custom_payment_note` of whichever custom "Outro" plan this booking used.
-
-    None for a catalog-backed plan (its `note` is internal metadata, never
-    patient-facing copy) or no plan at all.
-    """
-    professional_plan_id = getattr(appointment, "insurance_professional_plan_id", None)
-    if professional_plan_id is not None:
-        return await session.scalar(
-            select(ProfessionalInsurancePlan.custom_payment_note).where(
-                ProfessionalInsurancePlan.id == professional_plan_id
-            )
-        )
-    plan_id = getattr(appointment, "insurance_plan_id", None)
-    if plan_id is None:
-        return None
-    return await session.scalar(
-        select(TenantInsurancePlan.custom_payment_note).where(TenantInsurancePlan.id == plan_id)
-    )
 
 
 async def _send_deposit_request(
@@ -392,10 +364,7 @@ async def _send_deposit_request(
     *,
     opening: str | None = None,
 ) -> None:
-    payment_note = await _insurance_payment_note(session, appointment)
-    text = _deposit_request_text(
-        tenant, appointment, amount_cents, copy_paste, payment_note, opening=opening
-    )
+    text = _deposit_request_text(tenant, appointment, amount_cents, copy_paste, opening=opening)
     if patient.channel == CHANNEL_BRAIN_MESSAGE:
         # A Portal patient has no `wa_id`: the request travels as a Portal message, through the
         # ONE channel resolver of the payments code (`notify.resolve_sender`).
@@ -1706,19 +1675,17 @@ def before_request_text(
     amount_cents: int,
     minutes: int,
     until_text: str,
-    payment_note: str | None = None,
     copy_paste: str | None = None,
 ) -> str:
     """The Pix request (ONE message): what it is for, how much, until when and, when given, the
-    copia-e-cola as its last lines (fenced - see `pix_message`)."""
+    copia-e-cola as its last lines (fenced - see `pix_message`). No convênio payment text
+    (TASK-090: the "Outro" note is gone)."""
     lines = [
         f"Para reservar {service} em {when_text} na {clinic_name}, pedimos um sinal de "
         f"{format_brl(amount_cents)} via Pix.",
         f"O horário fica reservado para você por {minutes} minutos (até {until_text}). "
         "A consulta só é confirmada depois que o pagamento for identificado.",
     ]
-    if payment_note:
-        lines.append(f"💳 Sobre o pagamento do convênio:\n{payment_note}")
     tail = pix_code_tail(copy_paste)
     if tail:
         lines.append("\n".join(tail))

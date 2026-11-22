@@ -565,6 +565,5 @@ async def _payment_after_code(
             "end_at": payment.end_at,
             "service": payment.service,
             "minutes": payment.minutes,
-            "payment_note": None,
         },
     )

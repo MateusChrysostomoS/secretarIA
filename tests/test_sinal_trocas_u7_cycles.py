@@ -668,17 +668,14 @@ async def test_cycle_7_convenio_notes_drive_the_button_and_never_the_sinal(db, p
     assert fr._enter_insurance(_card(snapshot)).bubbles[0].source.has_clinic_notes is False
 
     async with db() as session:
-        session.add(
-            TenantInsurancePlan(
-                tenant_id=tenant.id, custom_name="GEAP", custom_payment_note="Na recepção."
-            )
-        )
+        session.add(TenantInsurancePlan(tenant_id=tenant.id, custom_name="GEAP"))
         await session.commit()
         snapshot = await load_tenant_insurance(session, tenant.id)
         overview = await patient_insurance_overview(session, tenant.id)
-    assert fr.insurance_plans_have_clinic_notes(snapshot.plans) is True
-    assert fr._enter_insurance(_card(snapshot)).bubbles[0].source.has_clinic_notes is True
-    assert overview["plans"] == [{"name": "GEAP", "clinic_note": "Na recepção."}]
+    # TASK-090: the clinic's "Outro" has no payment text either - still no button, no plan.
+    assert fr.insurance_plans_have_clinic_notes(snapshot.plans) is False
+    assert fr._enter_insurance(_card(snapshot)).bubbles[0].source.has_clinic_notes is False
+    assert overview["plans"] == []
 
     # D-R12: a booking with ANY convênio pays the same sinal as a private one.
     async with db() as session:

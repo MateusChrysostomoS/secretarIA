@@ -395,6 +395,8 @@ def card_source(source: OptionSource) -> dict:
 
     A convênio card also says whether any of its plans carries a clinic note
     (`has_clinic_notes`, TASK-085 R U1b); every other card's pointer is unchanged.
+    TASK-090: the notes no longer exist, so that flag is always False (kept only for
+    deploy-window compatibility; follow-up: remove it with the BMF sheet).
     """
     total = len(source.items)
     pointer = {

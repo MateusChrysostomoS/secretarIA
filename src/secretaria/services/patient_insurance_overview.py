@@ -15,6 +15,12 @@ deposit any more - the sinal is the clinic's one rule (`deposit`), the same for 
 for "particular". The per-plan payment text ("Varia por plano...", "Pagamento: confirme...") was
 removed with it (owner: "TIRE ISSO").
 
+TASK-090 (owner, 2026-11-22): the "Outro" convênio no longer has a payment text, so `plans` is
+always empty (and `flow_router.insurance_plans_have_clinic_notes` always False, so the Portal never
+offers the sheet). A patient who asks how payment works is handed off to a person instead.
+The endpoint is kept only for deploy-window compatibility (follow-up: remove it with the BMF
+sheet and the brain-api relay).
+
 Never returned: row or catalog ids, doctors (names or ids), `accepted_by`, anything about a
 patient. The caller is internal-key only. Read-only: nothing here writes or moves money.
 """
@@ -24,7 +30,6 @@ from uuid import UUID
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from secretaria.models import Tenant
-from secretaria.services.insurance_catalog import load_tenant_insurance
 
 
 async def patient_insurance_overview(session: AsyncSession, tenant_id: UUID) -> dict | None:
@@ -33,18 +38,12 @@ async def patient_insurance_overview(session: AsyncSession, tenant_id: UUID) -> 
     if tenant is None:
         return None
     deposit_on = bool(tenant.pix_deposit_enabled)
-    insurance = await load_tenant_insurance(session, tenant_id)
-    plans: list[dict] = []
-    for plan in insurance.plans:
-        name = str(plan.get("name") or "").strip()
-        note = plan.get("note")
-        note = note.strip() if isinstance(note, str) else ""
-        if name and note:
-            plans.append({"name": name, "clinic_note": note})
     return {
         "deposit": {
             "enabled": deposit_on,
             "percent": tenant.pix_deposit_percent if deposit_on else None,
         },
-        "plans": plans,
+        # TASK-090: no plan carries a clinic note any more, so the list is always empty. The
+        # key stays for the wire shape brain-api relays to the Portal.
+        "plans": [],
     }

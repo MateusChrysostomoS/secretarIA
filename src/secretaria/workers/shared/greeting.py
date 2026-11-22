@@ -378,8 +378,8 @@ def _flow_tenant_snapshot(
     The "exactly one" rule comes from `services/booking_scope.py`, the same
     one `resolve_booking_owner_id` applies to the ROSTER this snapshot travels
     with (``route(professionals=...)``) — so whoever's catalog is rendered
-    here is provably whoever owns the booking that follows. `collect_insurance`
-    / `insurances` stay tenant-level on purpose: they are clinic-wide settings
+    here is provably whoever owns the booking that follows. The convênio
+    settings (`insurances`, mode) stay tenant-level on purpose: they are clinic-wide settings
     and the convênio step asks them regardless of topology (see
     `flow_router._insurance_step_skip_reason`).
 
@@ -413,7 +413,6 @@ def _flow_tenant_snapshot(
         appointment_types=appointment_types,
         appointment_duration_min=tenant.appointment_duration_min,
         business_hours=business_hours,
-        collect_insurance=tenant.collect_insurance,
         insurance_mode=getattr(tenant, "insurance_mode", None),
         insurances=tenant.insurances,
         insurance_plans=insurance.plans if insurance is not None else None,

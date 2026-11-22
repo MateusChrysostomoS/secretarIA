@@ -77,8 +77,7 @@ REGRAS:
    faz, como o material os cita. Se o material diz que vale para todos os profissionais, use
    `all_professionals`. `evidence` é a frase do serviço.
 10. Convênios (`insurance_plans`): cada convênio/plano que o material diz que a clínica aceita,
-   com o nome como escrito. Se o material explica como funciona (reembolso, particular, guia),
-   copie em `how_it_works`. Não liste convênios que a clínica NÃO aceita.
+   com o nome como escrito. Não liste convênios que a clínica NÃO aceita.
 11. `assumptions`: se, para preencher algo, você precisou decidir por conta própria porque o
    material disse só uma parte (por exemplo: entendeu que um preço vale para mais de um
    profissional; juntou duas informações; interpretou "manhã" como um horário), escreva UMA frase

@@ -236,7 +236,6 @@ def _copy_lines() -> list[str]:
             amount_cents=6000,
             minutes=30,
             until_text="10:30",
-            payment_note="nota",
         )
     )
     lines.append(deposit_lifecycle.before_wait_card_text("10:30"))

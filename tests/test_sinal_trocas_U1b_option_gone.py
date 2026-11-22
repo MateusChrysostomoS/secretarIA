@@ -108,14 +108,12 @@ def test_an_old_clients_flag_is_ignored_on_every_input():
     clinic_other = insurance_schemas.TenantInsurancePlanCustomCreate.model_validate(
         {"custom_name": "GEAP", "custom_payment_note": "Na recepção.", "charge_deposit": False}
     )
-    assert clinic_other.model_dump() == {
-        "custom_name": "GEAP",
-        "custom_payment_note": "Na recepção.",
-    }
+    # TASK-090: the old client's "Outro" payment note is ignored the same way.
+    assert clinic_other.model_dump() == {"custom_name": "GEAP"}
     doctor_other = insurance_schemas.ProfessionalInsuranceCustomCreate.model_validate(
         {"custom_name": "Plano", "custom_payment_note": "Nota.", "charge_deposit": True}
     )
-    assert doctor_other.model_dump() == {"custom_name": "Plano", "custom_payment_note": "Nota."}
+    assert doctor_other.model_dump() == {"custom_name": "Plano"}
 
 
 def test_a_typo_is_still_refused():
@@ -123,7 +121,7 @@ def test_a_typo_is_still_refused():
         insurance_schemas.TenantInsurancePlanIn.model_validate({"catalogId": str(UNIMED)})
     with pytest.raises(ValidationError):
         insurance_schemas.TenantInsurancePlanCustomCreate.model_validate(
-            {"customName": "GEAP", "custom_payment_note": "x"}
+            {"customName": "GEAP"}
         )
     with pytest.raises(ValidationError):
         # The wrapper stays strict: a misspelled `plans` would otherwise empty the clinic's list.

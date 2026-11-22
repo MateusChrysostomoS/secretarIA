@@ -440,7 +440,8 @@ async def test_table(collect, plans_filled, professional_count, accepts):
         accepted_by=accepted,
     )
     doctor = professionals[0] if professionals else None
-    asks_insurance = collect and plans_filled
+    # TASK-090: the legacy `collect_insurance` flag is ignored - only having convênios matters.
+    asks_insurance = plans_filled
     multi = professional_count >= 2
 
     after_attendee = await _after_attendee(tenant, professionals)
@@ -690,17 +691,26 @@ async def test_guided_booking_already_answered_goes_straight_to_day():
 
 
 @pytest.mark.parametrize("plans", [CLINIC_PLANS, []], ids=["plans", "no-plans"])
-async def test_guided_booking_clinic_not_collecting_goes_to_day(plans):
+async def test_guided_booking_ignores_the_legacy_collect_flag(plans):
+    """TASK-090: the legacy flag changes nothing - only the clinic having convênios matters."""
     professionals = [_doctor("Dra. Única")]
-    res = await enter_guided_booking(
-        _tenant(collect_insurance=False, plans=plans),
-        _FakeCalendar(),
-        "Consulta Geral",
-        conversation_id=uuid4(),
-        professionals=professionals,
-    )
-    assert res.flow_step == STEP_AWAITING_DAY
-    assert res.flow_selected_insurance is None
+    results = {}
+    for flag in (True, False):
+        results[flag] = await enter_guided_booking(
+            _tenant(collect_insurance=flag, plans=plans),
+            _FakeCalendar(),
+            "Consulta Geral",
+            conversation_id=uuid4(),
+            professionals=professionals,
+        )
+    assert results[False].flow_step == results[True].flow_step
+    assert results[False].flow_selected_insurance == results[True].flow_selected_insurance
+    if not plans:
+        assert results[False].flow_step == STEP_AWAITING_DAY
+        assert results[False].flow_selected_insurance is None
+    else:
+        # This doctor takes none of the plans: the convênio is judged (Particular), not skipped.
+        assert results[False].flow_selected_insurance == LABEL_INSURANCE_PARTICULAR
 
 
 # --------------------------------------------------------------------------

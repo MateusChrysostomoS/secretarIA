@@ -394,7 +394,7 @@ async def test_hub_config_put_no_longer_accepts_insurances(db):
         insurance = await load_tenant_insurance(session, tenant.id)
         unimed_mechanism = (await session.get(InsuranceCatalog, UNIMED)).mechanism
         assert insurance.plans == [
-            {"id": unimed_plan_id, "name": "Unimed", "note": None, "mechanism": unimed_mechanism}
+            {"id": unimed_plan_id, "name": "Unimed", "mechanism": unimed_mechanism}
         ]
         assert insurance.accepted_by[str(ana.id)] == frozenset({unimed_plan_id})
         stored = await session.get(Tenant, tenant.id)
@@ -402,7 +402,9 @@ async def test_hub_config_put_no_longer_accepts_insurances(db):
         # mirror `set_tenant_plans` wrote above ("Unimed"), never
         # "Bradesco Saude"/"Xyz" from the ignored field.
         assert stored.insurances == ["Unimed"]
-        assert stored.collect_insurance is True
+        # TASK-090: the legacy flag is accepted but never written any more (the config READ
+        # returns the constant True, the stored column stays False).
+        assert stored.collect_insurance is False
 
 
 async def test_http_put_config_with_insurances_field_is_ignored(client: AsyncClient, hub, db):
@@ -440,8 +442,8 @@ async def test_legacy_only_plan_is_offered_but_a_removed_catalog_plan_does_not_r
         unimed_plan_id = await _plan_id(session, tenant.id, UNIMED)
         unimed_mechanism = (await session.get(InsuranceCatalog, UNIMED)).mechanism
         assert before.plans == [
-            {"id": unimed_plan_id, "name": "Unimed", "note": None, "mechanism": unimed_mechanism},
-            {"id": None, "name": "GEAP", "note": None, "mechanism": "desconhecido"},
+            {"id": unimed_plan_id, "name": "Unimed", "mechanism": unimed_mechanism},
+            {"id": None, "name": "GEAP", "mechanism": "desconhecido"},
         ]
         tenant = await session.get(Tenant, tenant.id)
         await set_tenant_plans(session, tenant, [])
@@ -449,9 +451,7 @@ async def test_legacy_only_plan_is_offered_but_a_removed_catalog_plan_does_not_r
         assert tenant.insurances == ["GEAP"]
     async with db() as session:
         after = await load_tenant_insurance(session, tenant.id)
-        assert after.plans == [
-            {"id": None, "name": "GEAP", "note": None, "mechanism": "desconhecido"}
-        ]
+        assert after.plans == [{"id": None, "name": "GEAP", "mechanism": "desconhecido"}]
 
 
 # --------------------------------------------------------------------------
@@ -784,9 +784,7 @@ async def test_snapshot_carries_each_plans_mechanism_in_the_clinic_modes(db):
         tenant = await _tenant(session, insurances=["GEAP"])
         other = await _tenant(session)
         await set_tenant_plans(session, tenant, [UNIMED])
-        await create_tenant_custom_plan(
-            session, tenant, custom_name="Prefeitura", custom_payment_note="Nota interna"
-        )
+        await create_tenant_custom_plan(session, tenant, custom_name="Prefeitura")
         await sync_legacy_insurances(session, tenant, tenant.insurances)
         await set_tenant_plans(session, other, [AMIL])
         await session.commit()
@@ -813,12 +811,8 @@ async def test_snapshot_carries_the_mechanism_in_independent_mode_and_keeps_the_
                     professional_id=doctor.id, tenant_id=tenant.id, catalog_id=UNIMED
                 )
             )
-        await create_professional_custom_plan(
-            session, ana, custom_name="Plano da Ana", custom_payment_note="Nota A"
-        )
-        await create_professional_custom_plan(
-            session, bruno, custom_name="Plano do Bruno", custom_payment_note="Nota B"
-        )
+        await create_professional_custom_plan(session, ana, custom_name="Plano da Ana")
+        await create_professional_custom_plan(session, bruno, custom_name="Plano do Bruno")
         await session.commit()
     async with db() as session:
         insurance = await load_tenant_insurance(session, tenant.id)

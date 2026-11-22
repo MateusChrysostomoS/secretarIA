@@ -81,7 +81,9 @@ V2_FULL = frozenset(
 # ceiling leaves ~5% for wording fixes - a rule that needs more room should replace text, not
 # pile on top of it.
 # TASK-072 (2026-10-29): 12,000 -> 12,500 for the fixed "AO RESPONDER" block (~400 characters).
-PROMPT_V2_MAX_CHARS = 12_500
+# TASK-090 (2026-11-22): 12,500 -> 12,700 for the owner's unconditional convênio payment-rule
+# hand-off on the request_human_handoff line (prompts_v2.INSURANCE_PAYMENT_HANDOFF_RULE_V2).
+PROMPT_V2_MAX_CHARS = 12_700
 
 _REAL_CLINIC_TODAY = prompts_v2._clinic_today
 

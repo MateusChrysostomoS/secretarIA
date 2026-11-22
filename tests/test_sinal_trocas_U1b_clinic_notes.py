@@ -4,14 +4,17 @@ Owner (2026-11-18, 4th round): "Se não tiver observações da clínica em 'Ver 
 convênios', não exiba esse botão; basta uma observação da clínica para ele aparecer na tela da
 lista do paciente."
 
-- The Portal convênio card says whether ANY convênio it lists carries a clinic note: the clinic's
-  own "Outro" plans and, in `independent` mode, a doctor's own "Outro" (catalog plans never carry
-  one). It rides on the card's pointer (`source.has_clinic_notes`), so the Portal decides with no
-  extra request. Both convênio cards carry it: the booking's and "alterar consulta"'s.
+TASK-090 (owner, 2026-11-22): the "Outro" convênio no longer has a payment text at all, so no
+convênio ever carries a clinic note and the Portal never offers the sheet. A patient who asks how
+payment works with a convênio is handed off to a person (tests/test_handoff_insurance_payment.py).
+
+- The Portal convênio card still carries `source.has_clinic_notes` (the wire shape does not
+  change for the Portal), and it is always False - even for a snapshot taken before the deploy
+  that still had a `note` in a plan dict. Both convênio cards carry it: the booking's and
+  "alterar consulta"'s.
 - The flag is insurance-only: a service or doctor card's pointer is unchanged.
 - WhatsApp is unchanged (its rows never had a button).
-- The patient's sheet lists ONLY the convênios with a note (plus the clinic's one sinal line), so
-  the overview drops the plans without one.
+- The patient's sheet (`insurance-overview`) keeps the clinic's one sinal line and lists no plan.
 """
 
 import os
@@ -65,11 +68,12 @@ from tests.payments_support import make_sessionmaker  # noqa: E402
 UNIMED = catalog_id_for_slug("unimed")
 AMIL = catalog_id_for_slug("amil")
 
-NO_NOTES = [
-    {"id": "p1", "name": "Unimed", "note": None},
-    {"id": "p2", "name": "Amil", "note": "  "},
+PLANS = [
+    {"id": "p1", "name": "Unimed", "mechanism": "desconhecido"},
+    {"id": "p3", "name": "GEAP", "mechanism": "desconhecido"},
 ]
-ONE_NOTE = [
+# A snapshot built before the TASK-090 deploy still had the "Outro" note in its plan dict.
+STALE_WITH_NOTE = [
     {"id": "p1", "name": "Unimed", "note": None},
     {"id": "p3", "name": "GEAP", "note": "Pagamento na recepção."},
 ]
@@ -84,9 +88,9 @@ def _snapshot(plans) -> SimpleNamespace:
 # --------------------------------------------------------------------------
 
 
-def test_one_note_is_enough_and_blank_notes_do_not_count():
-    assert fr.insurance_plans_have_clinic_notes(ONE_NOTE) is True
-    assert fr.insurance_plans_have_clinic_notes(NO_NOTES) is False
+def test_no_plan_ever_counts_as_carrying_a_clinic_note():
+    assert fr.insurance_plans_have_clinic_notes(PLANS) is False
+    assert fr.insurance_plans_have_clinic_notes(STALE_WITH_NOTE) is False
     assert fr.insurance_plans_have_clinic_notes([]) is False
 
 
@@ -95,11 +99,9 @@ def test_one_note_is_enough_and_blank_notes_do_not_count():
 # --------------------------------------------------------------------------
 
 
-def test_the_booking_card_says_whether_a_clinic_note_exists():
-    with_note = fr._enter_insurance(_snapshot(ONE_NOTE)).bubbles[0].source
-    without = fr._enter_insurance(_snapshot(NO_NOTES)).bubbles[0].source
-    assert with_note.has_clinic_notes is True
-    assert without.has_clinic_notes is False
+def test_the_booking_card_never_offers_the_payment_rules_sheet():
+    for plans in (PLANS, STALE_WITH_NOTE):
+        assert fr._enter_insurance(_snapshot(plans)).bubbles[0].source.has_clinic_notes is False
 
 
 def test_a_legacy_name_only_clinic_has_no_note():
@@ -107,14 +109,15 @@ def test_a_legacy_name_only_clinic_has_no_note():
     assert fr._enter_insurance(bare).bubbles[0].source.has_clinic_notes is False
 
 
-def test_whatsapp_rows_do_not_change_with_the_note():
-    with_note = fr._enter_insurance(_snapshot(ONE_NOTE)).bubbles[0]
-    assert with_note.rows == [
+def test_whatsapp_rows_are_just_the_names():
+    rows = fr._enter_insurance(_snapshot(STALE_WITH_NOTE)).bubbles[0].rows
+    assert rows == [
         ("ins|Unimed", "Unimed"),
         ("ins|GEAP", "GEAP"),
         ("ins|particular", fr.LABEL_INSURANCE_PARTICULAR),
         ("ins|outro", fr.LABEL_INSURANCE_OTHER),
     ]
+    assert "Pagamento na recepção." not in repr(rows)
 
 
 # --------------------------------------------------------------------------
@@ -137,9 +140,9 @@ async def _edit_insurance_card(plans):
     return result.bubbles[-1].source
 
 
-async def test_the_edit_card_says_whether_a_clinic_note_exists():
-    assert (await _edit_insurance_card(ONE_NOTE)).has_clinic_notes is True
-    assert (await _edit_insurance_card(NO_NOTES)).has_clinic_notes is False
+async def test_the_edit_card_never_offers_the_payment_rules_sheet():
+    assert (await _edit_insurance_card(PLANS)).has_clinic_notes is False
+    assert (await _edit_insurance_card(STALE_WITH_NOTE)).has_clinic_notes is False
 
 
 # --------------------------------------------------------------------------
@@ -158,12 +161,10 @@ def _wire(source: OptionSource) -> dict:
     return InteractiveRead.model_validate(record).model_dump()
 
 
-def test_the_flag_reaches_the_card_on_the_wire():
-    source = fr._enter_insurance(_snapshot(ONE_NOTE)).bubbles[0].source
-    assert list_options.card_source(source)["has_clinic_notes"] is True
-    assert _wire(source)["source"]["has_clinic_notes"] is True
-    off = fr._enter_insurance(_snapshot(NO_NOTES)).bubbles[0].source
-    assert _wire(off)["source"]["has_clinic_notes"] is False
+def test_the_flag_reaches_the_card_on_the_wire_as_false():
+    source = fr._enter_insurance(_snapshot(STALE_WITH_NOTE)).bubbles[0].source
+    assert list_options.card_source(source)["has_clinic_notes"] is False
+    assert _wire(source)["source"]["has_clinic_notes"] is False
 
 
 def test_a_service_card_pointer_is_unchanged():
@@ -192,7 +193,7 @@ def test_a_card_stored_before_u1b_still_projects():
 
 
 # --------------------------------------------------------------------------
-# The patient's sheet: only the convênios with a note
+# The patient's sheet: the sinal line, no plan
 # --------------------------------------------------------------------------
 
 
@@ -220,27 +221,21 @@ async def _clinic(session, *, mode="shared", sinal=True) -> Tenant:
     return tenant
 
 
-async def test_the_overview_lists_only_the_convenios_with_a_note(db):
+async def test_a_clinic_outro_is_not_listed_on_the_sheet(db):
     async with db() as session:
         tenant = await _clinic(session)
         session.add(TenantInsurancePlan(tenant_id=tenant.id, catalog_id=UNIMED))
-        session.add(
-            TenantInsurancePlan(
-                tenant_id=tenant.id, custom_name="GEAP", custom_payment_note="Na recepção."
-            )
-        )
+        session.add(TenantInsurancePlan(tenant_id=tenant.id, custom_name="GEAP"))
         await session.commit()
         overview = await patient_insurance_overview(session, tenant.id)
         snapshot = await load_tenant_insurance(session, tenant.id)
-    assert overview == {
-        "deposit": {"enabled": True, "percent": 30},
-        "plans": [{"name": "GEAP", "clinic_note": "Na recepção."}],
-    }
-    # The card and the sheet read the SAME list: the card's flag is true exactly here.
-    assert fr.insurance_plans_have_clinic_notes(snapshot.plans) is True
+    assert overview == {"deposit": {"enabled": True, "percent": 30}, "plans": []}
+    # The card and the sheet agree: no plan, no button.
+    assert all("note" not in plan for plan in snapshot.plans)
+    assert fr.insurance_plans_have_clinic_notes(snapshot.plans) is False
 
 
-async def test_without_any_note_the_overview_has_no_plan_but_keeps_the_sinal_line(db):
+async def test_without_any_outro_the_overview_keeps_the_sinal_line(db):
     async with db() as session:
         tenant = await _clinic(session, sinal=False)
         session.add(TenantInsurancePlan(tenant_id=tenant.id, catalog_id=UNIMED))
@@ -251,7 +246,7 @@ async def test_without_any_note_the_overview_has_no_plan_but_keeps_the_sinal_lin
     assert fr.insurance_plans_have_clinic_notes(snapshot.plans) is False
 
 
-async def test_a_doctors_own_note_counts_in_independent_mode(db):
+async def test_a_doctors_own_outro_is_not_listed_in_independent_mode(db):
     async with db() as session:
         tenant = await _clinic(session, mode="independent")
         ana = Professional(tenant_id=tenant.id, name="Dra. Ana", is_active=True)
@@ -263,21 +258,18 @@ async def test_a_doctors_own_note_counts_in_independent_mode(db):
                     professional_id=ana.id, tenant_id=tenant.id, catalog_id=AMIL
                 ),
                 ProfessionalInsurancePlan(
-                    professional_id=ana.id,
-                    tenant_id=tenant.id,
-                    custom_name="Plano da Ana",
-                    custom_payment_note="Reembolso pelo plano.",
+                    professional_id=ana.id, tenant_id=tenant.id, custom_name="Plano da Ana"
                 ),
             ]
         )
         await session.commit()
         overview = await patient_insurance_overview(session, tenant.id)
         snapshot = await load_tenant_insurance(session, tenant.id)
-    assert overview["plans"] == [{"name": "Plano da Ana", "clinic_note": "Reembolso pelo plano."}]
-    assert fr.insurance_plans_have_clinic_notes(snapshot.plans) is True
+    assert overview["plans"] == []
+    assert fr.insurance_plans_have_clinic_notes(snapshot.plans) is False
 
 
-async def test_the_overview_route_drops_the_plans_without_a_note(db, client):
+async def test_the_overview_route_lists_no_plan(db, client):
     from secretaria.main import app
 
     async def _session():
@@ -287,6 +279,7 @@ async def test_the_overview_route_drops_the_plans_without_a_note(db, client):
     async with db() as session:
         tenant = await _clinic(session)
         session.add(TenantInsurancePlan(tenant_id=tenant.id, catalog_id=UNIMED))
+        session.add(TenantInsurancePlan(tenant_id=tenant.id, custom_name="GEAP"))
         await session.commit()
     app.dependency_overrides[get_session] = _session
     try:

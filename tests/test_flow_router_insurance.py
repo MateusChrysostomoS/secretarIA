@@ -1,10 +1,13 @@
 """Tests for the convênio step across every professional topology.
 
-`collect_insurance` and `insurances` are CLINIC-wide settings and the answer
-is informational only, so the step must depend on the clinic's configuration
-and nothing else. It used to additionally require a multi-doctor selection
-(`flow_selected_professional_id`), which meant the single-professional clinic
-— the common case — could switch the toggle on in the hub and never be asked.
+The clinic's convênios and acceptance mode are CLINIC-wide settings and the
+answer is informational only, so the step must depend on the clinic's
+configuration and nothing else. It used to additionally require a
+multi-doctor selection (`flow_selected_professional_id`), which meant the
+single-professional clinic — the common case — never got asked.
+
+TASK-090: the old `collect_insurance` toggle no longer influences anything;
+the question is asked whenever the clinic has >= 1 convênio (and a mode).
 
 Same no-DB/no-network style as tests/test_flow_router.py: SimpleNamespace
 snapshots plus a fake calendar.
@@ -28,7 +31,6 @@ from secretaria.ai.formatter import SlotsBubble, TextBubble  # noqa: E402
 from secretaria.models import FlowState  # noqa: E402
 from secretaria.services import flow_router  # noqa: E402
 from secretaria.services.flow_router import (  # noqa: E402
-    INSURANCE_SKIP_DISABLED,
     INSURANCE_SKIP_EMPTY_CATALOG,
     INSURANCE_SKIP_NO_MODE,
     LABEL_INSURANCE_OTHER,
@@ -161,12 +163,12 @@ async def test_insurance_step_asked_on_every_topology_when_configured(profession
 @pytest.mark.parametrize("professional_count", [0, 1, 2])
 @pytest.mark.parametrize(
     ("collect_insurance", "insurances"),
-    [(False, ["Unimed"]), (True, []), (True, None), (False, None)],
+    [(True, []), (True, None), (False, []), (False, None)],
 )
 async def test_insurance_step_skipped_when_not_configured(
     professional_count, collect_insurance, insurances
 ):
-    """Toggle off OR an empty plan catalog skips the step — on every topology."""
+    """An empty plan catalog skips the step — on every topology, flag or not."""
     professionals = _professionals(professional_count)
     selected = professionals[0].id if professional_count > 1 else None
     res = await _confirm_service(
@@ -177,11 +179,37 @@ async def test_insurance_step_skipped_when_not_configured(
     assert res.flow_step == STEP_AWAITING_DAY
 
 
-def test_skip_reason_names_which_configuration_silenced_the_step():
+@pytest.mark.parametrize("professional_count", [0, 1, 2])
+async def test_step_asked_even_when_collect_flag_false(professional_count):
+    """TASK-090: the legacy toggle is ignored — convênios exist, so we ask."""
+    professionals = _professionals(professional_count)
+    selected = professionals[0].id if professional_count > 1 else None
+    tenant = _tenant(collect_insurance=False, insurances=["Unimed"])
+    assert flow_router._insurance_step_skip_reason(tenant) is None
+    res = await _confirm_service(tenant, professionals, selected_professional_id=selected)
+    assert res.flow_step == STEP_AWAITING_INSURANCE
+
+
+def test_step_skipped_when_no_plans():
+    for flag in (True, False):
+        assert (
+            flow_router._insurance_step_skip_reason(
+                _tenant(collect_insurance=flag, insurances=[])
+            )
+            == INSURANCE_SKIP_EMPTY_CATALOG
+        )
+
+
+def test_step_skipped_when_no_mode():
     assert (
-        flow_router._insurance_step_skip_reason(_tenant(collect_insurance=False))
-        == INSURANCE_SKIP_DISABLED
+        flow_router._insurance_step_skip_reason(
+            _tenant(collect_insurance=False, insurances=["Unimed"], insurance_mode=None)
+        )
+        == INSURANCE_SKIP_NO_MODE
     )
+
+
+def test_skip_reason_names_which_configuration_silenced_the_step():
     assert (
         flow_router._insurance_step_skip_reason(
             _tenant(collect_insurance=True, insurance_mode=None)

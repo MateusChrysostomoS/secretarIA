@@ -161,7 +161,8 @@ async def test_saves_tenant_and_professional_in_one_call(
 
     t, p = await _reload(db, tenant.id, professional.id)
     assert t.clinic_description == "depois"
-    assert t.collect_insurance is True
+    assert body["tenant"]["collect_insurance"] is True  # legacy constant (TASK-090)
+    assert t.collect_insurance is False  # accepted but ignored: the column is unchanged
     assert p.specialty == "depois"
     assert p.business_hours == HOURS_B
 
