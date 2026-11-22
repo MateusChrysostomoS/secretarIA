@@ -11,7 +11,7 @@ os.environ.setdefault("META_ACCESS_TOKEN", "test-access-token")
 os.environ.setdefault("META_PHONE_NUMBER_ID", "1234567890")
 os.environ.setdefault("ENCRYPTION_KEY", "gBSpATEZoI21UX0_59nHvxdUDJ4drCttg2RAEaPJc1w=")
 
-from uuid import uuid4  # noqa: E402
+from uuid import UUID, uuid4  # noqa: E402
 
 import pytest  # noqa: E402
 import pytest_asyncio  # noqa: E402
@@ -84,6 +84,21 @@ def _override(db, tenant):
     app.dependency_overrides.pop(get_current_tenant, None)
 
 
+def _addr(**overrides) -> dict:
+    """A valid structured address (contract C1)."""
+    parts = dict(
+        cep="01310-100",
+        street="Av. Paulista",
+        number="1000",
+        complement="sala 2",
+        neighborhood="Bela Vista",
+        city="São Paulo",
+        state="SP",
+    )
+    parts.update(overrides)
+    return parts
+
+
 async def _seed_unit(db, tenant: Tenant, **overrides) -> Unit:
     fields = dict(tenant_id=tenant.id, name="Unidade Centro", address="Rua A, 1", is_active=True)
     fields.update(overrides)
@@ -120,6 +135,14 @@ async def test_list_shape_is_whitelisted(
         "id",
         "name",
         "address",
+        "cep",
+        "street",
+        "number",
+        "complement",
+        "neighborhood",
+        "city",
+        "state",
+        "address_incomplete",
         "is_active",
         "created_at",
         "professionals_count",
@@ -137,7 +160,7 @@ async def test_list_shape_is_whitelisted(
 async def test_create_unit_without_addon_succeeds(client: AsyncClient) -> None:
     # The clinic holds no `multi_unit` add-on (the autouse fixture makes any entitlement
     # fetch fail the test): creating a unit is simply allowed.
-    response = await client.post(ENDPOINT, json={"name": "Unidade Centro", "address": "Rua A, 1"})
+    response = await client.post(ENDPOINT, json={"name": "Unidade Centro", **_addr()})
     assert response.status_code == 201
     body = response.json()
     assert body["name"] == "Unidade Centro"
@@ -152,7 +175,7 @@ async def test_create_unit_ignores_units_limit(
     await _seed_unit(db, tenant, name="Existing 1", is_active=True)
     await _seed_unit(db, tenant, name="Existing 2", is_active=True)
     for name in ("Unidade Centro", "Unidade Norte"):
-        response = await client.post(ENDPOINT, json={"name": name, "address": "Rua A, 1"})
+        response = await client.post(ENDPOINT, json={"name": name, **_addr()})
         assert response.status_code == 201, response.text
         assert response.json()["is_active"] is True
     async with db() as session:
@@ -162,7 +185,7 @@ async def test_create_unit_ignores_units_limit(
 
 async def test_create_inactive_unit_succeeds(client: AsyncClient) -> None:
     response = await client.post(
-        ENDPOINT, json={"name": "Unidade Centro", "address": "Rua A, 1", "is_active": False}
+        ENDPOINT, json={"name": "Unidade Centro", **_addr(), "is_active": False}
     )
     assert response.status_code == 201
     assert response.json()["is_active"] is False
@@ -205,66 +228,144 @@ async def test_patch_unknown_id_is_404(client: AsyncClient) -> None:
     assert response.status_code == 404
 
 
+
+
 # --------------------------------------------------------------------------
-# Address is mandatory (follow-up U1)
+# Structured address (contract C1, TASK-090 B2)
 # --------------------------------------------------------------------------
 
-_ADDRESS_REQUIRED = {
-    "code": "unit_address_required",
-    "message": "Informe o endereço da unidade.",
-}
+_ALL_REQUIRED = ["cep", "street", "number", "city", "state"]
 
 
-async def test_create_unit_without_address_is_422_unit_address_required(
-    client: AsyncClient, db
-) -> None:
-    response = await client.post(ENDPOINT, json={"name": "Unidade Centro"})
+async def test_create_unit_requires_structured_address_422(client: AsyncClient, db) -> None:
+    # The old free-text `address` is ignored on input: it does not satisfy the requirement.
+    response = await client.post(ENDPOINT, json={"name": "Unidade Centro", "address": "Rua A, 1"})
     assert response.status_code == 422
-    assert response.json()["detail"] == _ADDRESS_REQUIRED
+    detail = response.json()["detail"]
+    assert detail["code"] == "unit_address_invalid"
+    assert isinstance(detail["message"], str) and detail["message"]
+    assert detail["fields"] == _ALL_REQUIRED
     async with db() as session:
         assert (await session.scalars(select(Unit))).all() == []
 
 
-async def test_create_unit_with_blank_address_is_422(
-    client: AsyncClient
-) -> None:
-    for blank in ("", "   ", None):
-        response = await client.post(ENDPOINT, json={"name": "Unidade Centro", "address": blank})
-        assert response.status_code == 422, blank
-        assert response.json()["detail"] == _ADDRESS_REQUIRED
-
-
-async def test_create_unit_strips_address(
-    client: AsyncClient
-) -> None:
+async def test_create_unit_lists_only_the_bad_fields(client: AsyncClient) -> None:
     response = await client.post(
-        ENDPOINT, json={"name": "Unidade Centro", "address": "  Rua B, 2  "}
+        ENDPOINT, json={"name": "U", **_addr(cep="123", state="XX", street="  ")}
+    )
+    assert response.status_code == 422
+    assert response.json()["detail"]["fields"] == ["cep", "street", "state"]
+
+
+async def test_create_unit_derives_address(client: AsyncClient, db) -> None:
+    response = await client.post(
+        ENDPOINT,
+        json={"name": "Unidade Centro", "address": "ignored text", **_addr(state="sp")},
+    )
+    assert response.status_code == 201, response.text
+    body = response.json()
+    assert body["address"] == "Av. Paulista, 1000 - sala 2, Bela Vista, São Paulo - SP, 01310-100"
+    assert body["cep"] == "01310100"
+    assert body["state"] == "SP"
+    assert body["street"] == "Av. Paulista"
+    assert body["address_incomplete"] is False
+    async with db() as session:
+        saved = await session.scalar(select(Unit))
+        assert saved.address == body["address"]
+        assert saved.cep == "01310100"
+
+
+async def test_create_unit_without_optional_parts(client: AsyncClient) -> None:
+    response = await client.post(
+        ENDPOINT, json={"name": "U", **_addr(complement=None, neighborhood="")}
     )
     assert response.status_code == 201
-    assert response.json()["address"] == "Rua B, 2"
+    body = response.json()
+    assert body["address"] == "Av. Paulista, 1000, São Paulo - SP, 01310-100"
+    assert body["complement"] is None
+    assert body["neighborhood"] is None
 
 
-async def test_patch_unit_address_to_blank_is_422_and_nothing_saved(
-    client: AsyncClient, db, tenant
-) -> None:
-    unit = await _seed_unit(db, tenant, name="Old Name", address="Rua A, 1")
-    for blank in ("", "   ", None):
-        response = await client.patch(
-            f"{ENDPOINT}/{unit.id}", json={"name": "New Name", "address": blank}
-        )
-        assert response.status_code == 422, blank
-        assert response.json()["detail"] == _ADDRESS_REQUIRED
-    async with db() as session:
-        saved = await session.get(Unit, unit.id)
-        assert saved.name == "Old Name"
-        assert saved.address == "Rua A, 1"
-
-
-async def test_patch_unit_name_only_on_legacy_unit_without_address_still_works(
-    client: AsyncClient, db, tenant
-) -> None:
-    unit = await _seed_unit(db, tenant, name="Legacy", address=None)
+async def test_patch_name_only_keeps_legacy_unit_valid(client: AsyncClient, db, tenant) -> None:
+    unit = await _seed_unit(db, tenant, name="Legacy", address="Rua A, 1")
     response = await client.patch(f"{ENDPOINT}/{unit.id}", json={"name": "Legacy 2"})
     assert response.status_code == 200
-    assert response.json()["name"] == "Legacy 2"
-    assert response.json()["address"] is None
+    body = response.json()
+    assert body["name"] == "Legacy 2"
+    assert body["address"] == "Rua A, 1"  # untouched legacy text
+    assert body["address_incomplete"] is True
+    response = await client.patch(f"{ENDPOINT}/{unit.id}", json={"is_active": False})
+    assert response.status_code == 200
+    assert response.json()["address"] == "Rua A, 1"
+
+
+async def test_patch_address_key_alone_is_ignored(client: AsyncClient, db, tenant) -> None:
+    unit = await _seed_unit(db, tenant, name="Legacy", address="Rua A, 1")
+    response = await client.patch(f"{ENDPOINT}/{unit.id}", json={"address": "Other"})
+    assert response.status_code == 200
+    assert response.json()["address"] == "Rua A, 1"
+
+
+async def test_patch_parts_revalidates_merged_result(client: AsyncClient, db, tenant) -> None:
+    created = await client.post(ENDPOINT, json={"name": "U", **_addr()})
+    unit_id = created.json()["id"]
+
+    # A part that breaks the merged result is refused and nothing is saved.
+    bad = await client.patch(f"{ENDPOINT}/{unit_id}", json={"name": "New", "state": "XX"})
+    assert bad.status_code == 422
+    assert bad.json()["detail"]["fields"] == ["state"]
+    bad = await client.patch(f"{ENDPOINT}/{unit_id}", json={"street": None})
+    assert bad.status_code == 422
+    assert bad.json()["detail"]["fields"] == ["street"]
+    async with db() as session:
+        saved = await session.scalar(select(Unit).where(Unit.id == UUID(unit_id)))
+        assert saved.name == "U" and saved.state == "SP" and saved.street == "Av. Paulista"
+
+    # A single valid part is merged with the existing ones and the text line is re-derived.
+    ok = await client.patch(f"{ENDPOINT}/{unit_id}", json={"number": "2000", "cep": "20040-020"})
+    assert ok.status_code == 200
+    body = ok.json()
+    assert body["address"] == "Av. Paulista, 2000 - sala 2, Bela Vista, São Paulo - SP, 20040-020"
+    assert body["number"] == "2000"
+    assert body["city"] == "São Paulo"
+
+
+async def test_patch_parts_on_legacy_unit_needs_all_required(
+    client: AsyncClient, db, tenant
+) -> None:
+    unit = await _seed_unit(db, tenant, name="Legacy", address="Rua A, 1")
+    response = await client.patch(f"{ENDPOINT}/{unit.id}", json={"cep": "01310-100"})
+    assert response.status_code == 422
+    assert response.json()["detail"]["fields"] == ["street", "number", "city", "state"]
+    async with db() as session:
+        assert (await session.get(Unit, unit.id)).address == "Rua A, 1"
+
+    response = await client.patch(f"{ENDPOINT}/{unit.id}", json=_addr())
+    assert response.status_code == 200
+    assert response.json()["address_incomplete"] is False
+
+
+async def test_unit_read_address_incomplete_flag(client: AsyncClient, db, tenant) -> None:
+    await _seed_unit(db, tenant, name="A legacy", address="Rua A, 1")
+    await _seed_unit(db, tenant, name="B complete", address="x", **{
+        "cep": "01310100", "street": "Av. P", "number": "1", "city": "SP", "state": "SP",
+    })
+    await _seed_unit(db, tenant, name="C bad uf", address="x", **{
+        "cep": "01310100", "street": "Av. P", "number": "1", "city": "SP", "state": "ZZ",
+    })
+    rows = {r["name"]: r for r in (await client.get(ENDPOINT)).json()}
+    assert rows["A legacy"]["address_incomplete"] is True
+    assert rows["B complete"]["address_incomplete"] is False
+    assert rows["C bad uf"]["address_incomplete"] is True
+
+
+async def test_patch_other_tenants_unit_is_404(client: AsyncClient, db) -> None:
+    async with db() as session:
+        other = Tenant(id=uuid4(), clinic_name="Other", phone_number_id=str(uuid4())[:12])
+        session.add(other)
+        await session.commit()
+    foreign = await _seed_unit(db, other, name="Foreign", address="Rua Z, 9")
+    response = await client.patch(f"{ENDPOINT}/{foreign.id}", json=_addr())
+    assert response.status_code == 404
+    async with db() as session:
+        assert (await session.get(Unit, foreign.id)).address == "Rua Z, 9"
