@@ -720,7 +720,13 @@ async def list_active_professionals(session: AsyncSession, tenant_id: UUID) -> l
         .where(Professional.tenant_id == tenant_id, Professional.is_active.is_(True))
         .order_by(Professional.name)
     )
-    return list(rows)
+    roster = list(rows)
+    # TASK-091: every row carries `booking_blocked` (a flagged invitee who is not ready yet), so the
+    # choice points of the patient flow can skip them while lookups by id keep finding everyone.
+    from secretaria.services.professional_readiness import mark_booking_blocked
+
+    await mark_booking_blocked(session, tenant_id, roster)
+    return roster
 
 
 async def resolve_professional_calendar(

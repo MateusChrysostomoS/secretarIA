@@ -93,15 +93,17 @@ logger = get_logger(__name__)
 
 
 async def _active_professionals(tenant_id: UUID) -> list:
-    """Active professionals for `tenant_id`, ordered by name. Never raises."""
+    """Bookable professionals for `tenant_id`, ordered by name. Never raises."""
     # Imported lazily, same rationale as ai/tools.py's _persist_appointment:
     # keeps this module importable without a DB/ORM in dev scripts, and avoids
     # an import cycle through models -> services.
     from secretaria.core.database import async_session_factory
-    from secretaria.services.tenant_config import list_active_professionals
+    from secretaria.services.professional_readiness import list_bookable_professionals
 
+    # TASK-091: this is the agent's "who can the patient book with?" - a flagged invitee who is not
+    # ready to book is not offered, exactly as in the deterministic flow.
     async with async_session_factory() as session:
-        return await list_active_professionals(session, tenant_id)
+        return await list_bookable_professionals(session, tenant_id)
 
 
 async def _professional_services(tenant_id: UUID, professional) -> list[dict]:

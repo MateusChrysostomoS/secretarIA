@@ -118,3 +118,36 @@ async def professional_readiness(
 ) -> Readiness:
     """Readiness of ONE professional (the batch of one)."""
     return (await professionals_readiness(session, tenant, [professional]))[professional.id]
+
+
+async def mark_booking_blocked(
+    session: AsyncSession, tenant_id: UUID, professionals: Sequence[Professional]
+) -> None:
+    """Set `booking_blocked` on every professional row (the roster the patient flow reads).
+
+    True only for a professional flagged `requires_self_setup` whose readiness is not complete;
+    everyone else - the owner, everyone created before the flag existed - is False and never
+    filtered. The common clinic (nobody flagged) costs no query at all.
+    """
+    flagged = [p for p in professionals if p.requires_self_setup]
+    for professional in professionals:
+        professional.booking_blocked = False
+    if not flagged:
+        return
+    tenant = await session.get(Tenant, tenant_id)
+    if tenant is None:
+        return
+    for professional_id, readiness in (
+        await professionals_readiness(session, tenant, flagged)
+    ).items():
+        if not readiness.ready:
+            next(p for p in flagged if p.id == professional_id).booking_blocked = True
+
+
+async def list_bookable_professionals(session: AsyncSession, tenant_id: UUID) -> list[Professional]:
+    """The ACTIVE professionals a patient may be offered: everyone except a flagged invitee who is
+    not ready yet. Same order as `list_active_professionals`. Use it where the patient CHOOSES;
+    looking a doctor up by id (an existing appointment) keeps using the full active roster."""
+    from secretaria.services.tenant_config import list_active_professionals
+
+    return [p for p in await list_active_professionals(session, tenant_id) if not p.booking_blocked]

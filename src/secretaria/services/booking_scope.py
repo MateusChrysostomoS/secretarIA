@@ -79,7 +79,9 @@ def sole_active_professional(professionals: Sequence[Any] | None) -> Any | None:
     (`resolve_booking_owner_id` below) can never be resolved from different
     professionals.
     """
-    roster = list(professionals or [])
+    # TASK-091: a flagged invitee who is not ready to book is not part of the clinic the patient
+    # sees, so "one ready doctor + one incomplete invitee" is still a single-doctor clinic.
+    roster = [p for p in professionals or [] if not getattr(p, "booking_blocked", False)]
     return roster[0] if len(roster) == 1 else None
 
 

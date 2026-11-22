@@ -325,6 +325,9 @@ def _flow_professionals(
             min_booking_notice_hours=p.min_booking_notice_hours,
             # The doctor's buffer between consultations, in minutes (TASK-088).
             buffer_minutes=p.buffer_minutes,
+            # TASK-091: a flagged invitee who is not ready to book (the router skips them where the
+            # patient chooses; lookups by id still find them).
+            booking_blocked=getattr(p, "booking_blocked", False),
             appointment_types=(
                 resolve_entries(p.appointment_types, services)
                 if p.appointment_types
