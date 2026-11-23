@@ -95,6 +95,8 @@ _HANDBACKS = {
     "set_booking_draft",
     "request_human_handoff",
     "offer_human_handoff",
+    # TASK-090 Adendo 1 (C6): read-only, rides with request_human_handoff.
+    "get_insurance_payment_rule",
     "save_patient_name",
 }
 

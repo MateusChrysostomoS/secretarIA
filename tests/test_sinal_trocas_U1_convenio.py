@@ -422,15 +422,11 @@ async def test_hub_ignores_an_old_flag_and_never_rewrites_a_legacy_value(
     assert saved.status_code == 200, saved.text
     custom = await client.post(
         "/tenants/me/insurance-plans/custom",
-        json={
-            "custom_name": "GEAP",
-            "custom_payment_note": "Na recepção.",
-            "charge_deposit": False,
-        },
+        json={"custom_name": "GEAP", "charge_deposit": False},
     )
     assert custom.status_code == 201, custom.text
-    # TASK-090: the old Portal's payment note is ignored too, never echoed back.
-    assert "custom_payment_note" not in custom.json()
+    # TASK-090 Adendo 1 (C6): no rule sent, none stored.
+    assert custom.json()["custom_payment_note"] is None
     listed = await client.get("/tenants/me/insurance-plans")
     assert all("charge_deposit" not in plan for plan in listed.json())
     async with db() as session:

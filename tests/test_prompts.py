@@ -363,9 +363,11 @@ def test_legacy_prompt_keeps_calendar_path_without_flow_state():
 # Re-rendered 2026-11-22 (TASK-090): a convênio payment-rule question goes to a person
 # (prompts.INSURANCE_PAYMENT_HANDOFF_RULE, +219 chars in COMO ATENDER and, in "full", again in
 # the ESTADO DA CONVERSA rules).
+# Re-rendered 2026-11-23 (TASK-090 Adendo 1, C6): the rule first reads get_insurance_payment_rule
+# (explain only the clinic's rule) and hands off only without one (+83 chars per occurrence).
 _V1_DIGESTS = {
-    "minimal": (14587, "ef1ac67b88e0d286d8719ff76a9546cc63ebcd917b6116e95033a319b495dc18"),
-    "full": (20537, "ed94d83442ee90360b18d3b9bb4052f5c346b1eae207417b8d9303915e43bc2a"),
+    "minimal": (14670, "8e3f6aeb4fbf9e465d37cbc61e37acbb78cb19f4329062c18990564a01bbc409"),
+    "full": (20703, "98207bde62287ea1bb0fd35fe6849bb7a10708a8a2245ede68f312a994c4662e"),
 }
 
 

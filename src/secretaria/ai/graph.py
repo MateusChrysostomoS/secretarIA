@@ -329,6 +329,7 @@ def effective_tools(
             "list_free_slots_for_professional",
             "request_human_handoff",
             "offer_human_handoff",
+            "get_insurance_payment_rule",
         }
         candidates = [*base_tools_for(topology, toolset_v2=toolset_v2), *extra_tools]
         kept = [

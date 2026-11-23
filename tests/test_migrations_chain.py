@@ -1,18 +1,22 @@
-"""TASK-090 B9: the `custom_payment_note` DROP is the last revision; nothing maps the column."""
+"""TASK-090 Adendo 1 (contract C6): `custom_payment_note` STAYS - the DROP revision is gone.
 
-import importlib.util
+The owner turned the "Outro" payment text into an optional payment rule for ANY convênio line
+(read only by the AI). Nothing was deployed, so the DROP revision `b4d0f6e8a2c5` was deleted:
+the chain ends at the last additive TASK-090 revision and both plan tables keep the column
+(added by `d4f8a2c6e913`), which both models map again.
+"""
+
 from pathlib import Path
 
-import sqlalchemy as sa
 from alembic.config import Config
-from alembic.migration import MigrationContext
-from alembic.operations import Operations
 from alembic.script import ScriptDirectory
 
+from secretaria.models.insurance import ProfessionalInsurancePlan, TenantInsurancePlan
+
 ROOT = Path(__file__).resolve().parents[1]
-REVISION = "b4d0f6e8a2c5"
-LAST_ADDITIVE = "a3c9e5d7f1b4"
-TABLES = ("tenant_insurance_plans", "professional_insurance_plans")
+HEAD = "a3c9e5d7f1b4"
+DELETED_DROP = "b4d0f6e8a2c5"
+ADDED_BY = "d4f8a2c6e913"
 
 
 def _scripts() -> ScriptDirectory:
@@ -21,71 +25,35 @@ def _scripts() -> ScriptDirectory:
     return ScriptDirectory.from_config(config)
 
 
-def _migration():
-    path = ROOT / "migrations" / "versions" / f"{REVISION}_drop_custom_payment_note.py"
-    spec = importlib.util.spec_from_file_location("drop_custom_payment_note_migration", path)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
+def test_single_alembic_head_is_the_last_additive_revision():
+    assert _scripts().get_heads() == [HEAD]
 
 
-def test_single_alembic_head():
-    assert _scripts().get_heads() == [REVISION]
+def test_the_drop_revision_no_longer_exists():
+    scripts = _scripts()
+    assert DELETED_DROP not in {rev.revision for rev in scripts.walk_revisions()}
+    assert not list((ROOT / "migrations" / "versions").glob(f"{DELETED_DROP}_*.py"))
 
 
-def test_drop_revision_is_the_head_and_parent_is_last_additive():
-    migration = _migration()
-    assert migration.revision == REVISION
-    assert migration.down_revision == LAST_ADDITIVE
-
-
-def test_drop_is_its_own_revision_not_mixed_with_additive_ones():
-    """No earlier revision of this task may drop the column (the old code still reads it)."""
-    versions = ROOT / "migrations" / "versions"
-    droppers = [
-        p.name
-        for p in versions.glob("*.py")
-        if 'drop_column("custom_payment_note")' in p.read_text(encoding="utf-8")
-        and not p.name.startswith(("d4f8a2c6e913", REVISION))
+def test_the_chain_from_base_reaches_the_head_and_adds_the_column_once():
+    """Every revision is reachable from the head (no orphan branch) and the only revision that
+    names the column is the one that created it (its downgrade drops it - that is all)."""
+    scripts = _scripts()
+    chain = [rev.revision for rev in scripts.walk_revisions("base", HEAD)]
+    assert chain[0] == HEAD and ADDED_BY in chain
+    assert len(chain) == len(set(chain)) == len(list(scripts.walk_revisions()))
+    namers = [
+        path.name
+        for path in (ROOT / "migrations" / "versions").glob("*.py")
+        if "custom_payment_note" in path.read_text(encoding="utf-8")
     ]
-    assert droppers == []
+    assert namers == [next(p.name for p in (ROOT / "migrations" / "versions").glob(
+        f"{ADDED_BY}_*.py"
+    ))]
 
 
-def test_models_do_not_reference_dropped_column():
-    offenders = [
-        str(p.relative_to(ROOT))
-        for p in (ROOT / "src").rglob("*.py")
-        if "custom_payment_note" in p.read_text(encoding="utf-8")
-    ]
-    assert offenders == []
-
-
-def _engine_with_column(tmp_path):
-    engine = sa.create_engine(f"sqlite:///{tmp_path / 'plans.db'}")
-    with engine.begin() as conn:
-        for table in TABLES:
-            conn.execute(
-                sa.text(
-                    f"CREATE TABLE {table} "
-                    "(id CHAR(32) PRIMARY KEY, custom_name VARCHAR(120), custom_payment_note TEXT)"
-                )
-            )
-            conn.execute(sa.text(f"INSERT INTO {table} VALUES ('p1', 'Outro', 'old note')"))
-    return engine
-
-
-def test_upgrade_drops_the_column_and_downgrade_recreates_it_empty(tmp_path):
-    migration = _migration()
-    engine = _engine_with_column(tmp_path)
-    with engine.begin() as conn, Operations.context(MigrationContext.configure(conn)):
-        migration.upgrade()
-        for table in TABLES:
-            names = {c["name"] for c in sa.inspect(conn).get_columns(table)}
-            assert "custom_payment_note" not in names
-            assert conn.execute(sa.text(f"SELECT custom_name FROM {table}")).scalar() == "Outro"
-        migration.downgrade()
-        for table in TABLES:
-            cols = {c["name"]: c for c in sa.inspect(conn).get_columns(table)}
-            assert cols["custom_payment_note"]["nullable"] is True
-            query = sa.text(f"SELECT custom_payment_note FROM {table}")
-            assert conn.execute(query).scalar() is None
+def test_both_plan_tables_map_the_payment_note_as_nullable_text():
+    for model in (TenantInsurancePlan, ProfessionalInsurancePlan):
+        column = model.__table__.columns["custom_payment_note"]
+        assert column.nullable is True
+        assert type(column.type).__name__ == "Text"

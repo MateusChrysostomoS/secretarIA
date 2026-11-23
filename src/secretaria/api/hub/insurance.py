@@ -5,10 +5,22 @@ GET     /tenants/me/insurance-catalog                        - global catalog.
 GET     /tenants/me/insurance-plans                          - the clinic's plans.
 PUT     /tenants/me/insurance-plans                          - replace the catalog-backed subset.
 POST    /tenants/me/insurance-plans/custom                   - the clinic's "Outro".
+PUT     /tenants/me/insurance-plans/{plan_id}/payment-note   - a clinic line's payment rule.
 GET     /tenants/me/professionals/{id}/insurance-plans       - doctor's picker.
 PUT     /tenants/me/professionals/{id}/insurance-plans       - replace doctor's (shape by mode).
 POST    /tenants/me/professionals/{id}/insurance-plans/custom - doctor's own "Outro"
                                                                  (independent only).
+PUT     /tenants/me/professionals/{id}/insurance-plans/{plan_id}/payment-note
+                                                               - a doctor line's payment rule
+                                                                 (independent only).
+
+Payment rule (TASK-090 Adendo 1, contract C6): every line (catalog or "Outro", clinic or doctor)
+may carry an optional `custom_payment_note`, returned on every read. Writing it - the two PUT
+.../payment-note routes, or a note sent with a custom POST - is for a clinic MANAGER only
+(`require_clinic_manager` / `ensure_clinic_manager`), goes through
+services/insurance_payment_note.clean_payment_note (one place) and answers 422
+`payment_note_too_long` above 1000 characters of the cleaned text (never truncated). The note is
+never logged (only whether a rule is set). Only the AI reads it (`get_insurance_payment_rule`).
 
 Product decisions (models/insurance.py, TASK-006 + TASK-008): the catalog is
 GLOBAL; `Tenant.insurance_mode` (nullable, no default) picks one of three
@@ -26,10 +38,15 @@ Contract for the hub frontend: docs/CHECKPOINT_convenio_catalogo.md.
 
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from secretaria.api.hub.deps import get_current_tenant
+from secretaria.api.hub.deps import (
+    ensure_clinic_manager,
+    get_current_tenant,
+    require_clinic_manager,
+)
 from secretaria.core.catalog_limits import (
     INSURANCE_PLANS_PER_CLINIC,
     CatalogLimitExceeded,
@@ -37,13 +54,20 @@ from secretaria.core.catalog_limits import (
 )
 from secretaria.core.database import get_session
 from secretaria.core.logging import get_logger
-from secretaria.models.insurance import INSURANCE_MODES_SELECTABLE
+from secretaria.core.subscription import SubscriptionClaim
+from secretaria.models.insurance import (
+    INSURANCE_MODES_SELECTABLE,
+    InsuranceCatalog,
+    ProfessionalInsurancePlan,
+    TenantInsurancePlan,
+)
 from secretaria.models.professional import Professional
 from secretaria.models.tenant import Tenant
 from secretaria.schemas.insurance import (
     InsuranceCatalogRead,
     InsuranceModeRead,
     InsuranceModeUpdate,
+    PaymentNoteUpdate,
     ProfessionalInsuranceCustomCreate,
     ProfessionalInsurancePlansRead,
     ProfessionalInsurancePlansUpdate,
@@ -68,6 +92,11 @@ from secretaria.services.insurance_catalog import (
     set_professional_independent_plans,
     set_tenant_plan_order,
     set_tenant_plans,
+)
+from secretaria.services.insurance_payment_note import (
+    MAX_PAYMENT_NOTE_CHARS,
+    PaymentNoteTooLong,
+    clean_payment_note,
 )
 
 logger = get_logger(__name__)
@@ -101,17 +130,61 @@ def _parse_ids(raw: list[str]) -> list[UUID]:
     return parsed
 
 
+def _tenant_plan_read(
+    plan: TenantInsurancePlan, entry: InsuranceCatalog | None
+) -> TenantInsurancePlanRead:
+    return TenantInsurancePlanRead(
+        id=str(plan.id),
+        catalog_id=str(entry.id) if entry is not None else None,
+        name=entry.name if entry is not None else str(plan.custom_name or ""),
+        is_custom=entry is None,
+        custom_payment_note=plan.custom_payment_note,
+        sort_order=plan.sort_order,
+    )
+
+
 async def _tenant_plans(session: AsyncSession, tenant: Tenant) -> list[TenantInsurancePlanRead]:
     return [
-        TenantInsurancePlanRead(
-            id=str(plan.id),
-            catalog_id=str(entry.id) if entry is not None else None,
-            name=entry.name if entry is not None else str(plan.custom_name or ""),
-            is_custom=entry is None,
-            sort_order=plan.sort_order,
-        )
+        _tenant_plan_read(plan, entry)
         for plan, entry in await list_tenant_plans(session, tenant.id)
     ]
+
+
+def _payment_note(raw: str | None) -> str | None:
+    """The cleaned rule (None = no rule), or 422 `payment_note_too_long` - never truncated."""
+    try:
+        return clean_payment_note(raw)
+    except PaymentNoteTooLong as exc:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={
+                "code": "payment_note_too_long",
+                "message": (
+                    f"A regra de pagamento pode ter no máximo {MAX_PAYMENT_NOTE_CHARS} "
+                    f"caracteres (tem {exc.length})."
+                ),
+                "max_chars": MAX_PAYMENT_NOTE_CHARS,
+                "length": exc.length,
+            },
+        ) from None
+
+
+def _ensure_manager_writes_note(request: Request, note: str | None) -> None:
+    """A custom POST that carries a rule: only a clinic manager writes a payment rule (C6).
+    Without a rule the POST keeps its old, role-blind gate."""
+    if note is None:
+        return
+    claim: SubscriptionClaim | None = getattr(request.state, "staff_subscription_claim", None)
+    if claim is None:  # fail closed: never an AttributeError -> 500
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid or inactive subscription token")
+    ensure_clinic_manager(claim)
+
+
+def _parse_plan_id(raw: str) -> UUID:
+    try:
+        return UUID(raw)
+    except ValueError:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Plan not found") from None
 
 
 async def _visible_plan_count(session: AsyncSession, tenant_id: UUID) -> int:
@@ -259,11 +332,15 @@ async def put_tenant_insurance_plans(
 )
 async def post_tenant_insurance_plan_custom(
     body: TenantInsurancePlanCustomCreate,
+    request: Request,
     tenant: Tenant = Depends(get_current_tenant),
     session: AsyncSession = Depends(get_session),
 ) -> TenantInsurancePlanRead:
     """The clinic's own "Outro" convênio. Not offered in `independent` mode -
-    that mode has no clinic-level list at all (SPEC §5.1)."""
+    that mode has no clinic-level list at all (SPEC §5.1). An optional payment rule
+    (`custom_payment_note`, C6) rides along - manager only."""
+    note = _payment_note(body.custom_payment_note)
+    _ensure_manager_writes_note(request, note)
     if tenant.insurance_mode not in ("shared", "clinic_with_exceptions"):
         raise _mode_not_applicable(
             "Só é possível cadastrar um convênio 'Outro' da clínica nos modos "
@@ -272,6 +349,7 @@ async def post_tenant_insurance_plan_custom(
     tenant_id = tenant.id
     before = await _visible_plan_count(session, tenant_id)
     plan = await create_tenant_custom_plan(session, tenant, custom_name=body.custom_name)
+    plan.custom_payment_note = note
     await _refuse_growth(session, tenant_id, before)
     await session.commit()
     return TenantInsurancePlanRead(
@@ -279,7 +357,44 @@ async def post_tenant_insurance_plan_custom(
         catalog_id=None,
         name=plan.custom_name or "",
         is_custom=True,
+        custom_payment_note=plan.custom_payment_note,
     )
+
+
+@router.put(
+    "/insurance-plans/{plan_id}/payment-note",
+    response_model=TenantInsurancePlanRead,
+)
+async def put_tenant_insurance_plan_payment_note(
+    plan_id: str,
+    body: PaymentNoteUpdate,
+    tenant: Tenant = Depends(require_clinic_manager),
+    session: AsyncSession = Depends(get_session),
+) -> TenantInsurancePlanRead:
+    """Set or clear (null/blank) the payment rule of one of the clinic's lines - catalog
+    or "Outro" (C6). 404 for an unknown id or another clinic's line."""
+    note = _payment_note(body.custom_payment_note)
+    row = await session.execute(
+        select(TenantInsurancePlan, InsuranceCatalog)
+        .outerjoin(InsuranceCatalog, InsuranceCatalog.id == TenantInsurancePlan.catalog_id)
+        .where(
+            TenantInsurancePlan.id == _parse_plan_id(plan_id),
+            TenantInsurancePlan.tenant_id == tenant.id,
+        )
+    )
+    found = row.first()
+    if found is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Plan not found")
+    plan, entry = found
+    plan.custom_payment_note = note
+    await session.commit()
+    logger.info(
+        "hub_insurance_payment_note_saved",
+        tenant_id=str(tenant.id),
+        plan_id=str(plan.id),
+        has_rule=note is not None,
+    )
+    return _tenant_plan_read(plan, entry)
 
 
 @router.put("/insurance-plans/order", response_model=list[TenantInsurancePlanRead])
@@ -314,28 +429,45 @@ async def put_tenant_insurance_plan_order(
 # ---------------------------------------------------------------------------
 
 
+def _professional_plan_read(
+    plan: ProfessionalInsurancePlan, entry: InsuranceCatalog | None
+) -> TenantInsurancePlanRead:
+    """One of the doctor's OWN lines (independent mode), keyed like the picker: the catalog
+    id for a catalog pick, the row id for the doctor's "Outro"."""
+    if entry is not None:
+        return TenantInsurancePlanRead(
+            id=str(entry.id),
+            catalog_id=str(entry.id),
+            name=entry.name,
+            is_custom=False,
+            custom_payment_note=plan.custom_payment_note,
+        )
+    return TenantInsurancePlanRead(
+        id=str(plan.id),
+        catalog_id=None,
+        name=str(plan.custom_name or ""),
+        is_custom=True,
+        custom_payment_note=plan.custom_payment_note,
+    )
+
+
 async def _independent_selectable(
     session: AsyncSession, professional: Professional
 ) -> list[TenantInsurancePlanRead]:
+    own = await list_professional_plans(session, professional.id)
+    notes = {entry.id: plan.custom_payment_note for plan, entry in own if entry is not None}
     catalog = [
         TenantInsurancePlanRead(
             id=str(entry.id),
             catalog_id=str(entry.id),
             name=entry.name,
             is_custom=False,
+            # The doctor's rule for a catalog pick they accept; null when not accepted.
+            custom_payment_note=notes.get(entry.id),
         )
         for entry in await list_catalog(session)
     ]
-    own_custom = [
-        TenantInsurancePlanRead(
-            id=str(plan.id),
-            catalog_id=None,
-            name=str(plan.custom_name or ""),
-            is_custom=True,
-        )
-        for plan, entry in await list_professional_plans(session, professional.id)
-        if entry is None
-    ]
+    own_custom = [_professional_plan_read(plan, entry) for plan, entry in own if entry is None]
     return catalog + own_custom
 
 
@@ -492,10 +624,14 @@ async def put_professional_insurance_plans(
 async def post_professional_insurance_plan_custom(
     professional_id: str,
     body: ProfessionalInsuranceCustomCreate,
+    request: Request,
     tenant: Tenant = Depends(get_current_tenant),
     session: AsyncSession = Depends(get_session),
 ) -> TenantInsurancePlanRead:
-    """A doctor's own "Outro" convênio - `independent` mode only."""
+    """A doctor's own "Outro" convênio - `independent` mode only. An optional payment
+    rule (`custom_payment_note`, C6) rides along - manager only."""
+    note = _payment_note(body.custom_payment_note)
+    _ensure_manager_writes_note(request, note)
     professional = await _professional(session, tenant, professional_id)
     if tenant.insurance_mode != "independent":
         raise _mode_not_applicable(
@@ -506,6 +642,7 @@ async def post_professional_insurance_plan_custom(
     plan = await create_professional_custom_plan(
         session, professional, custom_name=body.custom_name
     )
+    plan.custom_payment_note = note
     await _refuse_growth(session, tenant_id, before)
     await session.commit()
     return TenantInsurancePlanRead(
@@ -513,4 +650,47 @@ async def post_professional_insurance_plan_custom(
         catalog_id=None,
         name=plan.custom_name or "",
         is_custom=True,
+        custom_payment_note=plan.custom_payment_note,
     )
+
+
+@router.put(
+    "/professionals/{professional_id}/insurance-plans/{plan_id}/payment-note",
+    response_model=TenantInsurancePlanRead,
+)
+async def put_professional_insurance_plan_payment_note(
+    professional_id: str,
+    plan_id: str,
+    body: PaymentNoteUpdate,
+    tenant: Tenant = Depends(require_clinic_manager),
+    session: AsyncSession = Depends(get_session),
+) -> TenantInsurancePlanRead:
+    """Set or clear the payment rule of one of the doctor's OWN lines (`independent` mode,
+    C6). `plan_id` is the id the picker shows: the catalog id of a pick the doctor accepts, or
+    the row id of the doctor's "Outro". 404 for another clinic's doctor, a line the doctor does
+    not have, or any other id; 409 outside `independent` (the clinic's line carries the rule)."""
+    note = _payment_note(body.custom_payment_note)
+    professional = await _professional(session, tenant, professional_id)
+    if tenant.insurance_mode != "independent":
+        raise _mode_not_applicable(
+            "A regra de pagamento por profissional só existe no modo independente; "
+            "nos outros modos ela fica no convênio da clínica."
+        )
+    wanted = _parse_plan_id(plan_id)
+    found = None
+    for plan, entry in await list_professional_plans(session, professional.id):
+        if (entry is not None and entry.id == wanted) or (entry is None and plan.id == wanted):
+            found = (plan, entry)
+            break
+    if found is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Plan not found")
+    plan, entry = found
+    plan.custom_payment_note = note
+    await session.commit()
+    logger.info(
+        "hub_professional_payment_note_saved",
+        tenant_id=str(tenant.id),
+        professional_id=str(professional.id),
+        has_rule=note is not None,
+    )
+    return _professional_plan_read(plan, entry)

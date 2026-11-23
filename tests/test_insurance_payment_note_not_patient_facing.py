@@ -1,16 +1,14 @@
-"""TASK-090 (owner, 2026-11-22) - the "Outro" convênio has no payment text any more.
+"""TASK-090 Adendo 1 (contract C6) - the convênio payment rule is for the AI only.
 
-Owner (SPEC §3 item 2): "Texto de pagamento do convênio 'Outro': removido por completo, inclusive
-do banco. Quando o paciente perguntar a regra de pagamento do convênio, a secretária chama uma
-pessoa por e-mail." This file pins the removal half (the hand-off half is
-tests/test_handoff_insurance_payment.py):
+The owner's first ruling (2026-11-22) removed the "Outro" payment text; the Adendo (2026-11-23)
+brought it back as an OPTIONAL rule on ANY convênio line, read ONLY by the AI on demand
+(`get_insurance_payment_rule`, tests/test_insurance_payment_rule.py). What must NOT come back is
+pinned here:
 
-- the ORM no longer maps the column (it stays nullable in the database until its own DROP
-  migration, applied after this code is deployed, so an insert that never names it works);
-- creating an "Outro" (clinic or doctor) needs only the name: an older Portal that still sends the
-  note is NOT refused (the key is ignored) and the note is never echoed back;
-- no plan read carries a payment note;
-- neither the booking confirmation nor the Pix ask carries "Sobre o pagamento do convênio".
+- the patient never reads the rule outside the AI: not in the booking confirmation ("Sobre o
+  pagamento do convênio"), not in either Pix ask, not in the flow's plan snapshot (no `note`),
+  not in the Fontes import;
+- only the modules that store, write or fence the rule name the column.
 """
 
 import os
@@ -39,10 +37,8 @@ from secretaria.api.hub.deps import get_current_tenant  # noqa: E402
 from secretaria.core.database import get_session  # noqa: E402
 from secretaria.models import FlowState, Professional, Tenant  # noqa: E402
 from secretaria.models.insurance import (  # noqa: E402
-    ProfessionalInsurancePlan,
     TenantInsurancePlan,
 )
-from secretaria.schemas import insurance as insurance_schemas  # noqa: E402
 from secretaria.services import flow_router  # noqa: E402
 from secretaria.services.calendar import CalendarService  # noqa: E402
 from secretaria.services.flow_router import STEP_AWAITING_CONFIRMATION, route  # noqa: E402
@@ -62,23 +58,26 @@ OLD_NOTE = "NOTA-ANTIGA-NAO-VAZAR paga na recepção"
 
 
 # --------------------------------------------------------------------------
-# Static: the column is not mapped and nothing in the code names it
+# Static: only the store / write / fence modules name the column; nothing says BLOCK
 # --------------------------------------------------------------------------
 
+# The model, the hub schema and routes, and the one service that cleans, reads and fences it.
+NOTE_OWNERS = {
+    "models/insurance.py",
+    "schemas/insurance.py",
+    "api/hub/insurance.py",
+    "services/insurance_payment_note.py",
+}
 
-def test_the_orm_no_longer_maps_the_payment_note():
-    for model in (TenantInsurancePlan, ProfessionalInsurancePlan):
-        assert "custom_payment_note" not in model.__table__.columns
-        assert not hasattr(model, "custom_payment_note")
 
-
-def test_no_source_file_names_the_payment_note():
-    offenders = [
-        str(path.relative_to(SRC))
+def test_only_the_owners_name_the_payment_note_and_nobody_renders_the_old_block():
+    namers = {
+        path.relative_to(SRC).as_posix()
         for path in SRC.rglob("*.py")
-        if "custom_payment_note" in (text := path.read_text(encoding="utf-8")) or BLOCK in text
-    ]
-    assert offenders == []
+        if "custom_payment_note" in path.read_text(encoding="utf-8")
+    }
+    assert namers == NOTE_OWNERS
+    assert [p for p in SRC.rglob("*.py") if BLOCK in p.read_text(encoding="utf-8")] == []
 
 
 def test_the_pix_texts_take_no_payment_note():
@@ -89,23 +88,7 @@ def test_the_pix_texts_take_no_payment_note():
 
 
 # --------------------------------------------------------------------------
-# Schemas: the note is ignored on input and absent on output
-# --------------------------------------------------------------------------
-
-
-def test_plan_read_has_no_payment_note():
-    assert "custom_payment_note" not in insurance_schemas.TenantInsurancePlanRead.model_fields
-    for schema in (
-        insurance_schemas.TenantInsurancePlanCustomCreate,
-        insurance_schemas.ProfessionalInsuranceCustomCreate,
-    ):
-        assert set(schema.model_fields) == {"custom_name"}
-        parsed = schema.model_validate({"custom_name": "GEAP", "custom_payment_note": "x"})
-        assert parsed.model_dump() == {"custom_name": "GEAP"}
-
-
-# --------------------------------------------------------------------------
-# The hub over HTTP
+# The hub over HTTP: a custom POST without a rule keeps working for any role
 # --------------------------------------------------------------------------
 
 
@@ -151,21 +134,19 @@ async def hub(db):
     app.dependency_overrides.pop(get_current_tenant, None)
 
 
-@pytest.mark.parametrize("old_portal", [False, True])
-async def test_create_clinic_custom_plan_without_note_201(
-    client: AsyncClient, hub, db, old_portal
-):
+@pytest.mark.parametrize("blank", [None, "   "])
+async def test_create_clinic_custom_plan_without_note_201(client: AsyncClient, hub, db, blank):
+    """No rule (absent, null or blank): the old role-blind POST, the rule reads back null."""
     body = {"custom_name": "GEAP"}
-    if old_portal:
-        body["custom_payment_note"] = OLD_NOTE  # an older Portal: ignored, never a 422
+    if blank is not None:
+        body["custom_payment_note"] = blank
     created = await client.post("/tenants/me/insurance-plans/custom", json=body)
     assert created.status_code == 201, created.text
     assert created.json()["name"] == "GEAP" and created.json()["is_custom"] is True
-    assert "custom_payment_note" not in created.json()
+    assert created.json()["custom_payment_note"] is None
     listed = await client.get("/tenants/me/insurance-plans")
     assert listed.status_code == 200
-    assert all("custom_payment_note" not in plan for plan in listed.json())
-    assert OLD_NOTE not in created.text + listed.text
+    assert [plan["custom_payment_note"] for plan in listed.json()] == [None]
     async with db() as session:
         names = (
             await session.scalars(
@@ -175,10 +156,7 @@ async def test_create_clinic_custom_plan_without_note_201(
     assert names == ["GEAP"]
 
 
-@pytest.mark.parametrize("old_portal", [False, True])
-async def test_create_professional_custom_plan_without_note_201(
-    client: AsyncClient, hub, db, old_portal
-):
+async def test_create_professional_custom_plan_without_note_201(client: AsyncClient, hub, db):
     async with db() as session:
         tenant = await session.get(Tenant, hub)
         tenant.insurance_mode = "independent"
@@ -186,19 +164,28 @@ async def test_create_professional_custom_plan_without_note_201(
         session.add(doctor)
         await session.commit()
     body = {"custom_name": "Plano da Ana"}
-    if old_portal:
-        body["custom_payment_note"] = OLD_NOTE
     created = await client.post(
         f"/tenants/me/professionals/{doctor.id}/insurance-plans/custom", json=body
     )
     assert created.status_code in (200, 201), created.text
-    assert "custom_payment_note" not in created.json()
+    assert created.json()["custom_payment_note"] is None
     got = await client.get(f"/tenants/me/professionals/{doctor.id}/insurance-plans")
     assert got.status_code == 200, got.text
     selectable = got.json()["selectable"]
     assert any(plan["name"] == "Plano da Ana" for plan in selectable)
-    assert all("custom_payment_note" not in plan for plan in selectable)
-    assert OLD_NOTE not in created.text + got.text
+    assert all(plan["custom_payment_note"] is None for plan in selectable)
+
+
+async def test_a_custom_post_with_a_rule_needs_a_manager_claim(client: AsyncClient, hub):
+    """This fixture authenticates without a role claim: a rule is refused (fail closed),
+    nothing is created."""
+    created = await client.post(
+        "/tenants/me/insurance-plans/custom",
+        json={"custom_name": "GEAP", "custom_payment_note": "Reembolso em 30 dias."},
+    )
+    assert created.status_code == 401
+    listed = await client.get("/tenants/me/insurance-plans")
+    assert listed.json() == []
 
 
 async def test_the_flow_snapshot_plans_carry_no_note(db):
@@ -208,12 +195,21 @@ async def test_the_flow_snapshot_plans_carry_no_note(db):
         )
         session.add(tenant)
         await session.flush()
-        session.add(TenantInsurancePlan(tenant_id=tenant.id, catalog_id=UNIMED))
-        session.add(TenantInsurancePlan(tenant_id=tenant.id, custom_name="GEAP"))
+        session.add(
+            TenantInsurancePlan(
+                tenant_id=tenant.id, catalog_id=UNIMED, custom_payment_note=OLD_NOTE
+            )
+        )
+        session.add(
+            TenantInsurancePlan(
+                tenant_id=tenant.id, custom_name="GEAP", custom_payment_note=OLD_NOTE
+            )
+        )
         await session.commit()
         insurance = await load_tenant_insurance(session, tenant.id)
     assert sorted(plan["name"] for plan in insurance.plans) == ["GEAP", "Unimed"]
     assert all("note" not in plan for plan in insurance.plans)
+    assert OLD_NOTE not in repr(insurance)
 
 
 # --------------------------------------------------------------------------

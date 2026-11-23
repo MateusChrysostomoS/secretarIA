@@ -54,6 +54,7 @@ ALL_TOOL_NAMES = frozenset(
         "get_availability",
         "get_service_info",
         "offer_human_handoff",
+        "get_insurance_payment_rule",
     }
 )
 # The largest v2 set a turn can have (every addon on): tests/test_ai_toolset_v2.py. Since the
@@ -72,6 +73,7 @@ V2_FULL = frozenset(
         "get_availability",
         "get_service_info",
         "offer_human_handoff",
+        "get_insurance_payment_rule",
         "create_event",
         "cancel_event",
     }
@@ -83,6 +85,8 @@ V2_FULL = frozenset(
 # TASK-072 (2026-10-29): 12,000 -> 12,500 for the fixed "AO RESPONDER" block (~400 characters).
 # TASK-090 (2026-11-22): 12,500 -> 12,700 for the owner's unconditional convênio payment-rule
 # hand-off on the request_human_handoff line (prompts_v2.INSURANCE_PAYMENT_HANDOFF_RULE_V2).
+# TASK-090 Adendo 1 (2026-11-23): the get_insurance_payment_rule line fits UNDER the same ceiling
+# (12,685 measured) - the hand-off clause was shortened to make room, the ceiling did not move.
 PROMPT_V2_MAX_CHARS = 12_700
 
 _REAL_CLINIC_TODAY = prompts_v2._clinic_today

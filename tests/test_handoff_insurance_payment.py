@@ -214,7 +214,13 @@ def _config(plans: int) -> TenantRuntimeConfig:
 
 
 V2_NAMES = frozenset(
-    {"set_booking_draft", "show_main_menu", "request_human_handoff", "offer_human_handoff"}
+    {
+        "set_booking_draft",
+        "show_main_menu",
+        "request_human_handoff",
+        "offer_human_handoff",
+        "get_insurance_payment_rule",
+    }
 )
 
 
@@ -232,10 +238,24 @@ def test_prompt_tells_model_to_hand_off_on_insurance_payment_rules(monkeypatch, 
     for prompt in (v1, v2):
         assert (prompts.INSURANCE_PAYMENT_HANDOFF in prompt) is bool(plans)
     rule = prompts.INSURANCE_PAYMENT_HANDOFF_RULE
-    for words in ("reembolso", "coparticipação", "não explique", f'reason "{REASON}"'):
+    for words in (
+        "reembolso",
+        "coparticipação",
+        "get_insurance_payment_rule",
+        "explique só o que ela diz",
+        "sem regra, não explique",
+        f'reason "{REASON}"',
+    ):
         assert words in rule
-    for words in ("reembolso", "coparticipação", "cobertura", f'reason "{REASON}"', "sem explicar"):
+    # v2 (TASK-090 Adendo 1): the read tool's own line, then the hand-off only without a rule.
+    v2_rule_line = next(
+        line for line in v2.splitlines() if line.startswith("- get_insurance_payment_rule")
+    )
+    assert v2_rule_line == prompts_v2.INSURANCE_PAYMENT_RULE_V2
+    for words in ("reembolso", "coparticipação", "cobertura", "só a regra devolvida"):
+        assert words in prompts_v2.INSURANCE_PAYMENT_RULE_V2
+    for words in ("Convênio sem regra", f'reason "{REASON}"', "sem explicar"):
         assert words in prompts_v2.INSURANCE_PAYMENT_HANDOFF_RULE_V2
     full = prompts.INSURANCE_PAYMENT_HANDOFF
-    for words in ("não explique", "não dê exemplos", "request_human_handoff", REASON):
+    for words in ("Não invente", "não dê exemplos", "get_insurance_payment_rule", REASON):
         assert words in full

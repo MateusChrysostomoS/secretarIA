@@ -106,14 +106,14 @@ def test_an_old_clients_flag_is_ignored_on_every_input():
     )
     assert plan.model_dump() == {"catalog_id": str(UNIMED)}
     clinic_other = insurance_schemas.TenantInsurancePlanCustomCreate.model_validate(
-        {"custom_name": "GEAP", "custom_payment_note": "Na recepção.", "charge_deposit": False}
+        {"custom_name": "GEAP", "charge_deposit": False}
     )
-    # TASK-090: the old client's "Outro" payment note is ignored the same way.
-    assert clinic_other.model_dump() == {"custom_name": "GEAP"}
+    # TASK-090 Adendo 1 (C6): the payment rule is an optional field again (None when absent).
+    assert clinic_other.model_dump() == {"custom_name": "GEAP", "custom_payment_note": None}
     doctor_other = insurance_schemas.ProfessionalInsuranceCustomCreate.model_validate(
-        {"custom_name": "Plano", "custom_payment_note": "Nota.", "charge_deposit": True}
+        {"custom_name": "Plano", "charge_deposit": True}
     )
-    assert doctor_other.model_dump() == {"custom_name": "Plano"}
+    assert doctor_other.model_dump() == {"custom_name": "Plano", "custom_payment_note": None}
 
 
 def test_a_typo_is_still_refused():
@@ -187,11 +187,7 @@ async def test_hub_plans_no_longer_mention_the_flag_and_an_old_flag_is_ignored(
     assert saved.status_code == 200, saved.text
     custom = await client.post(
         "/tenants/me/insurance-plans/custom",
-        json={
-            "custom_name": "GEAP",
-            "custom_payment_note": "Na recepção.",
-            "charge_deposit": False,
-        },
+        json={"custom_name": "GEAP", "charge_deposit": False},
     )
     assert custom.status_code == 201, custom.text
     listed = await client.get("/tenants/me/insurance-plans")
@@ -217,11 +213,7 @@ async def test_hub_doctor_plans_no_longer_mention_the_flag(client: AsyncClient, 
         await session.commit()
     created = await client.post(
         f"/tenants/me/professionals/{doctor.id}/insurance-plans/custom",
-        json={
-            "custom_name": "Plano da Ana",
-            "custom_payment_note": "Nota.",
-            "charge_deposit": False,
-        },
+        json={"custom_name": "Plano da Ana", "charge_deposit": False},
     )
     assert created.status_code in (200, 201), created.text
     got = await client.get(f"/tenants/me/professionals/{doctor.id}/insurance-plans")

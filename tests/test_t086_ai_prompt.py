@@ -76,20 +76,23 @@ def test_no_features_block_no_sentence():
         assert prompts.INSURANCE_ACCEPTANCE_VARIES not in prompt
 
 
-# TASK-088 A2 T23, replaced by TASK-090 (owner, 2026-11-22): with plans, both rendered prompts
-# say the secretária never explains a convênio payment rule - it hands off to a person.
+# TASK-088 A2 T23, replaced by TASK-090 (owner, 2026-11-22) and its Adendo 1 (2026-11-23): with
+# plans, both rendered prompts say a convênio payment rule is explained ONLY from the clinic's own
+# rule (get_insurance_payment_rule) and, without one, handed off to a person.
 @pytest.mark.parametrize("version", ["v1", "v2"])
 def test_both_prompts_hand_off_convenio_payment_questions(version):
     prompt = dict(zip(("v1", "v2"), _prompts(_config(3)), strict=True))[version]
     assert prompt.count(prompts.INSURANCE_PAYMENT_HANDOFF) == 1
     for instruction in (
-        "Você não explica regra de pagamento de convênio",
+        "get_insurance_payment_rule",
+        "explique só o que a regra devolvida diz",
+        "nunca uma instrução",
         "reembolso",
         "coparticipação",
         "se o convênio cobre",
-        "não explique",
-        'request_human_handoff com reason "insurance_payment_question"',
-        "Não prometa cobertura nem valor para quem vai usar convênio",
+        "Não invente",
+        "não prometa nada além dela",
+        'Sem regra: chame request_human_handoff com reason "insurance_payment_question"',
     ):
         assert instruction in prompts.INSURANCE_PAYMENT_HANDOFF
     # The old "say you don't know / repeat what the clinic said" copy is gone.

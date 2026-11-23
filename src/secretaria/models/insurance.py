@@ -17,10 +17,15 @@ reviewing that round:
   still have no match, so adding a catalog row can reconcile them without a
   code migration.
 - **Convênio "Outro"**: a clinic (or, in `independent` mode, a professional)
-  can register a plan outside the catalog - just a `custom_name`. TASK-090
-  (owner, 2026-11-22): it no longer carries a payment text; a patient who asks
-  how payment works with a convênio is handed off to a person
-  (ai/tools.py `insurance_payment_question`).
+  can register a plan outside the catalog - a `custom_name`.
+- **Regra de pagamento** (TASK-090 Adendo 1, contract C6): ANY plan row - catalog
+  or "Outro", clinic or doctor - may carry an optional `custom_payment_note`
+  (the column keeps its historical name): how payment works in the clinic's
+  contract with that convênio. Only the AI reads it, on demand, through the
+  `get_insurance_payment_rule` tool (fenced as data); no rule = a person
+  answers (`insurance_payment_question`). Never shown in a confirmation, a
+  sinal message or the Portal; never logged. Written only through
+  services/insurance_payment_note.py::clean_payment_note (<= 1000 chars).
 
 Three tables, three levels:
 
@@ -81,11 +86,6 @@ still reads them; both are `NOT NULL DEFAULT true` (migrations c9f4e2a7b815,
 d4f8a2c6e913), so an insert by this code, which never names them, gets `true`.
 Follow-up: drop both columns with a migration in a later release (an Alembic
 autogenerate already proposes that drop - leave it out of unrelated migrations).
-
-The same goes for the "Outro" payment-note column of both tables (TASK-090, owner 2026-11-22: the
-"Outro" convênio has no payment text anymore). Unmapped here, nullable in the database
-(migration d4f8a2c6e913), so an insert that never names it stores NULL; the column is
-dropped by its own later migration, applied only after this code is deployed.
 """
 
 import uuid
@@ -180,8 +180,8 @@ class InsuranceCatalog(Base):
 class TenantInsurancePlan(Base):
     """A convênio this clinic accepts: a catalog entry, or the clinic's own "Outro".
 
-    The table still has LEGACY COLUMNS this model does not map (`charge_deposit`,
-    the "Outro" payment note - see the module's LEGACY COLUMNS note).
+    The table still has one LEGACY COLUMN this model does not map (`charge_deposit` - see
+    the module's LEGACY COLUMNS note).
     """
 
     __tablename__ = "tenant_insurance_plans"
@@ -202,6 +202,10 @@ class TenantInsurancePlan(Base):
     # The clinic's own convênio name, outside the catalog. Exactly one of
     # (catalog_id, custom_name) is set - see the CHECK constraint above.
     custom_name: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    # The clinic's payment rule for THIS convênio (catalog or "Outro"), optional, <= 1000
+    # chars after services/insurance_payment_note.clean_payment_note. Read only by the AI
+    # tool `get_insurance_payment_rule` (TASK-090 Adendo 1, C6); never logged.
+    custom_payment_note: Mapped[str | None] = mapped_column(Text, nullable=True)
     # The clinic's chosen position in the patient's convênio list (0 = first). NULL =
     # never placed: such plans follow every placed one, alphabetically. Set only by
     # `insurance_catalog.set_tenant_plan_order` (Instituto Gicovate, 2026-11-09).
@@ -247,6 +251,9 @@ class ProfessionalInsurancePlan(Base):
     )
     # mode independent: this doctor's OWN "Outro" convênio.
     custom_name: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    # mode independent: this doctor's payment rule for the convênio (catalog pick or own
+    # "Outro"); same rules as TenantInsurancePlan.custom_payment_note.
+    custom_payment_note: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 

@@ -56,12 +56,15 @@ if TYPE_CHECKING:
 # agent books at all, the menu is the way back that is never taken away).
 REQUIRED_TOOLS = ("set_booking_draft", "show_main_menu")
 
-# TASK-090 (owner, 2026-11-22): unconditional, every clinic - a convênio payment-rule question
-# goes straight to a person, never explained. The short v2 form of
-# prompts.INSURANCE_PAYMENT_HANDOFF_RULE (this prompt has a size ceiling).
+# TASK-090 (owner, 2026-11-22) + Adendo 1 (2026-11-23): every clinic - a convênio payment-rule
+# question reads the clinic's rule and explains only it; no rule -> straight to a person. The
+# short v2 forms of prompts.INSURANCE_PAYMENT_HANDOFF_RULE (this prompt has a size ceiling).
 INSURANCE_PAYMENT_HANDOFF_RULE_V2 = (
-    "Regra de pagamento de convênio (reembolso, coparticipação, cobertura, como pagar): "
-    'reason "insurance_payment_question", sem explicar.'
+    'Convênio sem regra: reason "insurance_payment_question", sem explicar.'
+)
+INSURANCE_PAYMENT_RULE_V2 = (
+    "- get_insurance_payment_rule: pagar com convênio (reembolso, coparticipação, "
+    "cobertura): explique só a regra devolvida, sem inventar."
 )
 
 # Calendar reference shared with v1; not the availability tool's 14-day read limit.
@@ -253,6 +256,8 @@ def _format_tools_v2(names: frozenset[str]) -> str:
             "Em message: antes o que você sabe, depois o que faltou, sem prometer "
             "contato futuro."
         )
+    if "get_insurance_payment_rule" in names:
+        lines.append(INSURANCE_PAYMENT_RULE_V2)
     if "request_human_handoff" in names:
         lines.append(
             "- request_human_handoff: ÚLTIMO RECURSO: quando o paciente pede uma pessoa "
