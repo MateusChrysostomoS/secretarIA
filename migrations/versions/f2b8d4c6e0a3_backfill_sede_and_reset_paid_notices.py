@@ -17,8 +17,11 @@ Data only (no schema change), idempotent:
 This file is self-contained on purpose: the helpers below are copies, the migration must keep
 working as the app code evolves (never import from `secretaria`).
 
-DEPLOY ORDER (aditivas -> app -> DROP): runs with the other additive revisions, before the API
-and worker; the later DROP revision goes last.
+DEPLOY ORDER: runs with the other additive revisions (`alembic upgrade head` = a3c9e5d7f1b4),
+before the API and the worker. (The DROP of `custom_payment_note` once planned after it was
+deleted by TASK-090 Adendo 1: that column stays.) A Sede created here usually has no CEP, so it
+is INCOMPLETE and, until a manager completes it, the secretária does not answer that clinic
+(Adendo 1 §A).
 
 Downgrade restores NOTHING: it does not remove the Sede (by then it is ordinary clinic data,
 possibly edited) and it cannot bring back the old `true` flags (the previous value is not kept).

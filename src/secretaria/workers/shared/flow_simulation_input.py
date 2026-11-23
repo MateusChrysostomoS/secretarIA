@@ -27,6 +27,7 @@ from secretaria.services.list_options import needs_unit_options
 from secretaria.services.service_catalog import load_service_catalog, resolve_entries
 from secretaria.services.tenant_config import (
     list_active_professionals,
+    list_patient_professionals,
     professional_business_hours,
 )
 from secretaria.services.unit_booking import attach_unit_options
@@ -73,7 +74,8 @@ async def load_simulation_inputs(
     draft_professional: dict | None = None,
 ) -> SimulationInputs:
     """READ-ONLY. Never commits; never touches the ORM objects it is given."""
-    rows = await list_active_professionals(session, tenant.id)
+    # What the patient is offered (TASK-090 Adendo 1): the simulation and the Portal options.
+    rows = await list_patient_professionals(session, tenant.id)
     catalog = await load_service_catalog(session, tenant.id)
     insurance = await load_tenant_insurance(session, tenant.id)
 

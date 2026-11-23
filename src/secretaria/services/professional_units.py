@@ -107,6 +107,57 @@ async def has_usable_units(session: AsyncSession, tenant_id: UUID) -> bool:
     return any(unit_is_usable(unit) for unit in await active_units(session, tenant_id))
 
 
+async def patient_hidden_professional_ids(
+    session: AsyncSession, tenant_id: UUID, professional_ids: Iterable[UUID]
+) -> set[UUID]:
+    """Professionals a PATIENT must not be offered (TASK-090 Adendo 1, owner ruling on I1):
+    they HAVE unit links (any state) to units of this tenant, but none of them is an active
+    link to a USABLE unit (`unit_is_usable`). A professional with NO link at all is not hidden
+    (the legacy "agenda without a unit"). One query for the whole roster."""
+    ids = list(professional_ids)
+    if not ids:
+        return set()
+    rows = await session.execute(
+        select(ProfessionalUnit, Unit)
+        .join(Unit, Unit.id == ProfessionalUnit.unit_id)
+        .where(ProfessionalUnit.professional_id.in_(ids), Unit.tenant_id == tenant_id)
+    )
+    linked: set[UUID] = set()
+    usable: set[UUID] = set()
+    for link, unit in rows.all():
+        linked.add(link.professional_id)
+        if link.is_active and unit_is_usable(unit):
+            usable.add(link.professional_id)
+    return linked - usable
+
+
+async def patient_visible_professionals(
+    session: AsyncSession, tenant_id: UUID, professionals: Sequence[Professional]
+) -> list[Professional]:
+    """`professionals` minus the ones `patient_hidden_professional_ids` hides, order kept.
+
+    THE filter behind every roster a patient books from (tenant_config.
+    list_patient_professionals). Existing appointments keep resolving their doctor through the
+    full active roster, so a hidden doctor's consultations behave like a deactivated doctor's.
+    """
+    hidden = await patient_hidden_professional_ids(
+        session, tenant_id, [professional.id for professional in professionals]
+    )
+    return [professional for professional in professionals if professional.id not in hidden]
+
+
+async def clinic_servable(session: AsyncSession, tenant_id: UUID) -> bool:
+    """Whether the secretária may answer this clinic at all (Adendo 1 §A + I1): it has a
+    USABLE unit and, when it has active professionals, at least one a patient may book with
+    (a clinic whose every doctor is hidden would otherwise fall back to the clinic agenda)."""
+    if not await has_usable_units(session, tenant_id):
+        return False
+    roster = await cfg.list_active_professionals(session, tenant_id)
+    if not roster:
+        return True
+    return bool(await patient_visible_professionals(session, tenant_id, roster))
+
+
 async def links_by_unit(
     session: AsyncSession, professional_id: UUID
 ) -> dict[UUID, ProfessionalUnit]:

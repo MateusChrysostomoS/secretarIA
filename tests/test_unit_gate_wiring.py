@@ -58,3 +58,33 @@ async def test_the_attachment_receipt_honours_the_unit_gate(monkeypatch, wired, 
     monkeypatch.setattr(workers_ns, "reply_blocked_no_usable_unit", _gate)
     await attachments._handle_attachment_received(_reply())
     assert wired == ([] if blocked else [attachments.ATTACHMENT_RECEIVED_MESSAGE])
+
+
+@pytest.mark.parametrize("blocked", [True, False])
+async def test_the_greeting_button_degrade_honours_the_unit_gate(monkeypatch, blocked) -> None:
+    from secretaria.workers.shared import actions
+
+    tenant = SimpleNamespace(id=uuid4())
+    conversation = SimpleNamespace(tenant_id=tenant.id)
+    sent: list[str] = []
+
+    class _Rows(_Session):
+        async def get(self, model, _id):  # noqa: ANN001
+            return conversation if model.__name__ == "Conversation" else tenant
+
+    async def _token(_session, _tenant_id):  # noqa: ANN001
+        return "tok"
+
+    async def _send(_to, body, *, client):  # noqa: ANN001
+        sent.append(body)
+
+    async def _gate(*_args, **_kwargs) -> bool:
+        return blocked
+
+    monkeypatch.setattr(workers_ns, "async_session_factory", lambda: _Rows(tenant))
+    monkeypatch.setattr(workers_ns, "get_waba_token", _token)
+    monkeypatch.setattr(actions, "_reply_sender", lambda *_a: object())
+    monkeypatch.setattr(actions, "_send_simple_text", _send)
+    monkeypatch.setattr(workers_ns, "reply_blocked_no_usable_unit", _gate)
+    await actions._handle_greeting_button_unavailable(_reply(), "x")
+    assert (sent == []) is blocked

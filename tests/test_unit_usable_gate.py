@@ -219,3 +219,17 @@ async def test_the_gate_fails_open_when_the_check_fails(monkeypatch) -> None:
 
 async def test_the_gate_without_a_tenant_leaves_the_decision_to_the_callers_gates() -> None:
     assert not await unit_gate.reply_blocked_no_usable_unit(None)
+
+
+async def test_the_gate_reuses_an_answer_the_turn_already_read(monkeypatch) -> None:
+    """Review M11: the main turn passes what its own load read; no second query."""
+
+    def _no_session():
+        raise AssertionError("the gate must not open a session when the answer is known")
+
+    monkeypatch.setattr(unit_gate, "async_session_factory", _no_session)
+    seen = _capture(monkeypatch)
+    tenant_id = uuid4()
+    assert not await unit_gate.reply_blocked_no_usable_unit(tenant_id, known_servable=True)
+    assert await unit_gate.reply_blocked_no_usable_unit(tenant_id, known_servable=False)
+    assert [event for event, _ in seen] == ["bot_reply_suppressed_no_complete_unit"]

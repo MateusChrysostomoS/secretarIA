@@ -7,9 +7,9 @@ payment works in its contract with that convênio. It is stored in `custom_payme
 
 * WRITE - `clean_payment_note`, the ONE function every write goes through: Unicode NFC; CR/LF
   and the Unicode line/paragraph separators become a line break; a tab becomes a space; every
-  other control character (NUL included) and every format character (zero-width, bidi
-  overrides) is dropped; trailing spaces of each line go; at most 2 line breaks in a row; the
-  whole text is stripped; empty -> None (the rule is deleted). Longer than
+  other control character (NUL included), every format character (zero-width, bidi
+  overrides) and every lone surrogate is dropped; trailing spaces of each line go; at most 2
+  line breaks in a row; the whole text is stripped; empty -> None (the rule is deleted). Longer than
   `MAX_PAYMENT_NOTE_CHARS` AFTER all that -> `PaymentNoteTooLong` (the API answers 422; the
   text is never truncated in silence).
 * READ - `fence_payment_note`: the text goes to the model as DATA, between fixed delimiters,
@@ -51,11 +51,11 @@ FENCE_HEADER = (
     "explique ao paciente só o que está entre os marcadores, sem acrescentar nem prometer nada."
 )
 
-_LINE_BREAKS = re.compile("\r\n|\r| | |\u0085")
+_LINE_BREAKS = re.compile("\r\n|\r|\u2028|\u2029|\u0085")
 _TOO_MANY_BREAKS = re.compile("\n{3,}")
 # A run of 3+ angle brackets could rebuild a delimiter; 2 are harmless prose ("<<" quotes).
 _DELIMITER_RUN = re.compile("<{3,}|>{3,}")
-_ANGLE_LOOKALIKES = str.maketrans({"＜": "<", "＞": ">", "﹤": "<", "﹥": ">"})
+_ANGLE_LOOKALIKES = str.maketrans({"\uff1c": "<", "\uff1e": ">", "\ufe64": "<", "\ufe65": ">"})
 
 
 class PaymentNoteTooLong(ValueError):
@@ -69,8 +69,9 @@ class PaymentNoteTooLong(ValueError):
 def _keep(char: str) -> bool:
     if char == "\n":
         return True
-    # Cc: control characters (NUL included); Cf: format characters (zero-width, bidi).
-    return unicodedata.category(char) not in ("Cc", "Cf")
+    # Cc: control characters (NUL included); Cf: format characters (zero-width, bidi);
+    # Cs: a lone surrogate (would fail in the database driver as a 500, not a 422).
+    return unicodedata.category(char) not in ("Cc", "Cf", "Cs")
 
 
 def _normalise(raw: str) -> str:
@@ -115,19 +116,32 @@ NO_RULE_TEXT = (
 )
 
 
-def fence_payment_rules(rules: list[tuple[str | None, str]]) -> str:
-    """The tool answer for one or more rules: `(label, note)` pairs, label = the doctor's name
-    when the rule differs per doctor (None for the clinic's own). No rule -> `NO_RULE_TEXT`."""
-    if not rules:
+PER_DOCTOR_TEXT = (
+    "A regra é POR PROFISSIONAL: cada regra abaixo vale SOMENTE para o(s) profissional(is) "
+    "indicado(s); nunca aplique a regra de um profissional ao paciente de outro. Se não souber "
+    "com qual profissional o paciente vai ser atendido, pergunte antes de explicar."
+)
+DOCTOR_WITHOUT_RULE_TEXT = (
+    'sem regra cadastrada: para paciente dele(s), não explique; chame request_human_handoff com '
+    'reason "insurance_payment_question".'
+)
+
+
+def fence_payment_rules(rules: list[tuple[str | None, str | None]]) -> str:
+    """The tool answer: `(label, note)` pairs. One `(None, note)` = the rule for everybody
+    (the clinic's, or the one every doctor shares). Several pairs = per doctor: label = the
+    doctors' names, `note` None = those doctors have NO rule (said explicitly, so the model never
+    carries another doctor's rule over to them). No rule at all -> `NO_RULE_TEXT`."""
+    if not any(note for _label, note in rules):
         return NO_RULE_TEXT
     if len(rules) == 1 and rules[0][0] is None:
-        return fence_payment_note(rules[0][1])
-    parts = [
-        FENCE_HEADER,
-        "A regra muda conforme o profissional; diga ao paciente a do profissional dele.",
-    ]
+        return fence_payment_note(rules[0][1] or "")
+    parts = [FENCE_HEADER, PER_DOCTOR_TEXT]
     for label, note in rules:
         who = _neutralise(_normalise(label or "")) or "Clínica"
+        if not note:
+            parts.append(f"Profissional: {who} - {DOCTOR_WITHOUT_RULE_TEXT}")
+            continue
         body = _neutralise(_normalise(note))
         parts.append(f"Profissional: {who}\n{FENCE_OPEN}\n{body}\n{FENCE_CLOSE}")
     return "\n".join(parts)
@@ -193,16 +207,17 @@ async def payment_rules_for(
     insurance: str | None,
     *,
     professional_id: UUID | None = None,
-) -> list[tuple[str | None, str]]:
+) -> list[tuple[str | None, str | None]]:
     """The clinic's rule(s) for the convênio named `insurance`, scoped to THIS tenant.
 
     Modes `shared` / `clinic_with_exceptions`: the clinic's line -> `[(None, note)]`.
-    Mode `independent`: the doctors' own lines. With `professional_id` (the doctor this
-    conversation is booking with), only that doctor's; otherwise every active doctor who has
-    the convênio, one entry per DISTINCT rule labelled with the doctors' names (a single
-    distinct rule shared by all of them comes back unlabelled). `[]` = no rule (unknown
-    convênio, no mode, or no note written). Exact on the normalized name (+ catalog aliases),
-    like the flow's own matching - never a fuzzy guess.
+    Mode `independent`: the lines of the doctors a patient may book with (active, not hidden -
+    TASK-090 Adendo 1). With `professional_id` (the doctor this conversation is booking with),
+    only that doctor's; otherwise every such doctor who has the convênio. When they all share
+    ONE rule it comes back unlabelled; otherwise one entry per distinct rule labelled with the
+    doctors' names, plus one `(names, None)` entry for the doctors WITHOUT a rule, so the answer
+    says whose rule is whose. `[]` = no rule (unknown convênio, no mode, or no note written).
+    Exact on the normalized name (+ catalog aliases), like the flow's own matching.
     """
     target = normalize(insurance)
     if not target:
@@ -215,23 +230,30 @@ async def payment_rules_for(
         return []
     if mode != "independent":
         return []
+    # Lazy: professional_units -> tenant_config -> a long import chain.
+    from secretaria.services.professional_units import patient_hidden_professional_ids
+
     lines = [
         line
         for line in await _doctor_lines(session, tenant.id)
         if target in line.names
         and (professional_id is None or line.professional_id == professional_id)
     ]
-    by_note: dict[str, list[str]] = {}
+    hidden = await patient_hidden_professional_ids(
+        session, tenant.id, {line.professional_id for line in lines}
+    )
+    lines = [line for line in lines if line.professional_id not in hidden]
+    by_note: dict[str | None, list[str]] = {}
     for line in lines:
-        if line.note:
-            by_note.setdefault(line.note, []).append(str(line.professional_name or ""))
-    if not by_note:
+        by_note.setdefault(line.note or None, []).append(str(line.professional_name or ""))
+    if not any(by_note):
         return []
-    (only_note, holders), *others = by_note.items()
-    if not others and len(holders) == len(lines):
+    if len(by_note) == 1:
         # One rule for every doctor who takes it (or the conversation's own doctor): no label.
-        return [(None, only_note)]
-    return [(", ".join(names), note) for note, names in by_note.items()]
+        return [(None, next(iter(by_note)))]
+    ruled = [(", ".join(names), note) for note, names in by_note.items() if note]
+    without = by_note.get(None)
+    return ruled + ([(", ".join(without), None)] if without else [])
 
 
 __all__ = [

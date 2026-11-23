@@ -54,7 +54,7 @@ from secretaria.services.flow_router import (
 from secretaria.services.flow_units import STEP_AWAITING_UNIT, STEP_AWAITING_UNIT_CONFIRM
 from secretaria.services.insurance_catalog import load_tenant_insurance
 from secretaria.services.service_catalog import load_service_catalog
-from secretaria.services.tenant_config import list_active_professionals
+from secretaria.services.tenant_config import list_patient_professionals
 from secretaria.services.unit_booking import attach_unit_options
 from secretaria.workers.shared.channel_policy import policy_for
 from secretaria.workers.shared.context import _ReplyContext
@@ -122,7 +122,8 @@ async def _load_draft_context(reply: _ReplyContext, tenant: Tenant) -> DraftCont
         if tenant is None:
             return None
         snapshot = _conversation_flow_snapshot(conversation)
-        professional_rows = await list_active_professionals(session, tenant.id)
+        # A new booking: only the doctors a patient may book with (TASK-090 Adendo 1).
+        professional_rows = await list_patient_professionals(session, tenant.id)
         service_catalog = await load_service_catalog(session, tenant.id)
         tenant_insurance = await load_tenant_insurance(session, tenant.id)
         active_units = await session.scalar(

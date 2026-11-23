@@ -55,6 +55,7 @@ from secretaria.services.service_catalog import (
 from secretaria.services.tenant_config import (
     get_waba_token,
     list_active_professionals,
+    list_patient_professionals,
     load_tenant_config,
     resolve_professional_calendar,
 )
@@ -98,6 +99,7 @@ from secretaria.workers.shared.service_change_actions import (
 from secretaria.workers.shared.text import (
     _as_utc,
 )
+from secretaria.workers.shared.unit_gate import reply_blocked_no_usable_unit
 
 logger = get_logger(__name__)
 
@@ -505,7 +507,8 @@ async def _handle_action_button(
                     body="Para remarcar, entre em contato com a nossa equipe.",
                 )
                 return
-            professional_rows = await list_active_professionals(session, tenant.id)
+            # A rebooking is a NEW booking: the patient roster (TASK-090 Adendo 1).
+            professional_rows = await list_patient_professionals(session, tenant.id)
             # TASK-085 T8 (b) + TASK-087 P1: the router-shaped roster with each doctor's units,
             # per-service unit marks and per-unit terms (price/duration/blocked days), like the
             # turn snapshot - the rebooked day list is read at the unit.
@@ -728,5 +731,7 @@ async def _handle_greeting_button_unavailable(reply: _ReplyContext, suffix: str)
         client = _reply_sender(reply, tenant, waba_token)
     if client is None:
         return  # fail closed - never on the global scaffold (PROMPT_FIX_21)
+    if await reply_blocked_no_usable_unit(tenant.id, conversation_id=reply.conversation_id):
+        return
     text = _GREETING_ACTION_UNAVAILABLE_TEXT.get(suffix, _GREETING_ACTION_UNAVAILABLE_DEFAULT)
     await _send_simple_text(reply.patient_ref, text, client=client)

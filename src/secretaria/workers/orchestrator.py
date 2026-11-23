@@ -102,7 +102,10 @@ from secretaria.services.pending_identity import (
     request_code,
     verify_code,
 )
-from secretaria.services.professional_units import has_usable_units as clinic_has_active_units
+from secretaria.services.professional_units import (
+    has_usable_units as clinic_has_active_units,
+    patient_visible_professionals,
+)
 from secretaria.services.sensitive_claim_guard import guard_reply
 from secretaria.services.service_catalog import (
     load_service_catalog,
@@ -399,6 +402,9 @@ async def _send_bot_reply_inner(reply: _ReplyContext, redis=None) -> None:
     # TASK-090: units are core, so the unit tools/prompt switch on from the clinic's own data
     # (>= 1 USABLE unit: active + complete address, Adendo 1 §A).
     has_active_units = False
+    # The reply gate's answer read in THIS turn's load (Adendo 1 §A + I1): True/False when the
+    # read succeeded, None when it failed or never ran - the gate then reads it itself.
+    clinic_ready: bool | None = None
     flow_professionals: list[SimpleNamespace] | None = None
     selected_professional: SimpleNamespace | None = None
     flow_calendar: CalendarService | None = None
@@ -480,8 +486,10 @@ async def _send_bot_reply_inner(reply: _ReplyContext, redis=None) -> None:
                     try:
                         async with session.begin_nested():
                             has_active_units = await clinic_has_active_units(session, tenant.id)
+                        clinic_ready = has_active_units
                     except Exception as exc:
                         has_active_units = False
+                        clinic_ready = None
                         logger.warning(
                             "worker_active_units_check_failed",
                             error=type(exc).__name__,
@@ -503,21 +511,30 @@ async def _send_bot_reply_inner(reply: _ReplyContext, redis=None) -> None:
                     # clinic's plans and which doctor takes which, so the pure
                     # router can mark doctors without a query of its own.
                     tenant_insurance = await load_tenant_insurance(session, tenant.id)
-                    flow_professionals = _flow_professionals(professional_rows, service_catalog)
+                    # TASK-090 Adendo 1 (owner ruling): the router and the agent offer only
+                    # the doctors a patient may book with - not one whose unit links are all
+                    # unusable. `professional_rows` (every active doctor) keeps resolving the
+                    # agendas of existing consultations.
+                    patient_rows = await patient_visible_professionals(
+                        session, tenant.id, professional_rows
+                    )
+                    if clinic_ready and professional_rows and not patient_rows:
+                        # Every doctor is hidden: nobody a patient could book with.
+                        clinic_ready = False
+                    flow_professionals = _flow_professionals(patient_rows, service_catalog)
                     # TASK-083 spec §8: each doctor's offered units (one read for the roster),
                     # so the pure router can ask "which unit?" and use that unit's hours.
-                    await attach_unit_options(
-                        session, tenant, professional_rows, flow_professionals
-                    )
+                    await attach_unit_options(session, tenant, patient_rows, flow_professionals)
                     selected_id = conversation.flow_selected_professional_id
                     if selected_id is not None:
                         selected_row = next(
                             (p for p in professional_rows if p.id == selected_id), None
                         )
-                        if selected_row is not None:
-                            selected_professional = next(
-                                p for p in flow_professionals if p.id == selected_id
-                            )
+                        selected_professional = next(
+                            (p for p in flow_professionals if p.id == selected_id), None
+                        )
+                        # A doctor hidden from patients since he was picked is not resumed.
+                        if selected_row is not None and selected_professional is not None:
                             # The selected doctor's own CalendarService, so the
                             # flow's day/slot/booking hit THEIR agenda.
                             try:
@@ -671,7 +688,9 @@ async def _send_bot_reply_inner(reply: _ReplyContext, redis=None) -> None:
     # TASK-090 Adendo 1 §A: a clinic with no usable unit (active + complete address) is not
     # served - same silence as the gate above, own log event, fails OPEN on a check error
     # (workers/shared/unit_gate.py).
-    if await reply_blocked_no_usable_unit(tenant.id, conversation_id=reply.conversation_id):
+    if await reply_blocked_no_usable_unit(
+        tenant.id, conversation_id=reply.conversation_id, known_servable=clinic_ready
+    ):
         return
 
     # `/menu3` (test clinics only, workers/shared/debug_reset.py): the conversation

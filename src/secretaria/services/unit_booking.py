@@ -463,6 +463,8 @@ async def check_unit(
     professional: Any | None,
     unit_id: UUID,
     service_id: UUID | None = None,
+    *,
+    for_patient: bool = False,
 ) -> Unit:
     """The unit, when it may be written onto a booking of `professional` at this clinic.
 
@@ -475,12 +477,21 @@ async def check_unit(
     the professional does that service only at OTHER units (422 `unit_service_not_offered`).
     `service_id=None` is exactly the rule above. Callers that write for the PATIENT pass it; the
     staff hub only flags the combination (`service_offered_at_unit`).
+
+    `for_patient` (TASK-090 Adendo 1): a booking written for the PATIENT (the AI tools) also
+    refuses a unit whose address is incomplete (422 `unit_address_incomplete`) - patients are
+    never offered one, so only a stale choice could name it. The staff hub keeps booking at
+    any active unit.
     """
     unit = await tenant_unit(session, tenant_id, unit_id)
     if unit is None:
         raise UnitRefused("unit_not_found", "Unidade não encontrada.", 404)
     if not unit.is_active:
         raise UnitRefused("unit_inactive", "Essa unidade está desativada.", 422)
+    if for_patient and not professional_units.unit_is_usable(unit):
+        raise UnitRefused(
+            "unit_address_incomplete", "Essa unidade não está disponível para agendamento.", 422
+        )
     if professional is not None:
         offered = await professional_units.available_unit_ids(session, professional)
         if offered and unit.id not in offered:

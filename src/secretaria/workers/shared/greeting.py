@@ -55,7 +55,7 @@ from secretaria.services.service_catalog import (
 from secretaria.services.service_terms import resolve_entry_at_unit
 from secretaria.services.tenant_config import (
     active_appointment_types,
-    list_active_professionals,
+    list_patient_professionals,
     professional_appointment_types,
     professional_business_hours,
 )
@@ -231,7 +231,7 @@ async def _load_sole_professional(
     professional's instead of repeating the clinic name already in the line
     above it. Any other roster (none, or two and more) returns None.
     """
-    professional = sole_active_professional(await list_active_professionals(session, tenant_id))
+    professional = sole_active_professional(await list_patient_professionals(session, tenant_id))
     if professional is None or not (professional.name or "").strip():
         return None
     return professional.name, professional.specialty

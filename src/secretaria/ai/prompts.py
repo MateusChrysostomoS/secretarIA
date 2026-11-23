@@ -169,7 +169,8 @@ def _format_safety_rules() -> str:
 # rule (get_insurance_payment_rule, fenced as data) and explains ONLY it; with no rule it goes
 # straight to a person, for every clinic, in the v1 prompt next to the other hand-off reasons (the
 # v2 prompt carries its short form, prompts_v2.INSURANCE_PAYMENT_RULE_V2). The longer
-# INSURANCE_PAYMENT_HANDOFF below rides with the clinic's convênios in the v1 prompt.
+# INSURANCE_PAYMENT_HANDOFF below rides with the clinic's convênios in BOTH prompts (the
+# "RECURSOS" block, `_format_clinic_features`, is shared with prompts_v2).
 INSURANCE_PAYMENT_HANDOFF_RULE = (
     "Se ele perguntar a regra de pagamento de um convênio (reembolso, coparticipação, se o "
     "convênio cobre, como ou quanto paga pelo convênio), chame get_insurance_payment_rule: "

@@ -33,6 +33,7 @@ from secretaria.workers.shared.sender import (
 from secretaria.workers.shared.text import (
     AUDIO_UNINTELLIGIBLE_MESSAGE,
 )
+from secretaria.workers.shared.unit_gate import reply_blocked_no_usable_unit
 from secretaria.workers.whatsapp.db import (
     _resolve_tenant,
 )
@@ -182,7 +183,8 @@ async def transcribe_audio_message(
             )
         except (MediaTooLarge, NotAudio) as exc:
             await _mark_audio_event_processed(message_id)
-            await _send_simple_text(wa_id, AUDIO_UNINTELLIGIBLE_MESSAGE, client=reply_client)
+            if not await reply_blocked_no_usable_unit(tenant.id):
+                await _send_simple_text(wa_id, AUDIO_UNINTELLIGIBLE_MESSAGE, client=reply_client)
             logger.info("worker_audio_rejected", wam_id=message_id, reason=type(exc).__name__)
             return
         except TranscriptionError:
@@ -197,7 +199,9 @@ async def transcribe_audio_message(
 
     if result.is_low_confidence:
         await _mark_audio_event_processed(message_id)
-        await _send_simple_text(wa_id, AUDIO_UNINTELLIGIBLE_MESSAGE, client=reply_client)
+        # TASK-090 Adendo 1 §A: a clinic that cannot be served gets no bot text at all.
+        if not await reply_blocked_no_usable_unit(tenant.id):
+            await _send_simple_text(wa_id, AUDIO_UNINTELLIGIBLE_MESSAGE, client=reply_client)
         logger.info(
             "worker_audio_low_confidence",
             wam_id=message_id,

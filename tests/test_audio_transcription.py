@@ -821,3 +821,38 @@ def test_transcription_config_never_reads_chat_model_settings(
 
     # Default STT model, entirely unaffected by the chat-model env vars above.
     assert config.openai_model == "gpt-4o-mini-transcribe"
+
+
+async def test_a_clinic_without_a_usable_unit_gets_no_audio_clarification(
+    db, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """TASK-090 Adendo 1 §A: the fixed "não entendi o áudio" is a bot reply like any other."""
+    await _seed_tenant(db)
+
+    async def _fake_transcribe(media_id, access_token, *, api_version, config, http_client):
+        return TranscriptionResult(
+            text="", provider_used="openai", is_low_confidence=True, char_count=0
+        )
+
+    async def _blocked(*_args, **_kwargs) -> bool:
+        return True
+
+    monkeypatch.setattr(workers_ns, "transcribe_whatsapp_media", _fake_transcribe)
+    monkeypatch.setattr(workers_ns, "reply_blocked_no_usable_unit", _blocked)
+    simple_calls = _spy_send_simple_text(monkeypatch)
+
+    await tasks.transcribe_audio_message(
+        {},
+        media_id="MEDIA1",
+        phone_number_id=PHONE_NUMBER_ID,
+        wa_id=WA_ID,
+        message_id="wamid.AUDIO9",
+        patient_name="Ana",
+    )
+
+    assert simple_calls == []
+    async with db() as session:
+        processed = await session.scalar(
+            select(ProcessedEvent).where(ProcessedEvent.event_id == "wamid.AUDIO9")
+        )
+        assert processed is not None

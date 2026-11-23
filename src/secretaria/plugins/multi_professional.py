@@ -93,15 +93,17 @@ logger = get_logger(__name__)
 
 
 async def _active_professionals(tenant_id: UUID) -> list:
-    """Active professionals for `tenant_id`, ordered by name. Never raises."""
+    """The professionals a PATIENT may book with for `tenant_id`, ordered by name
+    (`tenant_config.list_patient_professionals`: active, and not a doctor whose unit links
+    are all unusable - TASK-090 Adendo 1). Never raises."""
     # Imported lazily, same rationale as ai/tools.py's _persist_appointment:
     # keeps this module importable without a DB/ORM in dev scripts, and avoids
     # an import cycle through models -> services.
     from secretaria.core.database import async_session_factory
-    from secretaria.services.tenant_config import list_active_professionals
+    from secretaria.services.tenant_config import list_patient_professionals
 
     async with async_session_factory() as session:
-        return await list_active_professionals(session, tenant_id)
+        return await list_patient_professionals(session, tenant_id)
 
 
 async def _professional_services(tenant_id: UUID, professional) -> list[dict]:
