@@ -18,8 +18,8 @@ This file is self-contained on purpose: the helpers below are copies, the migrat
 working as the app code evolves (never import from `secretaria`).
 
 DEPLOY ORDER: runs with the other additive revisions (`alembic upgrade head` = a3c9e5d7f1b4),
-before the API and the worker. (The DROP of `custom_payment_note` once planned after it was
-deleted by TASK-090 Adendo 1: that column stays.) A Sede created here usually has no CEP, so it
+before the API and the worker. (The DROP of the convênio payment-note column once planned after
+it was deleted by TASK-090 Adendo 1: that column stays.) A Sede created here usually has no CEP, so it
 is INCOMPLETE and, until a manager completes it, the secretária does not answer that clinic
 (Adendo 1 §A).
 
