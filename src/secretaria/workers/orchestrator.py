@@ -102,7 +102,7 @@ from secretaria.services.pending_identity import (
     request_code,
     verify_code,
 )
-from secretaria.services.professional_units import has_active_units as clinic_has_active_units
+from secretaria.services.professional_units import has_usable_units as clinic_has_active_units
 from secretaria.services.sensitive_claim_guard import guard_reply
 from secretaria.services.service_catalog import (
     load_service_catalog,
@@ -213,6 +213,7 @@ from secretaria.workers.shared.state_expiry import (
     _write_flow_state,
 )
 from secretaria.workers.shared.text import _render_greeting_template
+from secretaria.workers.shared.unit_gate import reply_blocked_no_usable_unit
 
 logger = get_logger(__name__)
 
@@ -273,6 +274,10 @@ async def _send_turn_fallback(reply: _ReplyContext, redis, *, cause: str) -> Non
                 entitlement_unknown=summary is None,
                 conversation_id=str(reply.conversation_id),
             )
+            return
+        # The same readiness gate as the main path: a deliberate silence (no usable unit)
+        # never becomes an apology.
+        if await reply_blocked_no_usable_unit(tenant.id, conversation_id=reply.conversation_id):
             return
         if not await fallback_allowed(redis, reply.conversation_id):
             logger.warning(
@@ -392,7 +397,7 @@ async def _send_bot_reply_inner(reply: _ReplyContext, redis=None) -> None:
     # professional's plain snapshot, and their resolved calendar.
     professional_rows: list[Professional] | None = None
     # TASK-090: units are core, so the unit tools/prompt switch on from the clinic's own data
-    # (>= 1 active unit); a clinic without units keeps the toolset and prompt it always had.
+    # (>= 1 USABLE unit: active + complete address, Adendo 1 §A).
     has_active_units = False
     flow_professionals: list[SimpleNamespace] | None = None
     selected_professional: SimpleNamespace | None = None
@@ -661,6 +666,12 @@ async def _send_bot_reply_inner(reply: _ReplyContext, redis=None) -> None:
             tenant_resolved=tenant is not None,
             conversation_id=str(reply.conversation_id),
         )
+        return
+
+    # TASK-090 Adendo 1 §A: a clinic with no usable unit (active + complete address) is not
+    # served - same silence as the gate above, own log event, fails OPEN on a check error
+    # (workers/shared/unit_gate.py).
+    if await reply_blocked_no_usable_unit(tenant.id, conversation_id=reply.conversation_id):
         return
 
     # `/menu3` (test clinics only, workers/shared/debug_reset.py): the conversation

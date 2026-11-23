@@ -628,3 +628,33 @@ async def test_the_open_route_on_a_started_thread_ends_in_the_opening(db, monkey
     await getattr(tasks, name)({"redis": None}, *args, **kwargs)
     (sent,) = await _outbound(db, conversation)
     assert sent.body.startswith("Como posso te ajudar?")
+
+
+# --- TASK-090 Adendo 1 §A: no usable unit, no opening --------------------------------------
+
+
+@pytest.mark.real_unit_gate
+async def test_a_clinic_without_a_usable_unit_gets_no_plain_entry_opening(db, monkeypatch) -> None:
+    """The real gate: no unit with a complete address, so the entry stays silent."""
+    from secretaria.workers.shared import unit_gate
+
+    monkeypatch.setattr(unit_gate, "async_session_factory", db)
+    tenant, _, conversation = await _seed(db)
+    await _enter(tenant)
+    assert await _outbound(db, conversation) == []
+
+
+@pytest.mark.real_unit_gate
+async def test_a_plain_entry_stays_silent_even_with_an_upcoming_appointment(
+    db, monkeypatch
+) -> None:
+    """A plain entry is the patient starting a conversation, which the clinic cannot serve
+    without a usable unit; only the explicit reminder link opens (tests/test_reminder_link_entry
+    .py)."""
+    from secretaria.workers.shared import unit_gate
+
+    monkeypatch.setattr(unit_gate, "async_session_factory", db)
+    tenant, patient, conversation = await _seed(db)
+    await _appointment(db, tenant, patient, start=NOW + timedelta(days=4))
+    await _enter(tenant)
+    assert await _outbound(db, conversation) == []

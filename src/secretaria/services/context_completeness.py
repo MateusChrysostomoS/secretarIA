@@ -20,6 +20,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Literal
 
+from secretaria.services import professional_units
 from secretaria.services.tenant_config import (
     active_appointment_types,
     professional_appointment_types,
@@ -31,6 +32,11 @@ Status = Literal["done", "missing", "optional"]
 REQUIRED_WEIGHT = 1.0
 RECOMMENDED_WEIGHT = 0.5
 FAQ_TARGET = 3
+
+# The "address" item (TASK-090 Adendo 1 §A): the secretária only answers once one unit has a
+# complete address, so the hint says exactly what is missing.
+NO_UNIT_HINT = "Cadastre uma unidade com endereço completo."
+INCOMPLETE_UNIT_HINT = "Complete o endereço da unidade (CEP, rua, número, cidade e UF)."
 
 
 @dataclass(frozen=True)
@@ -62,24 +68,11 @@ def _has_hours(business_hours: Any) -> bool:
     return isinstance(business_hours, dict) and any(_filled(v) for v in business_hours.values())
 
 
-def _has_address(address: Any) -> bool:
-    return (
-        isinstance(address, dict) and _filled(address.get("line")) and _filled(address.get("city"))
-    )
-
-
-def _has_unit_address(units: list[Any] | None) -> bool:
-    """At least one ACTIVE unit with a structured address (street + city).
-
-    The clinic's address now lives in its units; a legacy `Tenant.address` still counts
-    (`_has_address`) so a clinic set up before the units screen is not nagged.
-    """
-    return any(
-        getattr(unit, "is_active", True)
-        and _filled(getattr(unit, "street", None))
-        and _filled(getattr(unit, "city", None))
-        for unit in units or []
-    )
+def _has_usable_unit(units: list[Any] | None) -> bool:
+    """At least one USABLE unit: active AND with a complete address (CEP, street, number, city,
+    UF - `professional_units.unit_is_usable`, the same rule that decides whether the secretária
+    answers at all, TASK-090 Adendo 1 §A). The legacy `Tenant.address` no longer counts."""
+    return any(professional_units.unit_is_usable(unit) for unit in units or [])
 
 
 def _has_active_unit(units: list[Any] | None) -> bool:
@@ -221,12 +214,10 @@ def compute_completeness(
             "address",
             "Endereço da clínica",
             REQUIRED_WEIGHT,
-            _has_unit_address(units) or _has_address(getattr(tenant, "address", None)),
-            # A clinic whose units are text-only/incomplete completes one; with no unit at all
-            # it registers the first.
-            "Complete o endereço da unidade."
-            if _has_active_unit(units)
-            else "Cadastre uma unidade com pelo menos a rua e a cidade.",
+            _has_usable_unit(units),
+            # A clinic whose units are all incomplete completes one; with no active unit at
+            # all it registers the first.
+            INCOMPLETE_UNIT_HINT if _has_active_unit(units) else NO_UNIT_HINT,
             "address",
         ),
         (

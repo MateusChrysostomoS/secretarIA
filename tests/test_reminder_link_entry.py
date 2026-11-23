@@ -2,6 +2,8 @@
 
 from datetime import UTC, datetime, timedelta
 
+import pytest
+
 from secretaria.models import Appointment, AppointmentStatus, FlowState, HandoverState, Tenant
 from secretaria.services.channel_sender import CHANNEL_BRAIN_MESSAGE
 from secretaria.workers.portal.inbound import process_brain_message_inbound
@@ -208,3 +210,22 @@ async def test_clinic_link_reload_keeps_silence_and_booking_in_progress(db, monk
     assert saved.flow_state == FlowState.SERVICE_CATALOG
     assert saved.flow_step == "pick_slot"
     assert not await outbound_messages(db, world.conversation.id)
+
+
+@pytest.mark.real_unit_gate
+async def test_a_reminder_link_opens_its_card_even_without_a_usable_unit(db, monkeypatch):  # noqa: F811
+    """TASK-090 Adendo 1 §A: existing appointments are untouched by the unit rule. A clinic
+    with no unit of complete address does not answer new conversations, but the explicit
+    reminder link of a booked consultation still shows that consultation's card."""
+    wire(monkeypatch, db)
+    world = await seed_world(
+        db, channel=CHANNEL_BRAIN_MESSAGE, start_at=datetime.now(UTC) + timedelta(days=3)
+    )
+    await consent(db, world)
+    rid = await add_reminder(db, world, kind="day", due_at=datetime.now(UTC))
+    context = {"source": "reminder_link", "reminder_id": str(rid)}
+    await process_brain_message_enter(
+        {}, str(world.tenant.id), world.patient.external_id, entry_context=context
+    )
+    cards = await outbound_messages(db, world.conversation.id)
+    assert len(cards) == 1 and cards[0].body.startswith("LEMBRE-SE:")

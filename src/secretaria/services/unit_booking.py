@@ -209,13 +209,21 @@ def _own_hours(raw: dict) -> dict:
 
 
 async def unit_options_for(
-    session: AsyncSession, tenant: Any, professionals: Iterable[Any]
+    session: AsyncSession,
+    tenant: Any,
+    professionals: Iterable[Any],
+    *,
+    usable_only: bool = True,
 ) -> dict[UUID, list[UnitOption]]:
     """Each professional's offered units: active link AND active unit of THIS tenant.
 
     One query for the whole roster. A professional without any offered unit is absent from the
     result. Ordered like `professional_units.available_unit_ids` (link sort_order, unit name).
     `professionals` may be ORM rows or the router's snapshots (`id`, `business_hours`).
+
+    `usable_only` (the default - every patient-facing reader, TASK-090 Adendo 1 §A) also drops
+    a unit whose address is incomplete (`professional_units.unit_is_usable`): the patient is
+    never offered it. Only the manager's own screens pass `usable_only=False`.
     """
     by_id = {professional.id: professional for professional in professionals}
     if not by_id:
@@ -233,6 +241,8 @@ async def unit_options_for(
     )
     options: dict[UUID, list[UnitOption]] = {}
     for link, unit in rows.all():
+        if usable_only and not professional_units.unit_is_usable(unit):
+            continue
         professional = by_id[link.professional_id]
         # `is None`, never truthiness: an own `{}` is "closed here", not "inherit".
         hours = (

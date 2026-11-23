@@ -35,6 +35,7 @@ from secretaria.schemas.unit import UnitCreate, UnitRead, UnitUpdate
 from secretaria.services.professional_units import count_professionals_by_unit
 from secretaria.services.unit_address import (
     UnitAddressParts,
+    address_complete,
     clean_text,
     format_unit_address,
     invalid_fields,
@@ -47,10 +48,6 @@ logger = get_logger(__name__)
 router = APIRouter(prefix="/tenants/me/units", tags=["hub-units"])
 
 _PART_FIELDS = ("cep", "street", "number", "complement", "neighborhood", "city", "state")
-
-
-def _parts_of(unit: Unit) -> UnitAddressParts:
-    return UnitAddressParts(**{name: getattr(unit, name) for name in _PART_FIELDS})
 
 
 def _validated_parts(raw: UnitAddressParts) -> UnitAddressParts:
@@ -92,7 +89,7 @@ def _read_model(unit: Unit, professionals_count: int = 0) -> UnitRead:
         name=unit.name,
         address=unit.address,
         **{name: getattr(unit, name) for name in _PART_FIELDS},
-        address_incomplete=bool(invalid_fields(_parts_of(unit))),
+        address_incomplete=not address_complete(unit),
         is_active=unit.is_active,
         created_at=unit.created_at,
         professionals_count=professionals_count,

@@ -61,6 +61,7 @@ from secretaria.workers.shared.price_change_opening import send_price_change_ope
 from secretaria.workers.shared.text import (
     _as_utc,
 )
+from secretaria.workers.shared.unit_gate import reply_blocked_no_usable_unit
 
 logger = get_logger(__name__)
 
@@ -696,6 +697,17 @@ async def process_brain_message_enter(
             entitlement_unknown=summary is None,
             conversation_id=str(decision.reply.conversation_id),
         )
+        return
+    # TASK-090 Adendo 1 §A: a plain entry opening is the secretária speaking - silent without a
+    # usable unit. An opening tied to an existing appointment (reminder link, price notice)
+    # still goes out: existing appointments are untouched by that rule.
+    if (
+        decision.appointment_id is None
+        and decision.price_change_reminder_id is None
+        and await reply_blocked_no_usable_unit(
+            tenant_uuid, conversation_id=decision.reply.conversation_id
+        )
+    ):
         return
     if not await _claim_event(decision.ledger_key):
         logger.info("brain_message_enter_already_claimed", tenant_id=tenant_id)

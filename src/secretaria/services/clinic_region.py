@@ -2,8 +2,8 @@
 
 One city -> "em Campinas"; several cities in one state -> "em Minas Gerais" / "na Bahia" /
 "no Paraná" (full state name + the state's own preposition); units in different states ->
-"no Brasil". Only ACTIVE units that carry a city count (a legacy unit with only the
-free-text address has none). A clinic with no unit
+"no Brasil". Only USABLE units (active + complete address, TASK-090 Adendo 1) that carry
+a city count (a legacy unit with only the free-text address has none). A clinic with no unit
 city falls back to the legacy `Tenant.address["city"]`, and with nothing at all the
 greeting simply leaves the place out, as it always did.
 """
@@ -18,6 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from secretaria.models.tenant import Tenant
 from secretaria.models.unit import Unit
+from secretaria.services import professional_units
 from secretaria.services.greeting_template import tenant_city
 from secretaria.services.unit_address import BR_STATE_NAMES, BR_STATE_PREPOSITIONS
 
@@ -67,7 +68,9 @@ def region_of_units(units: Sequence[Unit], legacy_address: object = None) -> Reg
 
 
 async def load_clinic_region(session: AsyncSession, tenant: Tenant) -> Region | None:
-    """`region_of_units` over this tenant's own units (always filtered by tenant_id)."""
+    """`region_of_units` over this tenant's own USABLE units (always filtered by tenant_id):
+    a unit with an incomplete address is not shown to patients, so it never widens the
+    greeting's region either (TASK-090 Adendo 1 §A)."""
     units = (
         await session.scalars(
             select(Unit)
@@ -75,4 +78,4 @@ async def load_clinic_region(session: AsyncSession, tenant: Tenant) -> Region | 
             .order_by(Unit.created_at, Unit.id)
         )
     ).all()
-    return region_of_units(units, tenant.address)
+    return region_of_units(professional_units.usable_only(units), tenant.address)

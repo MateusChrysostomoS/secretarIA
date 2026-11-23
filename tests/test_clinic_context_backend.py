@@ -216,7 +216,7 @@ def test_a_fully_filled_clinic_scores_one_hundred_with_no_hints() -> None:
             "faq": [{"question": "q", "answer": "a"}] * FAQ_TARGET,
         },
     )
-    result = compute_completeness(tenant, [_svc(requirements=["Jejum"])])
+    result = compute_completeness(tenant, [_svc(requirements=["Jejum"])], None, [_unit()])
     assert result.score == 100
     assert all(item.status == "done" and item.hint is None for item in result.items)
 
@@ -226,9 +226,10 @@ def test_either_parking_or_how_to_arrive_satisfies_the_arrival_item() -> None:
     assert _status(result)["parking_or_arrival"] == "done"
 
 
-def test_address_needs_street_and_city() -> None:
-    only_street = compute_completeness(_tenant(address={"line": "Rua A"}), [])
-    assert _status(only_street)["address"] == "missing"
+def test_the_legacy_clinic_address_no_longer_counts() -> None:
+    """TASK-090 Adendo 1 §A: only a unit with a complete address satisfies the item."""
+    legacy = compute_completeness(_tenant(address={"line": "Rua A", "city": "Recife"}), [])
+    assert _status(legacy)["address"] == "missing"
 
 
 def test_guidance_hint_names_up_to_three_services_that_lack_it() -> None:
@@ -249,7 +250,7 @@ def test_score_weights_required_items_double() -> None:
         business_hours={"monday": [{"start": "08:00", "end": "09:00"}]},
         clinic_facts={"parking": "x", "payment_methods": ["Pix"], "cancellation_policy": "y"},
     )
-    score = compute_completeness(required_only, [_svc()]).score
+    score = compute_completeness(required_only, [_svc()], None, [_unit()]).score
     assert 0 < score < 100 and score == round(100 * 6 / (6 + 0.5 * 8))
 
 
@@ -284,50 +285,82 @@ def test_a_faq_that_is_not_a_list_neither_counts_nor_breaks(faq) -> None:
     assert _status(result)["faq"] == "optional"
 
 
-def _unit(street="Rua A", city="Recife", active=True):
-    return SimpleNamespace(street=street, city=city, is_active=active)
+def _unit(active=True, **overrides):
+    """A unit with a COMPLETE address (CEP, street, number, city, UF) unless overridden."""
+    parts = {
+        "cep": "50010000",
+        "street": "Rua A",
+        "number": "10",
+        "complement": None,
+        "neighborhood": None,
+        "city": "Recife",
+        "state": "PE",
+    }
+    parts.update(overrides)
+    return SimpleNamespace(is_active=active, **parts)
 
 
-def test_an_active_unit_with_street_and_city_satisfies_the_address_item() -> None:
+@pytest.mark.real_unit_gate
+def test_an_active_unit_with_a_complete_address_satisfies_the_address_item() -> None:
     result = compute_completeness(_tenant(), [], None, [_unit()])
     assert _status(result)["address"] == "done"
+    # One complete unit is enough, next to an incomplete one.
+    both = compute_completeness(_tenant(), [], None, [_unit(cep=None), _unit()])
+    assert _status(both)["address"] == "done"
 
 
+@pytest.mark.real_unit_gate
 @pytest.mark.parametrize(
     "unit",
-    [_unit(street=None), _unit(city=None), _unit(street="  "), _unit(active=False)],
-    ids=["no-street", "no-city", "blank-street", "inactive"],
+    [
+        _unit(cep=None),
+        _unit(street="  "),
+        _unit(number=None),
+        _unit(city=None),
+        _unit(state=None),
+        _unit(active=False),
+    ],
+    ids=["no-cep", "blank-street", "no-number", "no-city", "no-uf", "inactive"],
 )
-def test_a_unit_without_street_city_or_active_does_not_count(unit) -> None:
+def test_an_incomplete_or_inactive_unit_does_not_count(unit) -> None:
     result = compute_completeness(_tenant(), [], None, [unit])
     assert _status(result)["address"] == "missing"
 
 
-def test_the_legacy_tenant_address_still_satisfies_the_address_item() -> None:
+@pytest.mark.real_unit_gate
+def test_the_legacy_tenant_address_no_longer_satisfies_the_address_item() -> None:
     tenant = _tenant(address={"line": "Rua A", "city": "Recife"})
-    assert _status(compute_completeness(tenant, [], None, []))["address"] == "done"
+    assert _status(compute_completeness(tenant, [], None, []))["address"] == "missing"
     inactive = compute_completeness(tenant, [], None, [_unit(active=False)])
-    assert _status(inactive)["address"] == "done"
+    assert _status(inactive)["address"] == "missing"
 
 
 def _address_hint(result) -> str | None:
     return next(item.hint for item in result.items if item.key == "address")
 
 
+@pytest.mark.real_unit_gate
 def test_the_address_hint_asks_to_register_a_unit_when_there_is_none() -> None:
     assert _address_hint(compute_completeness(_tenant(), [], None, [])) == (
-        "Cadastre uma unidade com pelo menos a rua e a cidade."
+        "Cadastre uma unidade com endereço completo."
     )
     # Only inactive units: the clinic has none in use, so it still has to register one.
     inactive = compute_completeness(_tenant(), [], None, [_unit(active=False)])
-    assert _address_hint(inactive) == "Cadastre uma unidade com pelo menos a rua e a cidade."
+    assert _address_hint(inactive) == "Cadastre uma unidade com endereço completo."
 
 
+@pytest.mark.real_unit_gate
 @pytest.mark.parametrize(
     "unit",
-    [_unit(street=None), _unit(city=None), _unit(street="  ", city=None)],
-    ids=["text-only-no-street", "no-city", "blank"],
+    [
+        SimpleNamespace(is_active=True, address="Rua A, 1 - Recife"),
+        _unit(cep=None),
+        _unit(number=None, city=None),
+    ],
+    ids=["text-only", "no-cep", "no-number-no-city"],
 )
 def test_the_address_hint_asks_to_complete_an_incomplete_unit(unit) -> None:
     result = compute_completeness(_tenant(), [], None, [unit])
-    assert _address_hint(result) == "Complete o endereço da unidade."
+    assert _address_hint(result) == (
+        "Complete o endereço da unidade (CEP, rua, número, cidade e UF)."
+    )

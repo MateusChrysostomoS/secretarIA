@@ -137,6 +137,29 @@ def invalid_fields(p: UnitAddressParts) -> list[str]:
     return bad
 
 
+_PART_NAMES: tuple[str, ...] = (
+    "cep",
+    "street",
+    "number",
+    "complement",
+    "neighborhood",
+    "city",
+    "state",
+)
+
+
+def parts_of(row: object) -> UnitAddressParts:
+    """The address parts of anything carrying them as attributes (a `Unit` row)."""
+    return UnitAddressParts(**{name: getattr(row, name, None) for name in _PART_NAMES})
+
+
+def address_complete(row: object) -> bool:
+    """Whether `row`'s address passes the same test a new unit must pass (`invalid_fields`
+    empty): CEP, street, number, city and UF valid; complement and neighborhood optional.
+    The negation is what the hub reports as `address_incomplete`."""
+    return not invalid_fields(parts_of(row))
+
+
 def oversize_line_fields(p: UnitAddressParts) -> list[str]:
     """When the derived line would exceed `MAX_ADDRESS_LENGTH`, the longest free-text parts
     (greedily, until dropping them would make it fit); `[]` when it fits."""

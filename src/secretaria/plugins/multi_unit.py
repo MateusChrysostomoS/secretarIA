@@ -2,7 +2,8 @@
 
 Not a paid add-on any more (TASK-090): `multi_unit` is always entitled
 (services/entitlements_client.py::CORE_ADDON_IDS); the tools are offered to a clinic that has at
-least one active unit (`requires_active_units`, applied by registry.agent_tools_for). Units do not
+least one USABLE unit - active + complete address (`requires_active_units`, applied by
+registry.agent_tools_for; TASK-090 Adendo 1). Units do not
 carry their own Calendar
 credentials — they only record WHERE the patient should show up. Booking
 itself keeps using the tenant's own calendar (or, when multi_professional is
@@ -31,7 +32,6 @@ tool-error string listing the valid (active) unit names.
 from uuid import UUID
 
 from langchain_core.tools import tool
-from sqlalchemy import select
 
 from secretaria.ai.tools import (
     _blocked_by_required_deposit,
@@ -67,6 +67,7 @@ from secretaria.ai.unit_scope import (
 from secretaria.core.logging import get_logger
 from secretaria.plugins.base import PluginSpec
 from secretaria.plugins.registry import register
+from secretaria.services import professional_units
 from secretaria.services.availability import booking_buffer_minutes
 from secretaria.services.calendar import (
     build_event_description,
@@ -84,17 +85,12 @@ logger = get_logger(__name__)
 
 
 async def _active_units(tenant_id: UUID) -> list:
-    """Active units for `tenant_id`, ordered by name. Never raises."""
+    """The units a PATIENT may see or book at for `tenant_id` (active AND complete address,
+    `professional_units.usable_units` - TASK-090 Adendo 1 §A), ordered by name."""
     from secretaria.core.database import async_session_factory
-    from secretaria.models.unit import Unit
 
     async with async_session_factory() as session:
-        rows = await session.scalars(
-            select(Unit)
-            .where(Unit.tenant_id == tenant_id, Unit.is_active.is_(True))
-            .order_by(Unit.name)
-        )
-        return list(rows)
+        return await professional_units.usable_units(session, tenant_id)
 
 
 def _unknown_unit_error(name: str, units: list) -> dict:

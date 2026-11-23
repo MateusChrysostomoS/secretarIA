@@ -179,7 +179,8 @@ async def _clinic_scope(session: AsyncSession, tenant: Tenant) -> _Scope:
             .order_by(Professional.name, Professional.id)
         )
     )
-    options = await unit_options_for(session, tenant, doctors)
+    # The manager's matrix shows every active unit, complete address or not (Adendo 1 §A).
+    options = await unit_options_for(session, tenant, doctors, usable_only=False)
     marks = await psu.read_marks_for(session, [d.id for d in doctors])
     units = await pu.active_units(session, tenant.id)
     per_unit: dict[UUID | None, set[UUID]] = {unit.id: set() for unit in units}
@@ -243,7 +244,9 @@ async def _professional_scope(
     service_ids, without_id = await _doctor_services(session, tenant, professional, names)
     services = [(sid, names[sid]) for sid in service_ids]
     plans = await _professional_plan_columns(session, tenant.id, professional.id)
-    options = (await unit_options_for(session, tenant, [professional])).get(professional.id, [])
+    options = (
+        await unit_options_for(session, tenant, [professional], usable_only=False)
+    ).get(professional.id, [])
     marks = await psu.read_marks(session, professional.id)
     if options:
         slices = [

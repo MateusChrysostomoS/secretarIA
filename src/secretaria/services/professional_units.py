@@ -19,6 +19,9 @@ and the HTTP shape.
 `available_unit_ids` = the professional's ACTIVE links to ACTIVE units of their own tenant. A
 deactivated unit keeps its links and per-unit hours (reactivating brings them back untouched) but
 stops being offered. No link at all = an agenda without a unit, exactly as before this feature.
+`available_unit_ids` is the STAFF view (hub, staff edits); what a PATIENT is offered is further
+narrowed to USABLE units (`unit_is_usable`: active + complete address, TASK-090 Adendo 1) by
+services/unit_booking.py::unit_options_for and the AI unit tools.
 
 The BUSY time is never per unit (the person is in one place at a time): that is
 services/agenda.py's job, not this module's.
@@ -35,6 +38,7 @@ from secretaria.models import Professional, Tenant
 from secretaria.models.professional_unit import ProfessionalUnit
 from secretaria.models.unit import Unit
 from secretaria.services import tenant_config as cfg
+from secretaria.services.unit_address import address_complete
 
 
 class UnitNotFound(Exception):
@@ -72,12 +76,35 @@ async def active_units(session: AsyncSession, tenant_id: UUID) -> list[Unit]:
     return list(rows)
 
 
-async def has_active_units(session: AsyncSession, tenant_id: UUID) -> bool:
-    """Whether the tenant has at least one ACTIVE unit (the switch for the unit tools/prompt)."""
-    found = await session.scalar(
-        select(Unit.id).where(Unit.tenant_id == tenant_id, Unit.is_active.is_(True)).limit(1)
-    )
-    return found is not None
+def unit_is_usable(unit: Unit) -> bool:
+    """A unit a PATIENT may see or book at (TASK-090 Adendo 1 §A): active AND with a complete
+    address (services/unit_address.address_complete - the same test a new unit must pass).
+
+    THE one predicate: every patient-facing reader (flow unit options, AI unit tools, greeting
+    region, the "secretária só atende com unidade completa" gate) goes through it - via
+    `usable_only` / `usable_units` / `has_usable_units` below or a module-attribute call - and
+    never copies it. The manager CRUD keeps showing every unit (with `address_incomplete`).
+    """
+    return bool(unit.is_active) and address_complete(unit)
+
+
+def usable_only(units: Iterable[Unit]) -> list[Unit]:
+    """`units` filtered by `unit_is_usable`, order preserved."""
+    return [unit for unit in units if unit_is_usable(unit)]
+
+
+async def usable_units(session: AsyncSession, tenant_id: UUID) -> list[Unit]:
+    """The tenant's USABLE units (active + complete address), ordered by name."""
+    return usable_only(await active_units(session, tenant_id))
+
+
+async def has_usable_units(session: AsyncSession, tenant_id: UUID) -> bool:
+    """Whether the tenant has at least one USABLE unit.
+
+    Both the switch for the AI unit tools/prompt (`registry.agent_tools_for(has_active_units=)`)
+    and the reply gate (workers/shared/unit_gate.py): a clinic without one is not served.
+    """
+    return any(unit_is_usable(unit) for unit in await active_units(session, tenant_id))
 
 
 async def links_by_unit(

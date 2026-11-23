@@ -439,8 +439,8 @@ from secretaria.workers.shared.jobs import (
     _claim_event,
     _release_event,
     check_handover_timeouts,
-    send_transactional_email,
     send_staff_welcome_email,
+    send_transactional_email,
 )
 from secretaria.workers.shared.llm_context import (
     _appointment_calendar,
@@ -500,6 +500,9 @@ from secretaria.workers.shared.text import (
     is_back_command,
     is_menu_command,
     is_remove_context_command,
+)
+from secretaria.workers.shared.unit_gate import (
+    reply_blocked_no_usable_unit,
 )
 from secretaria.workers.turn_router import (
     _route_inbound_turn,

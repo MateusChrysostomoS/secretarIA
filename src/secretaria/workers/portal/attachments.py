@@ -13,6 +13,7 @@ from secretaria.workers.shared.sender import (
     _reply_sender,
     _send_simple_text,
 )
+from secretaria.workers.shared.unit_gate import reply_blocked_no_usable_unit
 
 logger = get_logger(__name__)
 
@@ -43,6 +44,8 @@ async def _handle_attachment_received(reply: _ReplyContext, redis=None) -> None:
             tenant_id=str(tenant.id),
             status=summary.status if summary is not None else None,
         )
+        return
+    if await reply_blocked_no_usable_unit(tenant.id, conversation_id=reply.conversation_id):
         return
     sender = _reply_sender(reply, tenant, None)
     if sender is None:

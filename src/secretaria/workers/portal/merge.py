@@ -24,6 +24,7 @@ from secretaria.workers.shared.context import _ReplyContext
 from secretaria.workers.shared.jobs import _claim_event, _release_event
 from secretaria.workers.shared.opening import _send_context_opening
 from secretaria.workers.shared.text import _as_utc
+from secretaria.workers.shared.unit_gate import reply_blocked_no_usable_unit
 
 logger = get_logger(__name__)
 
@@ -113,6 +114,10 @@ async def _finish_merge(
             entitlement_unknown=summary is None,
             conversation_id=str(conversation.id) if conversation is not None else None,
         )
+        return
+    if await reply_blocked_no_usable_unit(
+        tenant_uuid, conversation_id=conversation.id if conversation is not None else None
+    ):
         return
     if not has_history:
         # The account's identity never had a conversation here: this IS the first time.
