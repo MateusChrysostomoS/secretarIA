@@ -474,7 +474,8 @@ async def test_a_failing_active_units_check_only_turns_the_unit_tools_off(
         return []
 
     monkeypatch.setattr(orchestrator, "clinic_has_active_units", _boom)
-    for name in ("load_service_catalog", "load_tenant_insurance", "attach_unit_options"):
+    # TASK-090 Adendo 1: the units ride on the patient roster (`build_patient_roster`).
+    for name in ("load_service_catalog", "load_tenant_insurance", "build_patient_roster"):
         monkeypatch.setattr(orchestrator, name, _spy(name, getattr(orchestrator, name)))
     monkeypatch.setattr(workers_ns, "get_entitlements", _fake_get_entitlements)
     monkeypatch.setattr(workers_ns, "run_agent", _fake_run_agent)
@@ -483,7 +484,7 @@ async def test_a_failing_active_units_check_only_turns_the_unit_tools_off(
     await tasks._send_bot_reply(_reply_context(conversation, patient, _LLM_ANSWER))
 
     assert seen == [False]
-    assert loaded == ["load_service_catalog", "load_tenant_insurance", "attach_unit_options"]
+    assert loaded == ["load_service_catalog", "load_tenant_insurance", "build_patient_roster"]
 
 
 # --------------------------------------------------------------------------

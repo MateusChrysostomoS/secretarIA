@@ -40,6 +40,7 @@ from secretaria.services.appointment_edit_flow import apply_ai_edit
 from secretaria.services.booking_hold import refresh_code_hold
 from secretaria.services.booking_scope import (
     booking_topology,
+    everyone_of,
 )
 from secretaria.services.calendar import (
     CalendarService,
@@ -104,7 +105,6 @@ from secretaria.services.pending_identity import (
 )
 from secretaria.services.professional_units import (
     has_usable_units as clinic_has_active_units,
-    patient_visible_professionals,
 )
 from secretaria.services.sensitive_claim_guard import guard_reply
 from secretaria.services.service_catalog import (
@@ -126,7 +126,6 @@ from secretaria.services.turn_safety_net import (
     take_held_intro,
 )
 from secretaria.services.typing_indicator import clear_typing, mark_typing
-from secretaria.services.unit_booking import attach_unit_options
 from secretaria.workers.portal.attachments import (
     _handle_attachment_received,
 )
@@ -183,7 +182,6 @@ from secretaria.workers.shared.flow_runner import (
     _run_flow,
 )
 from secretaria.workers.shared.greeting import (
-    _flow_professionals,
     _flow_tenant_snapshot,
 )
 from secretaria.workers.shared.handover import (
@@ -201,6 +199,7 @@ from secretaria.workers.shared.llm_context import (
     _should_inject_appointment_context,
     _should_inject_post_consult_knowledge,
 )
+from secretaria.workers.shared.patient_roster import build_patient_roster, hidden_ids
 from secretaria.workers.shared.reminder_opening import (
     _send_reminder_opening,
 )
@@ -483,13 +482,17 @@ async def _send_bot_reply_inner(reply: _ReplyContext, redis=None) -> None:
                     # (the legacy toolset) - it must never skip the catalog/insurance/unit-option
                     # loads and the flow snapshot below. The savepoint keeps a database error
                     # from aborting the surrounding transaction on Postgres.
+                    # The reply gate's two halves are only trusted together (review M3): the
+                    # unit half here, the "not every doctor hidden" half once the roster is
+                    # built below. A load that fails in between leaves `clinic_ready` None and
+                    # the gate reads both itself (fail open on ITS error, not on half an answer).
+                    units_ready: bool | None = None
                     try:
                         async with session.begin_nested():
                             has_active_units = await clinic_has_active_units(session, tenant.id)
-                        clinic_ready = has_active_units
+                        units_ready = has_active_units
                     except Exception as exc:
                         has_active_units = False
-                        clinic_ready = None
                         logger.warning(
                             "worker_active_units_check_failed",
                             error=type(exc).__name__,
@@ -511,29 +514,37 @@ async def _send_bot_reply_inner(reply: _ReplyContext, redis=None) -> None:
                     # clinic's plans and which doctor takes which, so the pure
                     # router can mark doctors without a query of its own.
                     tenant_insurance = await load_tenant_insurance(session, tenant.id)
-                    # TASK-090 Adendo 1 (owner ruling): the router and the agent offer only
-                    # the doctors a patient may book with - not one whose unit links are all
-                    # unusable. `professional_rows` (every active doctor) keeps resolving the
-                    # agendas of existing consultations.
-                    patient_rows = await patient_visible_professionals(
-                        session, tenant.id, professional_rows
+                    # TASK-090 Adendo 1 (owner rulings on I1/C1): the roster lists only the
+                    # doctors a patient may be OFFERED for a new booking (not one whose unit
+                    # links are all unusable), while `everyone` - every active doctor - keeps
+                    # the topology (2+ active = multi-doctor paths) and the doctor of every
+                    # EXISTING consultation. TASK-083 spec §8: each doctor's units ride on it.
+                    flow_professionals = await build_patient_roster(
+                        session, tenant, professional_rows, service_catalog
                     )
-                    if clinic_ready and professional_rows and not patient_rows:
-                        # Every doctor is hidden: nobody a patient could book with.
-                        clinic_ready = False
-                    flow_professionals = _flow_professionals(patient_rows, service_catalog)
-                    # TASK-083 spec §8: each doctor's offered units (one read for the roster),
-                    # so the pure router can ask "which unit?" and use that unit's hours.
-                    await attach_unit_options(session, tenant, patient_rows, flow_professionals)
+                    hidden = hidden_ids(flow_professionals)
+                    if units_ready is not None:
+                        # Every doctor hidden = nobody a patient could book with.
+                        clinic_ready = units_ready and (
+                            not professional_rows or bool(flow_professionals)
+                        )
                     selected_id = conversation.flow_selected_professional_id
+                    if selected_id is not None and selected_id in hidden and not (
+                        conversation.flow_managing_appointment_id is not None
+                        or conversation.flow_state == FlowState.EDIT_BOOKING
+                    ):
+                        # Review M2: a doctor hidden since he was picked for a NEW booking is
+                        # not resumed; the snapshot drops him, so the next write clears it.
+                        selected_id = None
                     if selected_id is not None:
                         selected_row = next(
                             (p for p in professional_rows if p.id == selected_id), None
                         )
+                        # Offered doctors first; a hidden one only while his own EXISTING
+                        # consultation is being managed or edited (I1).
                         selected_professional = next(
-                            (p for p in flow_professionals if p.id == selected_id), None
+                            (p for p in flow_professionals.everyone if p.id == selected_id), None
                         )
-                        # A doctor hidden from patients since he was picked is not resumed.
                         if selected_row is not None and selected_professional is not None:
                             # The selected doctor's own CalendarService, so the
                             # flow's day/slot/booking hit THEIR agenda.
@@ -565,9 +576,7 @@ async def _send_bot_reply_inner(reply: _ReplyContext, redis=None) -> None:
                             flow_selected_type=conversation.flow_selected_type,
                             flow_selected_day=conversation.flow_selected_day,
                             flow_selected_slot=conversation.flow_selected_slot,
-                            flow_selected_professional_id=(
-                                conversation.flow_selected_professional_id
-                            ),
+                            flow_selected_professional_id=selected_id,
                             flow_selected_insurance=conversation.flow_selected_insurance,
                             flow_insurance_auto=getattr(conversation, "flow_insurance_auto", None),
                             flow_selected_unit_id=conversation.flow_selected_unit_id,
@@ -1382,7 +1391,9 @@ async def _send_bot_reply_inner(reply: _ReplyContext, redis=None) -> None:
         appt for appt in upcoming_appointments or [] if not appt.get("rebook_adjustment_id")
     ]
     if _should_inject_appointment_context(ai_appointments, flow_state, delegated_to_llm):
-        professional_names = {str(p.id): p.name for p in (flow_professionals or [])}
+        professional_names = {
+            str(p.id): p.name for p in everyone_of(flow_professionals or [])
+        }
         appointment_context_text = _appointment_context_text(
             ai_appointments,
             tenant_config.timezone if tenant_config is not None else None,

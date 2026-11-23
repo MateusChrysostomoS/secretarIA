@@ -55,11 +55,9 @@ from secretaria.services.service_catalog import (
 from secretaria.services.tenant_config import (
     get_waba_token,
     list_active_professionals,
-    list_patient_professionals,
     load_tenant_config,
     resolve_professional_calendar,
 )
-from secretaria.services.unit_booking import attach_unit_options
 from secretaria.workers.shared.appointment_edit_support import (
     edit_guards,
     visit_suspended,
@@ -75,13 +73,13 @@ from secretaria.workers.shared.flow_runner import (
     _apply_flow_result,
 )
 from secretaria.workers.shared.greeting import (
-    _flow_professionals,
     _format_appointment_when,
 )
 from secretaria.workers.shared.llm_context import (
     _appointment_calendar,
     _appointment_calendar_target,
 )
+from secretaria.workers.shared.patient_roster import build_patient_roster, hidden_ids
 from secretaria.workers.shared.release_offer_actions import handle_release_offer_tap
 from secretaria.workers.shared.reminder_actions import (
     CONTINUE_CANCEL_AND_ASK_WHY,
@@ -227,10 +225,12 @@ async def _router_roster(
     doctor's units, per-service unit marks and per-unit terms (`attach_unit_options`), exactly
     like `service_change_actions._rebook_entry`. Without them the picker would use the base
     hours and the base blocked weekdays instead of the unit's (TASK-087 review P1).
+
+    TASK-090 Adendo 1: the patient roster (`workers/shared/patient_roster.py`) - it OFFERS only
+    the doctors a patient may book with, while `everyone` keeps the topology and the doctor of
+    the EXISTING consultation the button acts on. `professional_rows` = every active doctor.
     """
-    professionals = _flow_professionals(professional_rows, services)
-    await attach_unit_options(session, tenant, professional_rows, professionals)
-    return professionals
+    return await build_patient_roster(session, tenant, professional_rows, services)
 
 
 async def _announce_button_cancel(redis, tenant: Tenant, appointment_id, was_live: bool) -> None:
@@ -507,14 +507,17 @@ async def _handle_action_button(
                     body="Para remarcar, entre em contato com a nossa equipe.",
                 )
                 return
-            # A rebooking is a NEW booking: the patient roster (TASK-090 Adendo 1).
-            professional_rows = await list_patient_professionals(session, tenant.id)
+            professional_rows = await list_active_professionals(session, tenant.id)
             # TASK-085 T8 (b) + TASK-087 P1: the router-shaped roster with each doctor's units,
             # per-service unit marks and per-unit terms (price/duration/blocked days), like the
             # turn snapshot - the rebooked day list is read at the unit.
             services = await load_service_catalog(session, tenant.id)
             professionals = await _router_roster(session, tenant, professional_rows, services)
             same = action == "rebooksame"
+            if same and appointment.professional_id in hidden_ids(professionals):
+                # A rebooking is a NEW booking: a doctor hidden from patients (TASK-090
+                # Adendo 1) is not offered again - the patient picks among the others.
+                same = False
             service_name = appointment.appointment_type
             candidates: list = []
             prefix = offer_prefix

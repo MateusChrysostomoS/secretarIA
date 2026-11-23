@@ -133,7 +133,8 @@ def _carrier(conversation, draft: ae.EditDraft) -> fr._DayPickerState:
 
 
 def _doctor(professionals, draft: ae.EditDraft):
-    return fr._find_professional_by_id(professionals, _uuid(draft.current["professional_id"]))
+    # The consultation's own doctor: hidden ones too (TASK-090 Adendo 1, I1).
+    return fr._find_owner_by_id(professionals, _uuid(draft.current["professional_id"]))
 
 
 def _draft_entry(tenant, draft: ae.EditDraft, doctor) -> dict | None:
@@ -470,10 +471,11 @@ async def _inside_buffer(
     if not professionals:
         return False
     owner_id = _uuid(professional_id)
+    everyone = fr.everyone_of(professionals)
     doctor = (
-        fr._find_professional_by_id(professionals, owner_id)
+        fr._find_owner_by_id(professionals, owner_id)
         if owner_id is not None
-        else (professionals[0] if len(professionals) == 1 else None)
+        else (everyone[0] if len(everyone) == 1 else None)
     )
     return await fr._inside_buffer(
         calendar,

@@ -230,8 +230,8 @@ def _service_refused(
         professional_id = _uuid(scope.get("professional_id"))
         if professional_id is not None:
             professional = fr._find_professional_by_id(professionals, professional_id)
-    elif which == "tenant" and len(professionals) == 1:
-        professional = professionals[0]
+    elif which == "tenant" and len(fr.everyone_of(professionals)) == 1:
+        professional = fr.everyone_of(professionals)[0]
     return fr.service_refused_names(tenant, professional, services, insurance)
 
 

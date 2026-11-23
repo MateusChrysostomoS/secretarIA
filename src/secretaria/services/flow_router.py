@@ -97,6 +97,7 @@ from secretaria.services.booking_details import service_price_text
 from secretaria.services.booking_hold import BookingGate
 from secretaria.services.booking_scope import (
     canonical_service_name,
+    everyone_of,
     resolve_booking_owner_id,
 )
 from secretaria.services.calendar import (
@@ -1326,8 +1327,12 @@ def menu_buttons(tenant: Tenant) -> list[str]:
 
 
 def _is_multi_professional(professionals: list | None) -> bool:
-    """2+ active professionals -> the multi-doctor menu replaces the default."""
-    return len(professionals or []) > 1
+    """2+ active professionals -> the multi-doctor menu replaces the default.
+
+    Counted on EVERY active doctor (`booking_scope.everyone_of`): a doctor hidden from patients
+    (TASK-090 Adendo 1) keeps the clinic on the multi-doctor paths - each doctor's own agenda,
+    services and hours - never the clinic's (owner ruling on C1)."""
+    return len(everyone_of(professionals)) > 1
 
 
 def menu_buttons_for(tenant: Tenant, multi_professional: bool) -> list[str]:
@@ -2888,12 +2893,19 @@ def _professional_id_from_body(body: str | None) -> UUID | None:
 
 
 def _find_professional_by_id(professionals: list | None, professional_id) -> Any | None:
+    """A doctor the patient may be OFFERED (a new booking's selection, a tap, a draft)."""
     if professional_id is None:
         return None
     for professional in professionals or []:
         if professional.id == professional_id:
             return professional
     return None
+
+
+def _find_owner_by_id(professionals: list | None, professional_id) -> Any | None:
+    """The doctor of an EXISTING consultation: any active doctor, hidden ones included
+    (TASK-090 Adendo 1, owner ruling on I1 - hiding only affects NEW bookings)."""
+    return _find_professional_by_id(everyone_of(professionals), professional_id)
 
 
 def _match_professional(professionals: list, body: str | None) -> Any | None:
@@ -5791,7 +5803,7 @@ def _booking_professional(conversation: Conversation, professionals: list | None
     selected = _find_professional_by_id(professionals, _selected_professional_id(conversation))
     if selected is not None:
         return selected
-    rows = professionals or []
+    rows = everyone_of(professionals)
     return rows[0] if len(rows) == 1 else None
 
 
@@ -6055,9 +6067,9 @@ def _appointment_owner_and_unit_id(
     try:
         unit_id = UUID(str(appt["unit_id"])) if appt.get("unit_id") else None
         if owner_id:
-            owner = _find_professional_by_id(professionals, UUID(str(owner_id)))
+            owner = _find_owner_by_id(professionals, UUID(str(owner_id)))
         else:
-            rows = professionals or []
+            rows = everyone_of(professionals)
             owner = rows[0] if len(rows) == 1 else None
     except (TypeError, ValueError):
         return None
@@ -8511,7 +8523,7 @@ def _rebook_event_texts(
     owner = unit = None
     try:
         if appt.get("professional_id"):
-            owner = _find_professional_by_id(professionals, UUID(str(appt["professional_id"])))
+            owner = _find_owner_by_id(professionals, UUID(str(appt["professional_id"])))
         if appt.get("unit_id"):
             unit = flow_units.find_unit(owner, UUID(str(appt["unit_id"])))
     except (TypeError, ValueError):

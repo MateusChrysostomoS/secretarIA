@@ -257,7 +257,12 @@ async def unit_options_for(
 
 
 async def attach_unit_options(
-    session: AsyncSession, tenant: Any, professional_rows: Iterable[Any], snapshots: Iterable[Any]
+    session: AsyncSession,
+    tenant: Any,
+    professional_rows: Iterable[Any],
+    snapshots: Iterable[Any],
+    *,
+    usable_only: bool = True,
 ) -> None:
     """Put each router snapshot's offered units on it as `units` (one read for the roster).
 
@@ -269,9 +274,13 @@ async def attach_unit_options(
     `service_unit_terms` (`{service_id: {unit_id: UnitTerms}}`, `{}` when none): the per-unit
     price/duration exceptions (TASK-085), also ONE query, tenant-scoped
     (services/service_terms.py::load_terms_for).
+
+    `usable_only=False` (TASK-090 Adendo 1, I1): the units of a doctor hidden from patients -
+    every one of them, complete or not - so his EXISTING consultations keep their unit lines,
+    hours and blocked days; he is never offered for a new booking anyway.
     """
     rows = list(professional_rows)
-    options = await unit_options_for(session, tenant, rows)
+    options = await unit_options_for(session, tenant, rows, usable_only=usable_only)
     marks = await read_marks_for(session, [row.id for row in rows])
     terms = await load_terms_for(session, tenant.id, [row.id for row in rows])
     for snapshot in snapshots:

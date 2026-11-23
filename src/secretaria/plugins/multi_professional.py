@@ -93,17 +93,22 @@ logger = get_logger(__name__)
 
 
 async def _active_professionals(tenant_id: UUID) -> list:
-    """The professionals a PATIENT may book with for `tenant_id`, ordered by name
-    (`tenant_config.list_patient_professionals`: active, and not a doctor whose unit links
-    are all unusable - TASK-090 Adendo 1). Never raises."""
+    """The professionals a PATIENT may book with for `tenant_id`, ordered by name: active, and
+    not a doctor whose unit links are all unusable (TASK-090 Adendo 1). A
+    `booking_scope.PatientRoster`: its `everyone` (every active doctor) decides the topology,
+    so hiding never turns a multi-doctor clinic into a one-doctor one (owner ruling, C1)."""
     # Imported lazily, same rationale as ai/tools.py's _persist_appointment:
     # keeps this module importable without a DB/ORM in dev scripts, and avoids
     # an import cycle through models -> services.
     from secretaria.core.database import async_session_factory
-    from secretaria.services.tenant_config import list_patient_professionals
+    from secretaria.services.booking_scope import PatientRoster
+    from secretaria.services.professional_units import patient_visible_professionals
+    from secretaria.services.tenant_config import list_active_professionals
 
     async with async_session_factory() as session:
-        return await list_patient_professionals(session, tenant_id)
+        everyone = await list_active_professionals(session, tenant_id)
+        offered = await patient_visible_professionals(session, tenant_id, everyone)
+    return PatientRoster(offered, everyone=everyone)
 
 
 async def _professional_services(tenant_id: UUID, professional) -> list[dict]:

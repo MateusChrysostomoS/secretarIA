@@ -122,21 +122,16 @@ async def test_the_ai_professional_tools_never_reach_a_hidden_doctor(db) -> None
     assert draft_id is None
 
 
-async def test_the_flow_roster_of_a_turn_leaves_the_hidden_doctor_out(db, monkeypatch) -> None:  # noqa: F811
-    """The worker builds the router's roster from the patient roster: a tap or a typed name can
-    only match a doctor in it (`flow_router._match_professional` reads that list)."""
+async def _turn_with_selected(db, monkeypatch, docs, tenant, **conversation_fields):  # noqa: F811
+    """One main turn (LLM leg) of a conversation that had picked Dra. Bia; returns the roster
+    the worker built and the doctor the agent was told is selected."""
     from secretaria.models import Conversation, FlowState, Patient
     from secretaria.workers import orchestrator, tasks
     from tests._patching import workers_ns
-    from tests.test_bot_reply_gating import (
-        _LLM_ANSWER,
-        _reply_context,
-        _summary,
-    )
+    from tests.test_bot_reply_gating import _LLM_ANSWER, _reply_context, _summary
 
-    tenant, docs = await _world(db)
     async with db() as session:
-        patient = Patient(id=uuid4(), tenant_id=tenant.id, wa_id="5511999990001", name="Maria")
+        patient = Patient(id=uuid4(), tenant_id=tenant.id, wa_id=f"55119{uuid4().int % 10**8}")
         session.add(patient)
         await session.flush()
         conversation = Conversation(
@@ -145,15 +140,17 @@ async def test_the_flow_roster_of_a_turn_leaves_the_hidden_doctor_out(db, monkey
             patient_id=patient.id,
             flow_state=FlowState.LLM,
             flow_selected_professional_id=docs["bia"].id,  # picked before she was hidden
+            **conversation_fields,
         )
         session.add(conversation)
         await session.commit()
-    seen: list[list[str]] = []
-    original = orchestrator._flow_professionals
+    rosters: list = []
+    original = orchestrator.build_patient_roster
 
-    def _spy(rows, catalog):
-        seen.append(sorted(row.name for row in rows))
-        return original(rows, catalog)
+    async def _spy(*args, **kwargs):
+        roster = await original(*args, **kwargs)
+        rosters.append(roster)
+        return roster
 
     async def _entitled(_tenant_id, _redis):
         return _summary()
@@ -161,20 +158,42 @@ async def test_the_flow_roster_of_a_turn_leaves_the_hidden_doctor_out(db, monkey
     selected: list = []
 
     async def _fake_run_agent(message, context, **kwargs):
-        selected.append(kwargs.get("selected_professional"))
+        selected.append(getattr(kwargs.get("selected_professional"), "name", None))
         return "Oi!"
 
     monkeypatch.setattr(workers_ns, "async_session_factory", db)
-    monkeypatch.setattr(orchestrator, "_flow_professionals", _spy)
+    monkeypatch.setattr(orchestrator, "build_patient_roster", _spy)
     monkeypatch.setattr(workers_ns, "get_entitlements", _entitled)
     monkeypatch.setattr(workers_ns, "run_agent", _fake_run_agent)
     monkeypatch.setattr(workers_ns, "get_waba_token", lambda *_a: _none())
-
     await tasks._send_bot_reply(_reply_context(conversation, patient, _LLM_ANSWER))
+    return rosters, selected
 
-    assert seen and seen[0] == ["Dr. Caio", "Dra. Ana"]
-    # The hidden doctor picked earlier is not resumed.
+
+async def test_the_flow_roster_of_a_turn_offers_visible_doctors_and_knows_everyone(
+    db, monkeypatch  # noqa: F811
+) -> None:
+    """The router's roster OFFERS only the visible doctors (a tap or a typed name can only
+    match them), while `everyone` keeps all five for the topology and existing consultations.
+    A hidden doctor picked for a NEW booking is not resumed (review M2)."""
+    tenant, docs = await _world(db)
+    rosters, selected = await _turn_with_selected(db, monkeypatch, docs, tenant)
+    [roster] = rosters
+    assert sorted(p.name for p in roster) == ["Dr. Caio", "Dra. Ana"]
+    assert len(roster.everyone) == 5
     assert selected == [None]
+
+
+async def test_a_hidden_doctor_is_resumed_while_his_own_consultation_is_managed(
+    db, monkeypatch  # noqa: F811
+) -> None:
+    """Owner ruling on I1: hidden = not offered for NEW bookings only. Managing his existing
+    consultation keeps him (his agenda, services and units)."""
+    tenant, docs = await _world(db)
+    _rosters, selected = await _turn_with_selected(
+        db, monkeypatch, docs, tenant, flow_managing_appointment_id=uuid4()
+    )
+    assert selected == ["Dra. Bia"]
 
 
 async def _none():

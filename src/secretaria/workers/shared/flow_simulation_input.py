@@ -17,6 +17,7 @@ from uuid import UUID
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from secretaria.models import Professional, Tenant
+from secretaria.services.booking_scope import PatientRoster
 from secretaria.services.calendar import CalendarService
 from secretaria.services.hub_configuration import (
     PROFESSIONAL_CONFIG_FIELDS,
@@ -24,10 +25,10 @@ from secretaria.services.hub_configuration import (
 )
 from secretaria.services.insurance_catalog import load_tenant_insurance
 from secretaria.services.list_options import needs_unit_options
+from secretaria.services.professional_units import patient_hidden_professional_ids
 from secretaria.services.service_catalog import load_service_catalog, resolve_entries
 from secretaria.services.tenant_config import (
     list_active_professionals,
-    list_patient_professionals,
     professional_business_hours,
 )
 from secretaria.services.unit_booking import attach_unit_options
@@ -74,8 +75,10 @@ async def load_simulation_inputs(
     draft_professional: dict | None = None,
 ) -> SimulationInputs:
     """READ-ONLY. Never commits; never touches the ORM objects it is given."""
-    # What the patient is offered (TASK-090 Adendo 1): the simulation and the Portal options.
-    rows = await list_patient_professionals(session, tenant.id)
+    rows = await list_active_professionals(session, tenant.id)
+    # TASK-090 Adendo 1: the simulation and the Portal options OFFER only the doctors a patient
+    # may book with; every active doctor still decides the topology (owner rulings, I1/C1).
+    hidden = await patient_hidden_professional_ids(session, tenant.id, [p.id for p in rows])
     catalog = await load_service_catalog(session, tenant.id)
     insurance = await load_tenant_insurance(session, tenant.id)
 
@@ -85,7 +88,7 @@ async def load_simulation_inputs(
         for p in rows
     ]
     snapshot = _flow_tenant_snapshot(tenant_view, professional_views, catalog, insurance)
-    flow_professionals = [
+    everyone = [
         SimpleNamespace(
             id=p.id,
             name=p.name,
@@ -103,6 +106,9 @@ async def load_simulation_inputs(
         )
         for p in professional_views
     ]
+    flow_professionals = PatientRoster(
+        [p for p in everyone if p.id not in hidden], everyone=everyone
+    )
     by_id = {str(p.id): p for p in professional_views}
 
     def calendar_for(selected_id: str | None) -> CalendarService:
