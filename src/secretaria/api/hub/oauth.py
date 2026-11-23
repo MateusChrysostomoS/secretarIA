@@ -25,7 +25,7 @@ from fastapi.responses import JSONResponse, RedirectResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from secretaria.api.hub.deps import get_current_tenant
+from secretaria.api.hub.deps import get_current_tenant, manager_only, professional_writer
 from secretaria.config import get_settings
 from secretaria.core.database import get_session
 from secretaria.core.logging import get_logger
@@ -93,7 +93,7 @@ async def _enqueue_local_sync(
         )
 
 
-@router.get("/tenants/me/calendar/oauth/start")
+@router.get("/tenants/me/calendar/oauth/start", dependencies=[Depends(manager_only)])
 async def oauth_start(tenant: Tenant = Depends(get_current_tenant)) -> dict:
     """Return the Google consent URL (the frontend redirects the browser to it)."""
     settings = get_settings()
@@ -112,7 +112,10 @@ async def oauth_start(tenant: Tenant = Depends(get_current_tenant)) -> dict:
     return {"authorization_url": google_oauth.build_authorization_url(state)}
 
 
-@router.get("/tenants/me/professionals/{professional_id}/calendar/oauth/start")
+@router.get(
+    "/tenants/me/professionals/{professional_id}/calendar/oauth/start",
+    dependencies=[Depends(professional_writer)],
+)
 async def professional_oauth_start(
     professional_id: UUID,
     tenant: Tenant = Depends(get_current_tenant),
@@ -224,7 +227,10 @@ async def oauth_callback(
     return _portal_redirect(portal, "success")
 
 
-@router.post("/tenants/me/professionals/{professional_id}/calendar/disconnect")
+@router.post(
+    "/tenants/me/professionals/{professional_id}/calendar/disconnect",
+    dependencies=[Depends(professional_writer)],
+)
 async def professional_calendar_disconnect(
     professional_id: UUID,
     tenant: Tenant = Depends(get_current_tenant),
@@ -249,7 +255,7 @@ async def professional_calendar_disconnect(
     return {"status": "disconnected", "professional_id": str(professional.id)}
 
 
-@router.post("/tenants/me/calendar/disconnect")
+@router.post("/tenants/me/calendar/disconnect", dependencies=[Depends(manager_only)])
 async def calendar_disconnect(
     tenant: Tenant = Depends(get_current_tenant),
     session: AsyncSession = Depends(get_session),

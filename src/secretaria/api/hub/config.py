@@ -13,6 +13,12 @@ PATCH /tenants/me/operating-channel - where the secretarIA serves the clinic's
                                  patients (TASK-084); manager only, 409 for a
                                  channel not released yet (WhatsApp today).
 
+Roles (TASK-091 T4): everything here that WRITES the clinic - PUT /config, PATCH
+/contact-email, the tenant half of PUT /configuration - is the clinic manager's
+(`forbidden_role` for anyone else); the professional half of PUT /configuration is the
+manager's or the doctor's own. GET /config stays readable by every staff member (a doctor
+sees the sinal percentage, never edits it).
+
 WHY THE AGGREGATE ENDPOINT EXISTS
 ---------------------------------
 The Configuração screen edits two scopes at once, and used to persist them with
@@ -34,14 +40,17 @@ until no deployed frontend depends on them.
 
 import time
 from datetime import UTC, datetime
+from uuid import UUID
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from secretaria.api.hub.deps import (
     ensure_clinic_manager,
+    ensure_clinic_manager_or_own_professional,
     get_current_tenant,
-    get_hub_claim,
+    get_staff_claim,
+    manager_only,
     require_clinic_manager,
 )
 from secretaria.core.catalog_limits import CatalogLimitExceeded
@@ -64,40 +73,6 @@ from secretaria.services.payments import price_change
 logger = get_logger(__name__)
 router = APIRouter(prefix="/tenants/me", tags=["hub-config"])
 
-# The fields only a clinic MANAGER may write (owner answer 12 / spec 12.2 R12, TASK-020): which Pix
-# provider the clinic uses, when the deposit is asked for, how long a slot is held for it, whether
-# a deposit is charged at all and the deposit POLICY (amount, refund window, retention,
-# rescheduling). A save that touches none of them (a greeting, the hours) is open to whoever could
-# save it before.
-PAYMENT_WRITE_FIELDS = frozenset(
-    {
-        "payment_provider",
-        "deposit_timing",
-        "deposit_hold_ttl_minutes",
-        "pix_deposit_enabled",
-        "pix_deposit_percent",
-        "pix_refund_window_hours",
-        "pix_difference_refund_min_days",
-        "pix_retention_policy",
-        "pix_partial_refund_percent",
-        "pix_reschedule_limit",
-    }
-)
-
-
-async def _claim_if_authenticated(
-    authorization: str | None = Header(default=None),
-) -> SubscriptionClaim | None:
-    """The verified claim of a caller that sent credentials, else None.
-
-    Deliberately NOT a bare `Depends(get_hub_claim)`: a save that touches no payment field never
-    needed the claim, and `get_current_tenant` has already refused an unauthenticated caller by
-    the time a handler runs, so the claim is only ever read for the three payment fields.
-    """
-    if authorization is None:
-        return None
-    return await get_hub_claim(authorization)
-
 
 async def _sweep_prices_after_commit(request: Request, tenant: Tenant, *patches: dict) -> None:
     """TASK-085 R (D-R14): AFTER the commit of a save that can change a price - a service list
@@ -114,13 +89,24 @@ async def _sweep_prices_after_commit(request: Request, tenant: Tenant, *patches:
     )
 
 
-def _require_manager_for_payment_fields(claim: SubscriptionClaim | None, patch: dict) -> None:
-    """403 `forbidden_role` / `role_claim_missing` when `patch` touches a payment field and the
-    caller is not a manager. It runs FIRST: before any validation, read or mutation."""
-    if PAYMENT_WRITE_FIELDS & patch.keys():
-        if claim is None:
-            raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Missing bearer token")
+def _require_configuration_roles(
+    claim: SubscriptionClaim, tenant_data: dict, professional_id: str | None
+) -> None:
+    """TASK-091 T4 - who may save what in PUT /tenants/me/configuration. Runs FIRST: before any
+    validation, read or mutation, and refuses the WHOLE save (never half of it).
+
+    * any field of the clinic (its data, messages, reminders, pix incl. `pix_deposit_percent`,
+      post-consult...) -> the clinic manager only;
+    * the professional half -> the manager, or the doctor himself (`claim.professional_id`).
+    """
+    if tenant_data:
         ensure_clinic_manager(claim)
+    if professional_id is not None:
+        try:
+            target = UUID(str(professional_id))
+        except ValueError:
+            target = None
+        ensure_clinic_manager_or_own_professional(claim, target)
 
 
 @router.get("/config", response_model=TenantConfigRead)
@@ -131,7 +117,9 @@ async def get_config(
     return await hubcfg.tenant_read_model(session, tenant)
 
 
-@router.patch("/contact-email", response_model=ContactEmailRead)
+@router.patch(
+    "/contact-email", response_model=ContactEmailRead, dependencies=[Depends(manager_only)]
+)
 async def update_contact_email(
     body: ContactEmailUpdate,
     tenant: Tenant = Depends(get_current_tenant),
@@ -139,7 +127,7 @@ async def update_contact_email(
 ) -> ContactEmailRead:
     """The clinic's operational e-mail; the ONLY writer of it (config PUTs ignore the field).
 
-    Open to any authenticated user of the tenant, like the non-payment fields of the config.
+    The clinic manager only (TASK-091 T4), like every other write of the clinic's data.
     """
     stored = contact_email_service.set_contact_email(tenant, body.contact_email)
     await session.commit()
@@ -188,12 +176,11 @@ async def update_operating_channel(
     )
 
 
-@router.put("/config", response_model=TenantConfigRead)
+@router.put("/config", response_model=TenantConfigRead, dependencies=[Depends(manager_only)])
 async def update_config(
     body: TenantConfigUpdate,
     request: Request,
     tenant: Tenant = Depends(get_current_tenant),
-    claim: SubscriptionClaim | None = Depends(_claim_if_authenticated),
     session: AsyncSession = Depends(get_session),
 ) -> TenantConfigRead:
     """LEGACY single-scope save. Superseded by PUT /tenants/me/configuration.
@@ -205,7 +192,6 @@ async def update_config(
     # `exclude_unset` so absent fields are left untouched (partial update). The
     # dumped values are already plain dicts/lists, ready to store as JSON.
     data = body.model_dump(exclude_unset=True)
-    _require_manager_for_payment_fields(claim, data)
 
     # Before any mutation: a `service_id` this clinic does not own would not
     # fail loudly later, it would silently fall back to name matching — see
@@ -255,7 +241,7 @@ async def update_configuration(
     body: HubConfigurationUpdate,
     request: Request,
     tenant: Tenant = Depends(get_current_tenant),
-    claim: SubscriptionClaim | None = Depends(_claim_if_authenticated),
+    claim: SubscriptionClaim = Depends(get_staff_claim),
     session: AsyncSession = Depends(get_session),
 ) -> HubConfigurationRead:
     """Save tenant config and one professional's config in ONE transaction.
@@ -284,7 +270,7 @@ async def update_configuration(
     started = time.perf_counter()
 
     tenant_data = body.tenant.model_dump(exclude_unset=True) if body.tenant else {}
-    _require_manager_for_payment_fields(claim, tenant_data)
+    _require_configuration_roles(claim, tenant_data, body.professional_id)
     professional_data = (
         body.professional.model_dump(exclude_unset=True) if body.professional else {}
     )

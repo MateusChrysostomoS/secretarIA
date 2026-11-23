@@ -27,7 +27,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from secretaria.api.hub.deps import get_current_tenant
+from secretaria.api.hub.deps import get_current_tenant, manager_only
 from secretaria.core.database import get_session
 from secretaria.core.logging import get_logger
 from secretaria.models import Tenant
@@ -121,7 +121,12 @@ async def list_units(
     return [_read_model(u, counts.get(u.id, 0)) for u in units]
 
 
-@router.post("", response_model=UnitRead, status_code=status.HTTP_201_CREATED)
+@router.post(
+    "",
+    response_model=UnitRead,
+    status_code=status.HTTP_201_CREATED,
+    dependencies=[Depends(manager_only)],
+)
 async def create_unit(
     body: UnitCreate,
     tenant: Tenant = Depends(get_current_tenant),
@@ -144,7 +149,7 @@ async def create_unit(
     return _read_model(unit)
 
 
-@router.patch("/{unit_id}", response_model=UnitRead)
+@router.patch("/{unit_id}", response_model=UnitRead, dependencies=[Depends(manager_only)])
 async def update_unit(
     unit_id: str,
     body: UnitUpdate,

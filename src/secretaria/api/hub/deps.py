@@ -24,6 +24,19 @@ manager-only (payment settings in the config PUT), take `claim: SubscriptionClai
 Depends(get_hub_claim)` next to `get_current_tenant` and call `ensure_clinic_manager(claim)`
 inside the handler when such a field is present. Hub checks bypass the positive cache
 so revoked staff access is refused immediately, as on main.
+
+TASK-091 T4 closes the configuration routes by role, on top of `get_current_tenant` (whose
+claim `get_staff_claim` reuses - one brain-api call per request):
+
+  * `manager_only`        — writes of the CLINIC (catalog, units, clinic data, messages,
+                            reminders, pix, post-consult, clinic insurance, clinic calendar);
+  * `professional_writer` — writes of `/professionals/{professional_id}/...`: the manager or
+                            the doctor himself (`ensure_clinic_manager_or_own_professional`);
+  * `professional_reader` — reads of `/professionals/{professional_id}/...`: everyone as
+                            before, except a self-only doctor (`is_self_only_doctor`: `doctor`
+                            without `is_owner`/`is_manager`), who reads only himself.
+
+They are route dependencies, so the refusal comes before the body is validated or read.
 """
 
 from collections.abc import Callable
@@ -165,6 +178,71 @@ def ensure_clinic_manager_or_own_professional(
     if claim.role == ROLE_DOCTOR and claim.professional_id == professional_id:
         return
     raise _refuse(FORBIDDEN_ROLE, _MANAGER_OR_SELF_MESSAGE, claim)
+
+
+def is_self_only_doctor(claim: SubscriptionClaim) -> bool:
+    """TASK-091 T4: a `doctor` who is not the clinic's manager (no `is_owner`/`is_manager`).
+
+    Such a doctor reads and writes only the Professional row his account is linked to
+    (`claim.professional_id`) and reads - never writes - the clinic's own settings.
+    """
+    return claim.role == ROLE_DOCTOR and not _is_manager(claim)
+
+
+def _as_uuid(value: object) -> UUID | None:
+    if isinstance(value, UUID):
+        return value
+    try:
+        return UUID(str(value))
+    except ValueError:
+        return None
+
+
+def ensure_can_read_professional(claim: SubscriptionClaim, professional_id: object) -> None:
+    """403 `forbidden_role` when a self-only doctor reads a professional other than himself.
+
+    Everyone else reads as before (the desk needs every doctor's units to book). A malformed id
+    is "not his own" for the self-only doctor, and the route's own 404 for everyone else.
+    """
+    if is_self_only_doctor(claim) and (
+        claim.professional_id is None or _as_uuid(professional_id) != claim.professional_id
+    ):
+        raise _refuse(FORBIDDEN_ROLE, _MANAGER_OR_SELF_MESSAGE, claim)
+
+
+async def get_staff_claim(
+    request: Request, tenant: Tenant = Depends(get_current_tenant)
+) -> SubscriptionClaim:
+    """The verified claim of THIS request (the one `get_current_tenant` just checked).
+
+    Reuses the introspection `get_current_tenant` stored, so a gated route costs no second call
+    to brain-api. Fails CLOSED: no stored claim is a 401, never "allowed".
+    """
+    claim = getattr(request.state, "staff_subscription_claim", None)
+    if claim is None:
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid or inactive subscription token")
+    return claim
+
+
+async def manager_only(claim: SubscriptionClaim = Depends(get_staff_claim)) -> None:
+    """Route dependency: a write of the CLINIC (catalog, units, clinic data, messages, reminders,
+    pix, post-consult, clinic insurance) - only the clinic manager. Runs before the body is read."""
+    ensure_clinic_manager(claim)
+
+
+async def professional_reader(
+    professional_id: str, claim: SubscriptionClaim = Depends(get_staff_claim)
+) -> None:
+    """Route dependency for a READ of `/professionals/{professional_id}/...`."""
+    ensure_can_read_professional(claim, professional_id)
+
+
+async def professional_writer(
+    professional_id: str, claim: SubscriptionClaim = Depends(get_staff_claim)
+) -> None:
+    """Route dependency for a WRITE of `/professionals/{professional_id}/...`: the manager, or the
+    doctor himself. Runs before the body is read, so a refused caller learns nothing about it."""
+    ensure_clinic_manager_or_own_professional(claim, _as_uuid(professional_id))
 
 
 async def require_clinic_manager(

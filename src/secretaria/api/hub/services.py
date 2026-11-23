@@ -36,7 +36,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from secretaria.api.hub.deps import get_current_tenant
+from secretaria.api.hub.deps import get_current_tenant, manager_only
 from secretaria.core.catalog_limits import (
     SERVICES_PER_CLINIC,
     SERVICES_PER_PROFESSIONAL,
@@ -191,7 +191,12 @@ async def list_services(
     return [_read_model(row, offering) for row in catalog]
 
 
-@router.post("", response_model=ServiceCreated, status_code=status.HTTP_201_CREATED)
+@router.post(
+    "",
+    response_model=ServiceCreated,
+    status_code=status.HTTP_201_CREATED,
+    dependencies=[Depends(manager_only)],
+)
 async def create_service(
     payload: ServiceCreate,
     force: bool = Query(
@@ -325,7 +330,7 @@ async def create_service(
     )
 
 
-@router.put("/order", response_model=list[ServiceRead])
+@router.put("/order", response_model=list[ServiceRead], dependencies=[Depends(manager_only)])
 async def order_services(
     payload: ServiceOrderUpdate,
     tenant: Tenant = Depends(get_current_tenant),
@@ -357,7 +362,7 @@ async def order_services(
     return [_read_model(row, offering) for row in catalog]
 
 
-@router.patch("/{service_id}", response_model=ServiceRead)
+@router.patch("/{service_id}", response_model=ServiceRead, dependencies=[Depends(manager_only)])
 async def update_service(
     service_id: str,
     payload: ServiceUpdate,

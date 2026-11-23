@@ -29,7 +29,12 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from secretaria.api.hub.deps import get_current_tenant
+from secretaria.api.hub.deps import (
+    get_current_tenant,
+    manager_only,
+    professional_reader,
+    professional_writer,
+)
 from secretaria.core.catalog_limits import (
     INSURANCE_PLANS_PER_CLINIC,
     CatalogLimitExceeded,
@@ -156,7 +161,9 @@ async def get_insurance_mode(tenant: Tenant = Depends(get_current_tenant)) -> In
     return InsuranceModeRead(mode=tenant.insurance_mode)
 
 
-@router.put("/insurance-mode", response_model=InsuranceModeRead)
+@router.put(
+    "/insurance-mode", response_model=InsuranceModeRead, dependencies=[Depends(manager_only)]
+)
 async def put_insurance_mode(
     body: InsuranceModeUpdate,
     tenant: Tenant = Depends(get_current_tenant),
@@ -220,7 +227,11 @@ async def get_tenant_insurance_plans(
     return await _tenant_plans(session, tenant)
 
 
-@router.put("/insurance-plans", response_model=list[TenantInsurancePlanRead])
+@router.put(
+    "/insurance-plans",
+    response_model=list[TenantInsurancePlanRead],
+    dependencies=[Depends(manager_only)],
+)
 async def put_tenant_insurance_plans(
     body: TenantInsurancePlansUpdate,
     tenant: Tenant = Depends(get_current_tenant),
@@ -257,6 +268,7 @@ async def put_tenant_insurance_plans(
     "/insurance-plans/custom",
     response_model=TenantInsurancePlanRead,
     status_code=status.HTTP_201_CREATED,
+    dependencies=[Depends(manager_only)],
 )
 async def post_tenant_insurance_plan_custom(
     body: TenantInsurancePlanCustomCreate,
@@ -289,7 +301,11 @@ async def post_tenant_insurance_plan_custom(
     )
 
 
-@router.put("/insurance-plans/order", response_model=list[TenantInsurancePlanRead])
+@router.put(
+    "/insurance-plans/order",
+    response_model=list[TenantInsurancePlanRead],
+    dependencies=[Depends(manager_only)],
+)
 async def put_tenant_insurance_plan_order(
     body: TenantInsurancePlanOrderUpdate,
     tenant: Tenant = Depends(get_current_tenant),
@@ -357,6 +373,7 @@ async def _independent_accepted(session: AsyncSession, professional: Professiona
 @router.get(
     "/professionals/{professional_id}/insurance-plans",
     response_model=ProfessionalInsurancePlansRead,
+    dependencies=[Depends(professional_reader)],
 )
 async def get_professional_insurance_plans(
     professional_id: str,
@@ -399,6 +416,7 @@ async def get_professional_insurance_plans(
 @router.put(
     "/professionals/{professional_id}/insurance-plans",
     response_model=ProfessionalInsurancePlansRead,
+    dependencies=[Depends(professional_writer)],
 )
 async def put_professional_insurance_plans(
     professional_id: str,
@@ -496,6 +514,7 @@ async def put_professional_insurance_plans(
     "/professionals/{professional_id}/insurance-plans/custom",
     response_model=TenantInsurancePlanRead,
     status_code=status.HTTP_201_CREATED,
+    dependencies=[Depends(professional_writer)],
 )
 async def post_professional_insurance_plan_custom(
     professional_id: str,

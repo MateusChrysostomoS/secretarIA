@@ -66,6 +66,8 @@ def _wiring(db, monkeypatch):
 
 
 def _auth(tenant: Tenant, **kwargs) -> dict:
+    # TASK-091 T4: the clinic's e-mail is the manager's to write; default to the manager.
+    kwargs.setdefault("role", "manager")
     return {"Authorization": f"Bearer {make_hub_token(tenant_id=tenant.id, **kwargs)}"}
 
 
@@ -128,13 +130,22 @@ async def test_missing_key_is_422_and_never_clears(client: AsyncClient, db):
     assert await _stored(db, tenant.id) == "old@example.com"
 
 
-async def test_any_role_of_the_tenant_may_write(client: AsyncClient, db):
+async def test_only_the_clinic_manager_may_write(client: AsyncClient, db):
+    """TASK-091 T4 (was: any role of the tenant may write)."""
     tenant = await _seed(db, "A")
-    for role in ("doctor", "secretary", "owner"):
+    allowed = [{"role": "manager"}, {"role": "doctor", "is_owner": True}]
+    for flags in allowed:
+        response = await client.patch(
+            PATCH, json={"contact_email": "gestor@example.com"}, headers=_auth(tenant, **flags)
+        )
+        assert response.status_code == 200, (flags, response.text)
+    for role in ("doctor", "secretary"):
         response = await client.patch(
             PATCH, json={"contact_email": f"{role}@example.com"}, headers=_auth(tenant, role=role)
         )
-        assert response.status_code == 200, (role, response.text)
+        assert response.status_code == 403, (role, response.text)
+        assert response.json()["detail"]["code"] == "forbidden_role"
+    assert await _stored(db, tenant.id) == "gestor@example.com"
 
 
 async def test_a_token_of_tenant_a_cannot_change_tenant_b(client: AsyncClient, db):

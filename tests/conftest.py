@@ -81,3 +81,31 @@ def _clinic_wide_agenda_viewer():
     app.dependency_overrides[get_agenda_viewer] = lambda: CLINIC_WIDE
     yield
     app.dependency_overrides.pop(get_agenda_viewer, None)
+
+
+@pytest.fixture(autouse=True)
+def _manager_staff_claim_when_tenant_is_overridden():
+    """TASK-091 T4: the configuration routes judge the caller's role from the claim the real
+    `get_current_tenant` stored (api/hub/deps.py::get_staff_claim, which fails CLOSED in
+    production). Tests that override `get_current_tenant` never present a token, so no claim
+    exists: by default such a session is the clinic MANAGER's - exactly the role-blind
+    behaviour those tests were written against. When the real `get_current_tenant` ran (tests
+    that fake only brain-api's introspection, e.g. tests/test_t091_role_guards.py), the real
+    claim is returned untouched, so role tests see the role they asked for.
+    """
+    from fastapi import Depends, Request
+
+    from secretaria.api.hub.deps import get_current_tenant, get_staff_claim
+    from secretaria.core.subscription import SubscriptionClaim
+    from secretaria.main import app
+
+    async def _claim(request: Request, tenant=Depends(get_current_tenant)) -> SubscriptionClaim:
+        claim = getattr(request.state, "staff_subscription_claim", None)
+        if claim is not None:
+            return claim
+        return SubscriptionClaim(tenant_id=tenant.id, active=True, role="manager")
+
+    app.dependency_overrides[get_staff_claim] = _claim
+    yield
+    if app.dependency_overrides.get(get_staff_claim) is _claim:
+        app.dependency_overrides.pop(get_staff_claim, None)
