@@ -1,6 +1,6 @@
 # CHECKPOINT — Multi-unidades + agenda compartilhada por pessoa (TASK-083)
 
-> **Superado em parte por TASK-090 (2026-11-22, local):** unidade deixou de ser add-on pago e de ter limite — saíram o `403 multi_unit_not_entitled`, o `409 unit_limit_reached` e o `503` de entitlement; o endereço da unidade agora é estruturado (CEP, rua, número, complemento, bairro, cidade, UF; `address` é derivado; `422 unit_address_invalid`) em vez do `unit_address_required`. A condição "clínica tem ≥1 unidade ativa" continua ligando as ferramentas de unidade. Ver [CHECKPOINT_contexto_ajustes_finais.md](CHECKPOINT_contexto_ajustes_finais.md).
+> **Superado em parte por TASK-090 (2026-11-22, local):** unidade deixou de ser add-on pago e de ter limite — saíram o `403 multi_unit_not_entitled`, o `409 unit_limit_reached` e o `503` de entitlement; o endereço da unidade agora é estruturado (CEP, rua, número, complemento, bairro, cidade, UF; `address` é derivado; `422 unit_address_invalid`) em vez do `unit_address_required`. Adendo 1 (2026-11-23): a condição passou a ser "clínica tem ≥1 unidade ativa com endereço completo" — liga as ferramentas de unidade e é exigida para a secretária responder; o paciente só vê unidades completas. Ver [CHECKPOINT_contexto_ajustes_finais.md](CHECKPOINT_contexto_ajustes_finais.md).
 
 Estado (2026-11-13): **pronto e validado, só LOCAL. Commitado na branch `task/TASK-083-multi-unidades`
 (worktree `BRAIN-worktrees/TASK-083/secretarIA`); NÃO foi para `main`, NÃO houve push, NÃO foi deployado.**

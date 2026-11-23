@@ -1,6 +1,6 @@
 # CHECKPOINT — Contexto da clínica que a LLM enxerga (TASK-025, parte backend)
 
-> **Nota TASK-090 (2026-11-22, local):** o endereço deixou de ser campo da clínica no /contexto — mora na unidade; o item "endereço" da completude fica satisfeito por unidade ativa com rua+cidade (ou `tenants.address` legado) e a cidade da saudação vem da região comum das unidades (`services/clinic_region.py`). Ver [CHECKPOINT_contexto_ajustes_finais.md](CHECKPOINT_contexto_ajustes_finais.md).
+> **Nota TASK-090 (2026-11-22, local):** o endereço deixou de ser campo da clínica no /contexto — mora na unidade; o item "endereço" da completude fica satisfeito por unidade ativa com endereço completo (Adendo 1, 2026-11-23: CEP, rua, número, cidade e UF; `tenants.address` legado não conta mais) e a cidade da saudação vem da região comum das unidades (`services/clinic_region.py`). Ver [CHECKPOINT_contexto_ajustes_finais.md](CHECKPOINT_contexto_ajustes_finais.md).
 
 Spec: `C:\TECH\BRAIN\tasks\TASK-025\SPEC.md` (BRAIN, fora deste repo). Plano: `tasks/TASK-025/` (BRAIN). Executado em 2026-10-04.
 

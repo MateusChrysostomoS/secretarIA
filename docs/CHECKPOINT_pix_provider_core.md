@@ -1,6 +1,6 @@
 # CHECKPOINT — Núcleo de provedores de pagamento (TASK-016, fase F1 da TASK F)
 
-> **Nota TASK-090 (2026-11-22, local):** `deposit_lifecycle._insurance_payment_note` e o texto "Sobre o pagamento do convênio" nas mensagens do Pix foram removidos junto com `custom_payment_note`. Ver [CHECKPOINT_contexto_ajustes_finais.md](CHECKPOINT_contexto_ajustes_finais.md).
+> **Nota TASK-090 (2026-11-22, local):** `deposit_lifecycle._insurance_payment_note` e o texto "Sobre o pagamento do convênio" nas mensagens do Pix foram removidos (a coluna `custom_payment_note` ficou: pelo Adendo 1 de 2026-11-23 é a regra de pagamento lida só pela IA, nunca no Pix). Ver [CHECKPOINT_contexto_ajustes_finais.md](CHECKPOINT_contexto_ajustes_finais.md).
 
 **Data:** 2026-09-30 · **Origem:** `Brain-Message-Frontend/docs/superpowers/specs/2026-09-29-task-f-sinal-pix-confirmacao-design.md`
 (§17/§17A) + plano `.../plans/2026-09-29-task-f1-pix-nucleo-provedores-asaas.md` ·

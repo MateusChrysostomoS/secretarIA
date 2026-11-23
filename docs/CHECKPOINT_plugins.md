@@ -1,6 +1,6 @@
 # CHECKPOINT — Plugin architecture (entitlement-gated capabilities)
 
-> **Nota TASK-090 (2026-11-22, local):** `multi_unit` deixou de ser add-on pago: `entitlements_client.CORE_ADDON_IDS` o trata como ativo para toda clínica ativa (a chave segue em `ADDON_IDS`, espelho do brain-api); o plugin só liga com ≥1 unidade ativa (`PluginSpec.requires_active_units`). Ver [CHECKPOINT_contexto_ajustes_finais.md](CHECKPOINT_contexto_ajustes_finais.md).
+> **Nota TASK-090 (2026-11-22, local):** `multi_unit` deixou de ser add-on pago: `entitlements_client.CORE_ADDON_IDS` o trata como ativo para toda clínica ativa (a chave segue em `ADDON_IDS`, espelho do brain-api); o plugin só liga com ≥1 unidade ativa de endereço completo (`PluginSpec.requires_active_units`, Adendo 1 de 2026-11-23). Ver [CHECKPOINT_contexto_ajustes_finais.md](CHECKPOINT_contexto_ajustes_finais.md).
 
 > See also `docs/CHECKPOINT_audio_transcricao.md` for inbound WhatsApp voice-note
 > transcription, which lands on this same `workers/tasks.py` reply path
