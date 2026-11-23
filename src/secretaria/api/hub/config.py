@@ -48,6 +48,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from secretaria.api.hub.deps import (
     ensure_clinic_manager,
     ensure_clinic_manager_or_own_professional,
+    ensure_may_set_calendar_id,
     get_current_tenant,
     get_staff_claim,
     manager_only,
@@ -274,6 +275,8 @@ async def update_configuration(
     professional_data = (
         body.professional.model_dump(exclude_unset=True) if body.professional else {}
     )
+    # TASK-091 review M1: a doctor never points his agenda at another calendar.
+    ensure_may_set_calendar_id(claim, professional_data)
 
     # Ids are captured as strings up front, and every log line below uses these
     # rather than reading the ORM objects. `session.rollback()` expires every
@@ -321,6 +324,19 @@ async def update_configuration(
                 "service_ids": exc.service_ids,
             },
         ) from None
+
+    # --- 1b''. Calendar id (TASK-091 review M1): never another professional's calendar ---
+    if professional is not None:
+        try:
+            await hubcfg.check_calendar_id_free(session, tenant, professional, professional_data)
+        except hubcfg.CalendarIdInUse as exc:
+            logger.info(
+                "hub_configuration_rejected",
+                tenant_id=tenant_id,
+                reason="calendar_in_use",
+                stage="validate",
+            )
+            raise HTTPException(status.HTTP_409_CONFLICT, detail=exc.detail()) from None
 
     # --- 1b'. Per-unit price/duration (TASK-085): a read, before any mutation ------
     if professional is not None and professional_data:

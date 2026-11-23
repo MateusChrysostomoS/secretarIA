@@ -189,6 +189,18 @@ def is_self_only_doctor(claim: SubscriptionClaim) -> bool:
     return claim.role == ROLE_DOCTOR and not _is_manager(claim)
 
 
+def ensure_may_set_calendar_id(claim: SubscriptionClaim, data: dict) -> None:
+    """403 `forbidden_role` when a non-manager sends `google_calendar_id` (TASK-091 review M1).
+
+    The Portal never sends it: the system writes it (the secondary calendar it creates in
+    shared_account mode). Accepting it from a doctor would let him point his agenda at a
+    colleague's calendar - which the clinic's token in shared_account mode would then read and
+    write. Only the clinic manager may still set it by hand.
+    """
+    if "google_calendar_id" in data:
+        _enforce(claim, _is_manager, _MANAGER_ONLY_MESSAGE)
+
+
 def _as_uuid(value: object) -> UUID | None:
     if isinstance(value, UUID):
         return value

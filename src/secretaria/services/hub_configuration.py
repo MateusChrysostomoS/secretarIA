@@ -35,6 +35,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from uuid import UUID
 
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from secretaria.core import extra_reminder
@@ -116,6 +117,49 @@ class PaymentSettingsInvalid(payment_settings.PaymentSettingsInvalid):
 UnitTermsInvalid = unit_terms_service.UnitTermsInvalid
 check_unit_terms = unit_terms_service.check_unit_terms
 apply_unit_terms = unit_terms_service.apply_unit_terms
+
+
+class CalendarIdInUse(Exception):
+    """A professional was given a calendar id another professional of the clinic already uses.
+
+    Two professionals on one calendar is one agenda read and written as two (TASK-091 review M1).
+    Raised before any mutation, like every other check in this module.
+    """
+
+    def detail(self) -> dict:
+        return {
+            "code": "calendar_in_use",
+            "message": "Este calendário já é a agenda de outro profissional da clínica.",
+        }
+
+
+def _calendar_key(value: object) -> str:
+    return str(value or "").strip().lower()
+
+
+async def check_calendar_id_free(
+    session: AsyncSession, tenant: Tenant, professional: Professional, data: dict
+) -> None:
+    """Refuse a `google_calendar_id` already used by ANOTHER professional of this clinic.
+
+    Compared trimmed and case-insensitively. Absent, null or empty = nothing to check, and so is
+    the professional's own current calendar. `primary` is not an id of its own: with a doctor's
+    own Google account it means HIS main calendar, so two doctors may both hold it.
+    """
+    if "google_calendar_id" not in data:
+        return
+    wanted = _calendar_key(data["google_calendar_id"])
+    if not wanted or wanted == "primary":
+        return
+    others = await session.scalars(
+        select(Professional.google_calendar_id).where(
+            Professional.tenant_id == tenant.id,
+            Professional.id != professional.id,
+            Professional.google_calendar_id.is_not(None),
+        )
+    )
+    if any(_calendar_key(other) == wanted for other in others):
+        raise CalendarIdInUse()
 
 
 class UnknownServiceIds(Exception):

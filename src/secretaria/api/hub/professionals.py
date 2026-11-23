@@ -70,6 +70,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from secretaria.api.hub.deps import (
     ensure_clinic_manager,
+    ensure_may_set_calendar_id,
     get_current_tenant,
     get_staff_claim,
     is_self_only_doctor,
@@ -170,6 +171,16 @@ async def _get_professional(
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Professional not found") from None
 
 
+async def _check_calendar_id_free(
+    session: AsyncSession, tenant: Tenant, professional: Professional, data: dict
+) -> None:
+    """409 `calendar_in_use` (TASK-091 review M1), before any mutation."""
+    try:
+        await hubcfg.check_calendar_id_free(session, tenant, professional, data)
+    except hubcfg.CalendarIdInUse as exc:
+        raise HTTPException(status.HTTP_409_CONFLICT, detail=exc.detail()) from None
+
+
 async def _count_active(session: AsyncSession, tenant_id: UUID) -> int:
     result = await session.scalar(
         select(func.count())
@@ -257,7 +268,9 @@ async def update_professional(
     if "is_active" in data:
         # TASK-091 T4: turning a professional on or off spends/frees a seat of the clinic's plan.
         ensure_clinic_manager(claim)
+    ensure_may_set_calendar_id(claim, data)
     professional = await _get_professional(session, tenant, professional_id)
+    await _check_calendar_id_free(session, tenant, professional, data)
 
     activating = data.get("is_active") is True and not professional.is_active
     if activating:
@@ -290,6 +303,7 @@ async def update_professional_config(
     body: ProfessionalConfigUpdate,
     request: Request,
     tenant: Tenant = Depends(get_current_tenant),
+    claim: SubscriptionClaim = Depends(get_staff_claim),
     session: AsyncSession = Depends(get_session),
 ) -> ProfessionalListItem:
     """Per-professional config save — NEVER gated by entitlements/limits/activation
@@ -306,8 +320,10 @@ async def update_professional_config(
     and `{}` / `[]` writes an empty OWN override that inherits nothing (see
     ProfessionalConfigUpdate).
     """
-    professional = await _get_professional(session, tenant, professional_id)
     data = body.model_dump(exclude_unset=True)
+    ensure_may_set_calendar_id(claim, data)
+    professional = await _get_professional(session, tenant, professional_id)
+    await _check_calendar_id_free(session, tenant, professional, data)
 
     try:
         await hubcfg.check_appointment_type_service_ids(session, tenant, data)
