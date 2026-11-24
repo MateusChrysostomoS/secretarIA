@@ -435,6 +435,15 @@ async def _ask(tenant_id, insurance: str, *, conversation_id=None) -> str:
         ai_tools._tenant_id_ctx.reset(tokens[0])
 
 
+async def _offered(tenant_id, insurance: str, *, conversation_id=None) -> None:
+    """No rule (or no clinic, or a failed read): the tool never answers with text - it hands
+    back `insurance_payment_question`, which the worker turns into the fixed Sim / Não card
+    (TASK-090 Adendo 1, owner 2026-11-24; tests/test_handoff_insurance_payment.py)."""
+    with pytest.raises(ai_tools.HumanHandoffRequested) as handed:
+        await _ask(tenant_id, insurance, conversation_id=conversation_id)
+    assert handed.value.reason == "insurance_payment_question"
+
+
 async def _clinic(db, mode: str = "shared", **plans) -> Tenant:
     async with db() as session:
         tenant = Tenant(id=uuid4(), clinic_name="C", phone_number_id=None, insurance_mode=mode)
@@ -459,17 +468,16 @@ async def test_the_tool_returns_the_clinics_rule_fenced(tool_db):
         answer = await _ask(tenant.id, asked)
         assert _inside(answer) == RULE
     # The convênio exists but has no rule; an unknown one neither: the same fixed answer.
-    assert await _ask(tenant.id, "geap saude") == ipn.NO_RULE_TEXT
-    assert await _ask(tenant.id, "Bradesco") == ipn.NO_RULE_TEXT
-    assert "request_human_handoff" in ipn.NO_RULE_TEXT
-    assert '"insurance_payment_question"' in ipn.NO_RULE_TEXT
+    # The convênio exists but has no rule; an unknown one neither: the same offer.
+    await _offered(tenant.id, "geap saude")
+    await _offered(tenant.id, "Bradesco")
 
 
 async def test_the_tool_never_reads_another_clinics_rule(tool_db):
     mine = await _clinic(tool_db, rows=[TenantInsurancePlan(catalog_id=UNIMED)])
     await _clinic(tool_db, rows=[TenantInsurancePlan(catalog_id=UNIMED, custom_payment_note=RULE)])
-    assert await _ask(mine.id, "Unimed") == ipn.NO_RULE_TEXT
-    assert await _ask(None, "Unimed") == ipn.NO_RULE_TEXT
+    await _offered(mine.id, "Unimed")
+    await _offered(None, "Unimed")
 
 
 async def test_an_injection_in_the_rule_stays_inside_the_fence(tool_db):
@@ -540,7 +548,8 @@ async def test_independent_mode_reads_the_doctors_rules(tool_db):
     assert f"Profissional: Dra. Bia - {ipn.DOCTOR_WITHOUT_RULE_TEXT}" in partial
     assert partial.count(ipn.FENCE_OPEN) == 1
     # The conversation's own doctor (Bia) has none: the plain "no rule" answer.
-    assert await _ask(tenant.id, "Unimed", conversation_id=conversation.id) == ipn.NO_RULE_TEXT
+    # Owner 2026-11-24: Dra. Bia (no rule) while Dra. Ana has one -> the offer, never Ana's text.
+    await _offered(tenant.id, "Unimed", conversation_id=conversation.id)
 
 
 async def test_a_doctor_hidden_from_patients_lends_no_rule(tool_db):
@@ -568,7 +577,7 @@ async def test_a_doctor_hidden_from_patients_lends_no_rule(tool_db):
             )
         )
         await session.commit()
-    assert await _ask(tenant.id, "Unimed") == ipn.NO_RULE_TEXT
+    await _offered(tenant.id, "Unimed")
 
 
 def test_a_lone_surrogate_is_dropped_not_a_500():
@@ -586,8 +595,8 @@ async def test_a_failed_lookup_hands_off_and_logs_no_text(tool_db, monkeypatch):
     monkeypatch.setattr(
         ai_tools.logger, "warning", lambda event, **kw: events.append((event, kw))
     )
-    answer = await _ask(tenant.id, "Unimed")
-    assert answer == ai_tools.INSURANCE_RULE_LOOKUP_FAILED
+    # Fail-safe: a rule that could not be read is never explained - the same offer.
+    await _offered(tenant.id, "Unimed")
     assert events == [("tool_insurance_rule_lookup_failed", {"error_type": "RuntimeError"})]
 
 

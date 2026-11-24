@@ -56,11 +56,12 @@ if TYPE_CHECKING:
 # agent books at all, the menu is the way back that is never taken away).
 REQUIRED_TOOLS = ("set_booking_draft", "show_main_menu")
 
-# TASK-090 (owner, 2026-11-22) + Adendo 1 (2026-11-23): every clinic - a convênio payment-rule
-# question reads the clinic's rule and explains only it; no rule -> straight to a person. The
+# TASK-090 (owner, 2026-11-22) + Adendo 1 (2026-11-23/24): every clinic - a convênio payment-rule
+# question reads the clinic's rule and explains only it; no rule -> the fixed card asks (Sim/Não)
+# whether a person from the team should help (flow_router.enter_insurance_payment_offer). The
 # short v2 forms of prompts.INSURANCE_PAYMENT_HANDOFF_RULE (this prompt has a size ceiling).
 INSURANCE_PAYMENT_HANDOFF_RULE_V2 = (
-    'Convênio sem regra: reason "insurance_payment_question", sem explicar.'
+    'Convênio sem regra: reason "insurance_payment_question" (Sim/Não).'
 )
 INSURANCE_PAYMENT_RULE_V2 = (
     "- get_insurance_payment_rule: pagar com convênio (reembolso, coparticipação, "

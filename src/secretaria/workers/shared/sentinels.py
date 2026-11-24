@@ -38,6 +38,7 @@ from secretaria.services.flow_router import (
     booking_gate_scope,
     enter_guided_booking,
     enter_human_offer,
+    enter_insurance_payment_offer,
     enter_manage_action,
     flows_enabled,
     main_menu_buttons,
@@ -1182,11 +1183,17 @@ async def _handle_offer_human_handoff(
     patient_wa: str | None,
     redis=None,
     waba_token: str | None = None,
+    *,
+    insurance_payment: bool = False,
 ) -> bool:
     """The agent's offer_human_handoff hand-back: send the fixed "quer que eu chame nosso
     atendente humano?" card (TASK-038). The patient's tap decides - see
     services/flow_router.py::_handle_human_offer. No tenant: nothing is sent and the
     turn's safety net answers instead.
+
+    `insurance_payment` (TASK-090 Adendo 1, owner 2026-11-24): no payment rule for the
+    convênio asked about - the fixed "não tenho cadastrada a regra..." card on its own step,
+    so "✅ Sim" hands over with `insurance_payment_question`.
     """
     if tenant is None:
         logger.warning(
@@ -1199,10 +1206,13 @@ async def _handle_offer_human_handoff(
         conversation_id=str(reply.conversation_id),
         tenant_id=str(tenant.id),
         channel=reply.channel,
+        reason="insurance_payment_question" if insurance_payment else "could_not_help",
     )
     return await _apply_flow_result(
         reply,
-        enter_human_offer(conversation),
+        enter_insurance_payment_offer(conversation)
+        if insurance_payment
+        else enter_human_offer(conversation),
         patient_wa,
         redis=redis,
         tenant=tenant,

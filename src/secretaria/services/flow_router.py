@@ -388,6 +388,21 @@ HUMAN_OFFER_BOOKING_BODY = (
     "Quer que eu chame nosso atendente humano para te ajudar a marcar? "
     "(Pode demorar alguns minutos)"
 )
+# TASK-090 Adendo 1 (owner, 2026-11-24): a patient asks how payment works with a convênio
+# that has NO payment rule registered (or the rule could not be read). The secretária never
+# transfers behind the patient's back: this FIXED card says so and asks, with the same
+# ✅ Sim / ❌ Não, whether a person should help. Its own step carries the reason through the
+# tap, so "✅ Sim" hands over with `insurance_payment_question` (the clinic's e-mail says
+# why) instead of the generic `could_not_help`. Never names the convênio or any rule.
+STEP_HUMAN_OFFER_INSURANCE = "awaiting_human_offer_insurance"
+HUMAN_OFFER_INSURANCE_BODY = (
+    "Não tenho cadastrada a regra de pagamento desse convênio. Quer que eu chame alguém da "
+    "equipe para te explicar? (Pode demorar alguns minutos)"
+)
+# Every step that holds the Sim / Não card, and the hand-off reason "✅ Sim" carries from it
+# (absent = the generic `could_not_help`).
+HUMAN_OFFER_STEPS = frozenset({STEP_HUMAN_OFFER, STEP_HUMAN_OFFER_INSURANCE})
+HUMAN_OFFER_REASONS = {STEP_HUMAN_OFFER_INSURANCE: "insurance_payment_question"}
 # "❌ Não" keeps the conversation with the AI (owner, 2026-10-07): no menu, so a
 # patient who was mid-booking does not lose what they had chosen.
 HUMAN_OFFER_DECLINED_BODY = (
@@ -1056,6 +1071,10 @@ class FlowRouterResult:
     # (TASK-071 Plan 3 review fix, 2026-10-29): the worker keeps the clinic's calendar alert but
     # offers a person (Sim / Não) instead of handing over. Never persisted.
     deposit_waived_reason: str | None = None
+    # On an action="handover" result: the reason the clinic's hand-off e-mail gives
+    # (services/handoff_notification.py). None = the generic `could_not_help`. Set by the
+    # Sim / Não card from its step (HUMAN_OFFER_REASONS). Never persisted.
+    handover_reason: str | None = None
     # WHICH static config the professional is missing, on an
     # action="professional_config_incomplete" result and nowhere else. WHO it
     # is missing rides on `flow_selected_professional_id` above rather than in
@@ -2311,12 +2330,15 @@ def _enter_other(conversation: Conversation | None = None) -> FlowRouterResult:
 
 
 def enter_human_offer(
-    conversation: Conversation | None = None, *, body: str = HUMAN_OFFER_BODY
+    conversation: Conversation | None = None,
+    *,
+    body: str = HUMAN_OFFER_BODY,
+    step: str = STEP_HUMAN_OFFER,
 ) -> FlowRouterResult:
     """The fixed "quer que eu chame nosso atendente humano?" card (TASK-038).
 
-    Waits in LLM mode on STEP_HUMAN_OFFER, keeping the booking answers like any
-    delegation; `_handle_human_offer` reads the tap. `body` is the question
+    Waits in LLM mode on `step` (one of HUMAN_OFFER_STEPS), keeping the booking answers like
+    any delegation; `_handle_human_offer` reads the tap. `body` is the question
     (`HUMAN_OFFER_BOOKING_BODY` in the deposit flow); the mechanics never change.
     """
     result = (
@@ -2326,18 +2348,28 @@ def enter_human_offer(
     )
     result.action = "reply"
     result.bubbles = [MenuBubble(body=body, labels=[LABEL_YES, LABEL_NO])]
-    result.flow_step = STEP_HUMAN_OFFER
+    result.flow_step = step
     return result
+
+
+def enter_insurance_payment_offer(conversation: Conversation | None = None) -> FlowRouterResult:
+    """No payment rule for the convênio asked about (TASK-090 Adendo 1, owner 2026-11-24): the
+    fixed sentence + the ✅ Sim / ❌ Não card on STEP_HUMAN_OFFER_INSURANCE."""
+    return enter_human_offer(
+        conversation, body=HUMAN_OFFER_INSURANCE_BODY, step=STEP_HUMAN_OFFER_INSURANCE
+    )
 
 
 def _handle_human_offer(
     conversation: Conversation, tenant: Tenant, body: str, professionals: list | None
 ) -> FlowRouterResult:
-    """The patient's answer to `enter_human_offer`'s card."""
+    """The patient's answer to `enter_human_offer`'s card (any of HUMAN_OFFER_STEPS)."""
+    reason = HUMAN_OFFER_REASONS.get(getattr(conversation, "flow_step", None))
     if _label_match(body, LABEL_YES):
         logger.info(
             "human_offer_answered",
             accepted=True,
+            reason=reason or "could_not_help",
             conversation_id=str(getattr(conversation, "id", None)),
         )
         # action="handover": workers/shared/flow_runner.py commits the human state and
@@ -2347,6 +2379,7 @@ def _handle_human_offer(
         # (workers/shared/handover.py) - a bare result would erase whom to e-mail.
         result = _delegate_llm_keeping_draft(conversation)
         result.action = "handover"
+        result.handover_reason = reason
         result.bubbles = [TextBubble(body=SCOPED_HELP_ESCALATE_MESSAGE)]
         return result
     if _label_match(body, LABEL_NO):
@@ -2442,7 +2475,7 @@ async def _route(
 
     # The open "quer que eu chame nosso atendente humano?" card (TASK-038). Checked
     # before the sticky LLM branch below, which would otherwise swallow the tap.
-    if state == FlowState.LLM and conversation.flow_step == STEP_HUMAN_OFFER:
+    if state == FlowState.LLM and conversation.flow_step in HUMAN_OFFER_STEPS:
         return _handle_human_offer(conversation, tenant, inbound_body, professionals)
 
     # Once in full LLM mode, stay there until a /menu reset (or the agent's

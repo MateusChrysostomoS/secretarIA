@@ -23,6 +23,7 @@ from secretaria.ai.graph import (
     run_agent,
     split_handback_intro,
 )
+from secretaria.ai.tools import INSURANCE_PAYMENT_QUESTION
 from secretaria.core.database import async_session_factory
 from secretaria.core.logging import get_logger
 from secretaria.models import (
@@ -47,11 +48,11 @@ from secretaria.services.calendar import (
 )
 from secretaria.services.entitlements_client import get_entitlements
 from secretaria.services.flow_router import (
+    HUMAN_OFFER_STEPS,
     LABEL_CANCEL_APPT,
     LABEL_MANAGE_APPOINTMENT,
     LABEL_OTHER,
     LABEL_RESCHEDULE,
-    STEP_HUMAN_OFFER,
     FlowRouterResult,
     MenuBubble,
     ai_draft_v2_enabled,
@@ -1340,7 +1341,7 @@ async def _send_bot_reply_inner(reply: _ReplyContext, redis=None) -> None:
     if (
         flow_snapshot is not None
         and flow_snapshot[0].flow_state in (FlowState.IDLE, FlowState.MENU, FlowState.LLM)
-        and flow_snapshot[0].flow_step != STEP_HUMAN_OFFER
+        and flow_snapshot[0].flow_step not in HUMAN_OFFER_STEPS
         and flow_snapshot[0].patient_id is not None
         and asks_to_edit_appointment(reply.inbound_body)
     ):
@@ -1673,6 +1674,20 @@ async def _send_bot_reply_inner(reply: _ReplyContext, redis=None) -> None:
             patient_wa,
             redis=redis,
             waba_token=waba_token,
+        )
+        return
+    if reply_text == HUMAN_HANDOFF_SENTINEL_PREFIX + INSURANCE_PAYMENT_QUESTION:
+        # TASK-090 Adendo 1 (owner, 2026-11-24): no payment rule for the convênio - never a
+        # transfer behind the patient's back; the fixed card asks (✅ Sim / ❌ Não) and the
+        # tap carries the reason to the clinic's e-mail.
+        await _handle_offer_human_handoff(
+            reply,
+            tenant,
+            flow_snapshot,
+            patient_wa,
+            redis=redis,
+            waba_token=waba_token,
+            insurance_payment=True,
         )
         return
     if reply_text.startswith(HUMAN_HANDOFF_SENTINEL_PREFIX):

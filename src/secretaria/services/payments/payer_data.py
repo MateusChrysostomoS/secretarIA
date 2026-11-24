@@ -306,6 +306,9 @@ _SHAPE_STEPS = frozenset({"awaiting_confirmation", "awaiting_retry_choice"})
 # third invalid answer leaves open (owner, 2026-10-29). A document typed in reply is no longer an
 # answer, so it would otherwise reach the history unmasked.
 _HUMAN_OFFER_STEP = "awaiting_human_offer"
+# Every step holding that card (`flow_router.HUMAN_OFFER_STEPS`, pinned by the same test): the
+# convênio payment-rule offer (TASK-090 Adendo 1) gets the same document net.
+_HUMAN_OFFER_STEPS = frozenset({_HUMAN_OFFER_STEP, "awaiting_human_offer_insurance"})
 _LLM_STATE = "LLM"
 
 
@@ -324,7 +327,7 @@ def should_redact_inbound(flow_state: object, flow_step: str | None, body: str |
     in_the_aftermath = state == _WAITING_FOR_PIX_STATE or (
         state == _CATALOG_STATE and flow_step in _SHAPE_STEPS
     )
-    if state == _LLM_STATE and flow_step == _HUMAN_OFFER_STEP:
+    if state == _LLM_STATE and flow_step in _HUMAN_OFFER_STEPS:
         # The Sim / Não card: only a document (the permissive net) - an e-mail typed to the AI
         # there is ordinary conversation.
         return extract_document(body) is not None

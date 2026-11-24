@@ -110,6 +110,8 @@ def fence_payment_note(note: str) -> str:
     return f"{FENCE_HEADER}\n{FENCE_OPEN}\n{_neutralise(_normalise(note))}\n{FENCE_CLOSE}"
 
 
+# `fence_payment_rules([])` only: the AI tool never answers "no rule" with text - it hands back
+# and the patient gets the fixed Sim / Não card (TASK-090 Adendo 1, owner 2026-11-24).
 NO_RULE_TEXT = (
     "Não há regra de pagamento cadastrada pela clínica para esse convênio. Não explique nem "
     'dê exemplos: chame request_human_handoff com reason "insurance_payment_question".'

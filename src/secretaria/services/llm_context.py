@@ -80,6 +80,9 @@ _STEP_LABELS: dict[str, str] = {
     # TASK-038. Only read if a turn ever reaches the model mid-offer; the open card
     # itself is answered by the flow (flow_router._handle_human_offer).
     fr.STEP_HUMAN_OFFER: "a pergunta se quer que chamemos um atendente humano",
+    fr.STEP_HUMAN_OFFER_INSURANCE: (
+        "a pergunta se quer que chamemos alguém da equipe para explicar o pagamento do convênio"
+    ),
     # R6: a question during an edit is one model turn on the same draft step.
     fr.STEP_EDIT_MENU: "o menu de alterações da consulta já marcada",
     fr.STEP_EDIT_MORE: "as outras opções de alteração da consulta já marcada",

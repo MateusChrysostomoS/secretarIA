@@ -365,9 +365,11 @@ def test_legacy_prompt_keeps_calendar_path_without_flow_state():
 # the ESTADO DA CONVERSA rules).
 # Re-rendered 2026-11-23 (TASK-090 Adendo 1, C6): the rule first reads get_insurance_payment_rule
 # (explain only the clinic's rule) and hands off only without one (+83 chars per occurrence).
+# Re-rendered 2026-11-24 (TASK-090 Adendo 1, owner): without a rule the secretária offers Sim/Não
+# (a fixed card) instead of transferring - the rule says so (+43 chars per occurrence).
 _V1_DIGESTS = {
-    "minimal": (14670, "8e3f6aeb4fbf9e465d37cbc61e37acbb78cb19f4329062c18990564a01bbc409"),
-    "full": (20703, "98207bde62287ea1bb0fd35fe6849bb7a10708a8a2245ede68f312a994c4662e"),
+    "minimal": (14713, "2ae852a0e8563fc5336d8a01bad091c035c0fe8e22d50601a75bc788afe1f1b0"),
+    "full": (20789, "8384b7731186efa54e3e99d3b4a4faa387973be68bfe07f2ce4545bf76617815"),
 }
 
 
