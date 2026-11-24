@@ -141,6 +141,66 @@ async def test_service_unavailable_without_payment_gets_the_notice(unpaid, db) -
     assert _texts() == [PAYMENT_NOTICE_TEXT]
 
 
+# Toque em botão de lembrete antigo sem pagamento: aviso neutro, a ação NÃO roda.
+async def test_button_tap_without_payment_gets_the_notice_and_skips_the_action(
+    unpaid, db, monkeypatch
+) -> None:
+    from uuid import uuid4
+
+    from secretaria.workers import orchestrator
+
+    async def _boom(*a, **k):
+        raise AssertionError("a ação do botão não pode rodar sem pagamento")
+
+    monkeypatch.setattr(orchestrator, "_handle_action_button", _boom)
+    tenant, patient, conversation = await _make_conversation(db)
+    reply = tasks._ReplyContext(
+        conversation_id=conversation.id,
+        tenant_id=tenant.id,
+        patient_ref=patient.wa_id,
+        inbound_body="",
+        action_button=("apptconfirm", str(uuid4())),
+    )
+
+    redis = FakeRedis()
+    for _ in range(2):
+        await tasks._send_bot_reply(reply, redis=redis)
+
+    assert _texts() == [PAYMENT_NOTICE_TEXT]
+
+
+# Toque com clínica em dia ou pagamento ilegível: segue o caminho de sempre.
+@pytest.mark.parametrize("state", ["paid", "unknown"])
+async def test_button_tap_paid_or_unknown_runs_the_action(db, monkeypatch, state) -> None:
+    from uuid import uuid4
+
+    from secretaria.workers import orchestrator
+
+    async def _entitlement(tenant_id, redis):
+        return _summary() if state == "paid" else None
+
+    called: list[str] = []
+
+    async def _action(reply, action, appointment_id, redis=None):
+        called.append(action)
+
+    monkeypatch.setattr(workers_ns, "get_entitlements", _entitlement)
+    monkeypatch.setattr(orchestrator, "_handle_action_button", _action)
+    tenant, patient, conversation = await _make_conversation(db)
+    reply = tasks._ReplyContext(
+        conversation_id=conversation.id,
+        tenant_id=tenant.id,
+        patient_ref=patient.wa_id,
+        inbound_body="",
+        action_button=("apptconfirm", str(uuid4())),
+    )
+
+    await tasks._send_bot_reply(reply, redis=FakeRedis())
+
+    assert called == ["apptconfirm"]
+    assert PAYMENT_NOTICE_TEXT not in _texts()
+
+
 async def test_no_redis_means_silence_in_every_branch(unpaid, db) -> None:
     tenant, patient, conversation = await _make_conversation(db)
     await tasks._send_bot_reply(_reply_context(conversation, patient))

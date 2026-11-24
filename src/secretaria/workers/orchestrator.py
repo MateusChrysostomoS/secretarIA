@@ -348,6 +348,38 @@ async def _send_bot_reply(reply: _ReplyContext, redis=None) -> None:
     await _send_turn_fallback(reply, redis, cause=cause)
 
 
+async def _notify_unpaid_button_tap(reply: _ReplyContext, redis) -> bool:
+    """True when the tap came from an unpaid clinic: the notice was tried, the action must not run.
+
+    Never raises. Anything that cannot be resolved (no conversation, no tenant, payment
+    unreadable) returns False, i.e. the tap keeps its previous behaviour.
+    """
+    try:
+        if reply.conversation_id is None:
+            return False
+        async with async_session_factory() as session:
+            conversation = await session.get(Conversation, reply.conversation_id)
+            tenant = await session.get(Tenant, conversation.tenant_id) if conversation else None
+            waba_token = await get_waba_token(session, tenant.id) if tenant is not None else None
+        if tenant is None:
+            return False
+        summary = await get_entitlements(tenant.id, redis)
+        if summary is None or (summary.active and summary.secretaria_enabled):
+            return False
+        logger.warning(
+            "bot_reply_suppressed_unentitled",
+            tenant_id=str(tenant.id),
+            status=summary.status,
+        )
+        await send_payment_notice_once(
+            reply, tenant=tenant, waba_token=waba_token, summary=summary, redis=redis
+        )
+        return True
+    except Exception as exc:
+        logger.warning("payment_notice_tap_check_failed", error_type=type(exc).__name__)
+        return False
+
+
 async def _send_bot_reply_inner(reply: _ReplyContext, redis=None) -> None:
     """Generate a reply, split it into bubbles, send each, and record them."""
     # Reminder action-button tap: a fully self-contained turn (its own
@@ -356,6 +388,11 @@ async def _send_bot_reply_inner(reply: _ReplyContext, redis=None) -> None:
     # `_persist_inbound_message`'s docstring for why this runs first.
     if reply.action_button is not None:
         action, appointment_id = reply.action_button
+        # TASK-093: clínica sem pagamento -> só o aviso neutro (1 por dia), a ação não roda.
+        # Pagamento ilegível (summary None) segue o caminho de sempre: este ramo nunca teve a
+        # trava, então uma queda da Brain não pode passar a bloquear toques legítimos.
+        if await _notify_unpaid_button_tap(reply, redis):
+            return
         await _handle_action_button(reply, action, appointment_id, redis=redis)
         return
 
