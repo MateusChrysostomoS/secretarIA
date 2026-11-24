@@ -51,6 +51,16 @@ class Settings(BaseSettings):
     META_PHONE_NUMBER_ID: str = ""
     META_GRAPH_API_VERSION: str = "v21.0"
 
+    # --- WhatsApp connection in the secretarIA backend (TASK-093 Plano 3, stage a) ---
+    # OFF by default: while False, every /tenants/me/whatsapp/* route answers 404 and the
+    # current brain-api path stays the only one. Turning it on is the owner's call (stage b).
+    WHATSAPP_CONNECT_BACKEND_ENABLED: bool = False
+    # Meta app id + Embedded Signup configuration id: public values the browser SDK needs
+    # (GET /tenants/me/whatsapp/embedded-signup-config echoes them). The code exchange also
+    # needs META_APP_SECRET above - the SAME Meta app signs the webhooks. NEVER log the secret.
+    META_APP_ID: str = ""
+    META_ES_CONFIG_ID: str = ""
+
     # --- Precheck hand-off (mesh hub-and-spoke, OUTBOUND to brain-api) ---
     # DIRECTION CHANGE: secretaria used to be designed to call precheck
     # directly (PRECHECK_BASE_URL/PRECHECK_API_KEY, now removed — see
