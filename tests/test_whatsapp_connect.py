@@ -10,7 +10,6 @@ from uuid import uuid4
 
 import httpx
 import pytest
-import structlog
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from secretaria.config import get_settings
@@ -273,8 +272,13 @@ async def test_a_conflict_that_appears_during_the_meta_calls_still_stores_nothin
 
 
 async def test_token_code_and_app_secret_never_reach_the_logs(db, meta, caplog):
+    # recorded_logs, not structlog.testing.capture_logs: with cache_logger_on_first_use a logger
+    # an earlier test already used ignores capture_logs (green alone, red in the full suite).
+    # It records the raw kwargs, before any redaction processor - a stricter check.
+    from tests.before_support import recorded_logs
+
     caplog.set_level(logging.DEBUG)
-    with structlog.testing.capture_logs() as logs:
+    with recorded_logs() as logs:
         async with db() as session:
             tenant = await _tenant(session)
             await _complete(session, tenant, "ok-1")
