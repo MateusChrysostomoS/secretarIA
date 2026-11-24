@@ -53,6 +53,9 @@ _TOKEN_EXCHANGE_PATH = "/oauth/access_token"
 _TIMEOUT_SECONDS = 10.0
 # Tests plug an httpx.MockTransport here; production uses the default network transport.
 _TRANSPORT: httpx.AsyncBaseTransport | None = None
+# Bound at import: some hub tests replace `httpx.AsyncClient` module-wide with a fake brain-api;
+# the Meta client must stay a real client (talking to `_TRANSPORT`).
+_AsyncClient = httpx.AsyncClient
 
 __all__ = [
     "CODE_EXCHANGE_FAILED",
@@ -77,7 +80,7 @@ class ConnectError(Exception):
 
 def _graph_client() -> httpx.AsyncClient:
     version = get_settings().META_GRAPH_API_VERSION
-    return httpx.AsyncClient(
+    return _AsyncClient(
         base_url=f"https://graph.facebook.com/{version}",
         timeout=_TIMEOUT_SECONDS,
         transport=_TRANSPORT,
