@@ -216,6 +216,8 @@ async def test_manager_sets_reads_and_clears_the_rule_of_a_catalog_line(client, 
         "is_custom": False,
         "custom_payment_note": RULE,
         "sort_order": None,
+        # C7: the "Outro" ON/OFF flag rides on every read; a catalog line is always on.
+        "is_active": True,
     }
     listed = await client.get("/tenants/me/insurance-plans", headers=HEADERS)
     assert [p["custom_payment_note"] for p in listed.json()] == [RULE]

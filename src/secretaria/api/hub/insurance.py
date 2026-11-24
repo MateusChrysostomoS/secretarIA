@@ -6,6 +6,7 @@ GET     /tenants/me/insurance-plans                          - the clinic's plan
 PUT     /tenants/me/insurance-plans                          - replace the catalog-backed subset.
 POST    /tenants/me/insurance-plans/custom                   - the clinic's "Outro".
 PUT     /tenants/me/insurance-plans/{plan_id}/payment-note   - a clinic line's payment rule.
+PUT     /tenants/me/insurance-plans/{plan_id}/active         - the clinic's "Outro" ON/OFF.
 GET     /tenants/me/professionals/{id}/insurance-plans       - doctor's picker.
 PUT     /tenants/me/professionals/{id}/insurance-plans       - replace doctor's (shape by mode).
 POST    /tenants/me/professionals/{id}/insurance-plans/custom - doctor's own "Outro"
@@ -13,6 +14,15 @@ POST    /tenants/me/professionals/{id}/insurance-plans/custom - doctor's own "Ou
 PUT     /tenants/me/professionals/{id}/insurance-plans/{plan_id}/payment-note
                                                                - a doctor line's payment rule
                                                                  (independent only).
+PUT     /tenants/me/professionals/{id}/insurance-plans/{plan_id}/active
+                                                               - the doctor's "Outro" ON/OFF
+                                                                 (independent only).
+
+"Outro" ON/OFF (TASK-090 Adendo 1, contract C7, owner 2026-11-24): a typed-by-hand convênio can
+be switched OFF without losing it (row, name and payment rule stay); it then reaches no patient
+and no AI tool, and every read here returns it with `is_active=false`. Same role gate as creating
+an "Outro" (any staff role); switching ON is held to the convênio cap (only ACTIVE lines count),
+switching OFF never is. A catalog line answers 422 `not_custom_plan` (OFF deletes a catalog line).
 
 Payment rule (TASK-090 Adendo 1, contract C6): every line (catalog or "Outro", clinic or doctor)
 may carry an optional `custom_payment_note`, returned on every read. Writing it - the two PUT
@@ -68,6 +78,7 @@ from secretaria.schemas.insurance import (
     InsuranceModeRead,
     InsuranceModeUpdate,
     PaymentNoteUpdate,
+    PlanActiveUpdate,
     ProfessionalInsuranceCustomCreate,
     ProfessionalInsurancePlansRead,
     ProfessionalInsurancePlansUpdate,
@@ -79,6 +90,7 @@ from secretaria.schemas.insurance import (
 from secretaria.services import hub_configuration as hubcfg
 from secretaria.services.insurance_catalog import (
     NotClinicPlans,
+    NotCustomPlan,
     PlanNotFound,
     UnknownCatalogIds,
     create_professional_custom_plan,
@@ -88,6 +100,7 @@ from secretaria.services.insurance_catalog import (
     list_tenant_plans,
     load_tenant_insurance,
     professional_accepted_tenant_plan_ids,
+    set_custom_plan_active,
     set_professional_clinic_plans,
     set_professional_independent_plans,
     set_tenant_plan_order,
@@ -140,6 +153,7 @@ def _tenant_plan_read(
         is_custom=entry is None,
         custom_payment_note=plan.custom_payment_note,
         sort_order=plan.sort_order,
+        is_active=plan.is_active is not False,
     )
 
 
@@ -178,6 +192,41 @@ def _ensure_manager_writes_note(request: Request, note: str | None) -> None:
     if claim is None:  # fail closed: never an AttributeError -> 500
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid or inactive subscription token")
     ensure_clinic_manager(claim)
+
+
+def _not_custom_plan() -> HTTPException:
+    return HTTPException(
+        status.HTTP_422_UNPROCESSABLE_ENTITY,
+        detail={
+            "code": "not_custom_plan",
+            "message": (
+                "Só um convênio digitado pela clínica ('Outro') pode ser ligado ou desligado "
+                "sem ser removido."
+            ),
+        },
+    )
+
+
+async def _switch_custom_plan(
+    session: AsyncSession,
+    tenant_id: UUID,
+    plan: TenantInsurancePlan | ProfessionalInsurancePlan,
+    is_active: bool,
+) -> bool:
+    """Apply the C7 switch (not committed): 422 `not_custom_plan` for a catalog line; switching
+    ON is held to the convênio cap exactly like creating one (only ACTIVE lines count), switching
+    OFF never fails on it. Returns whether the value changed (False = idempotent no-op)."""
+    if plan.custom_name is None or plan.catalog_id is not None:
+        raise _not_custom_plan()
+    before = await _visible_plan_count(session, tenant_id) if is_active else 0
+    try:
+        changed = set_custom_plan_active(plan, is_active)
+    except NotCustomPlan:
+        raise _not_custom_plan() from None
+    if changed and is_active:
+        await session.flush()
+        await _refuse_growth(session, tenant_id, before)
+    return changed
 
 
 def _parse_plan_id(raw: str) -> UUID:
@@ -358,6 +407,7 @@ async def post_tenant_insurance_plan_custom(
         name=plan.custom_name or "",
         is_custom=True,
         custom_payment_note=plan.custom_payment_note,
+        is_active=plan.is_active is not False,
     )
 
 
@@ -394,6 +444,47 @@ async def put_tenant_insurance_plan_payment_note(
         plan_id=str(plan.id),
         has_rule=note is not None,
     )
+    return _tenant_plan_read(plan, entry)
+
+
+@router.put(
+    "/insurance-plans/{plan_id}/active",
+    response_model=TenantInsurancePlanRead,
+)
+async def put_tenant_insurance_plan_active(
+    plan_id: str,
+    body: PlanActiveUpdate,
+    tenant: Tenant = Depends(get_current_tenant),
+    session: AsyncSession = Depends(get_session),
+) -> TenantInsurancePlanRead:
+    """Switch the clinic's own "Outro" ON/OFF (C7). The row, its name and its payment rule stay.
+
+    Same gate as `POST /insurance-plans/custom` (whoever may create an "Outro" may switch it).
+    404 for an unknown id or another clinic's line; 422 `not_custom_plan` for a catalog line;
+    switching ON past the convênio cap is the cap's 422. The same value again is a 200 no-op.
+    """
+    row = await session.execute(
+        select(TenantInsurancePlan, InsuranceCatalog)
+        .outerjoin(InsuranceCatalog, InsuranceCatalog.id == TenantInsurancePlan.catalog_id)
+        .where(
+            TenantInsurancePlan.id == _parse_plan_id(plan_id),
+            TenantInsurancePlan.tenant_id == tenant.id,
+        )
+    )
+    found = row.first()
+    if found is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Plan not found")
+    plan, entry = found
+    tenant_id = tenant.id
+    changed = await _switch_custom_plan(session, tenant_id, plan, body.is_active)
+    if changed:
+        await session.commit()
+        logger.info(
+            "hub_insurance_custom_plan_switched",
+            tenant_id=str(tenant_id),
+            plan_id=str(plan.id),
+            is_active=plan.is_active,
+        )
     return _tenant_plan_read(plan, entry)
 
 
@@ -448,6 +539,7 @@ def _professional_plan_read(
         name=str(plan.custom_name or ""),
         is_custom=True,
         custom_payment_note=plan.custom_payment_note,
+        is_active=plan.is_active is not False,
     )
 
 
@@ -651,6 +743,7 @@ async def post_professional_insurance_plan_custom(
         name=plan.custom_name or "",
         is_custom=True,
         custom_payment_note=plan.custom_payment_note,
+        is_active=plan.is_active is not False,
     )
 
 
@@ -693,4 +786,51 @@ async def put_professional_insurance_plan_payment_note(
         professional_id=str(professional.id),
         has_rule=note is not None,
     )
+    return _professional_plan_read(plan, entry)
+
+
+@router.put(
+    "/professionals/{professional_id}/insurance-plans/{plan_id}/active",
+    response_model=TenantInsurancePlanRead,
+)
+async def put_professional_insurance_plan_active(
+    professional_id: str,
+    plan_id: str,
+    body: PlanActiveUpdate,
+    tenant: Tenant = Depends(get_current_tenant),
+    session: AsyncSession = Depends(get_session),
+) -> TenantInsurancePlanRead:
+    """Switch a doctor's own "Outro" ON/OFF (`independent` mode, C7). The row, its name and its
+    payment rule stay.
+
+    Same gate as `POST .../insurance-plans/custom`. `plan_id` is the id the picker shows (the row
+    id of the doctor's "Outro"). 404 for another clinic's doctor or a line the doctor does not
+    have; 422 `not_custom_plan` for a catalog pick he accepts; 409 outside `independent`;
+    switching ON past the convênio cap is the cap's 422. The same value again is a 200 no-op.
+    """
+    professional = await _professional(session, tenant, professional_id)
+    if tenant.insurance_mode != "independent":
+        raise _mode_not_applicable(
+            "Convênio 'Outro' por profissional só existe no modo independente."
+        )
+    wanted = _parse_plan_id(plan_id)
+    found = None
+    for plan, entry in await list_professional_plans(session, professional.id):
+        if (entry is not None and entry.id == wanted) or (entry is None and plan.id == wanted):
+            found = (plan, entry)
+            break
+    if found is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Plan not found")
+    plan, entry = found
+    tenant_id = tenant.id
+    changed = await _switch_custom_plan(session, tenant_id, plan, body.is_active)
+    if changed:
+        await session.commit()
+        logger.info(
+            "hub_professional_custom_plan_switched",
+            tenant_id=str(tenant_id),
+            professional_id=str(professional.id),
+            plan_id=str(plan.id),
+            is_active=plan.is_active,
+        )
     return _professional_plan_read(plan, entry)

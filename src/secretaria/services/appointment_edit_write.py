@@ -22,6 +22,7 @@ from secretaria.services.appointment_edit import EditDraft
 from secretaria.services.appointment_status import log_status_transition
 from secretaria.services.insurance_catalog import resolve_booking_plan_ids
 from secretaria.services.patient_context import as_utc
+from secretaria.services.service_catalog import normalize
 
 
 def row_draft(appointment, timezone: str | None) -> EditDraft:
@@ -61,8 +62,14 @@ async def write_appointment_edit(
     """
     before = row_draft(appointment, timezone)
     previous = appointment.status
+    # TASK-090 Adendo 1 (C7): an edit that KEEPS the booking's convênio and doctor keeps the row
+    # it was booked with even when the clinic has since switched that "Outro" OFF; a NEW choice
+    # only ever matches an active convênio.
+    keeps_plan = normalize(edit["insurance"]) == normalize(appointment.insurance) and str(
+        edit["professional_id"]
+    ) == str(appointment.professional_id)
     plan_id, professional_plan_id = await resolve_booking_plan_ids(
-        session, tenant_id, edit["insurance"], edit["professional_id"]
+        session, tenant_id, edit["insurance"], edit["professional_id"], active_only=not keeps_plan
     )
     appointment.appointment_type = edit["appointment_type"] or appointment.appointment_type
     appointment.professional_id = edit["professional_id"]

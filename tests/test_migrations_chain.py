@@ -14,7 +14,8 @@ from alembic.script import ScriptDirectory
 from secretaria.models.insurance import ProfessionalInsurancePlan, TenantInsurancePlan
 
 ROOT = Path(__file__).resolve().parents[1]
-HEAD = "a3c9e5d7f1b4"
+# C7 (2026-11-24): the "Outro" ON/OFF column revision sits on top of a3c9e5d7f1b4.
+HEAD = "c7e3a9f1d5b8"
 DELETED_DROP = "b4d0f6e8a2c5"
 ADDED_BY = "d4f8a2c6e913"
 

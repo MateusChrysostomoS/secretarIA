@@ -52,6 +52,9 @@ class TenantInsurancePlanRead(BaseModel):
     # Position the clinic chose in the patient's list (0 = first); None = not placed,
     # follows the placed ones alphabetically. The list itself comes back in this order.
     sort_order: int | None = None
+    # ON/OFF of an "Outro" (TASK-090 Adendo 1, contract C7). False = kept (name and rule) but
+    # offered to no patient and no AI tool. A catalog line is always true.
+    is_active: bool = True
 
 
 class TenantInsurancePlanIn(BaseModel):
@@ -99,6 +102,18 @@ class PaymentNoteUpdate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     custom_payment_note: str | None = Field(max_length=PAYMENT_NOTE_RAW_MAX)
+
+
+class PlanActiveUpdate(BaseModel):
+    """PUT .../insurance-plans/{plan_id}/active (TASK-090 Adendo 1, contract C7).
+
+    Only a typed-by-hand "Outro" line has the switch; OFF keeps the line, its name and its
+    payment rule. Setting the value it already has is a no-op (200).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    is_active: bool
 
 
 class TenantInsurancePlanOrderUpdate(BaseModel):

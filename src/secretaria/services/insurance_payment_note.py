@@ -171,7 +171,8 @@ async def _clinic_lines(session: AsyncSession, tenant_id: UUID) -> list[_Line]:
     rows = await session.execute(
         select(TenantInsurancePlan, InsuranceCatalog)
         .outerjoin(InsuranceCatalog, InsuranceCatalog.id == TenantInsurancePlan.catalog_id)
-        .where(TenantInsurancePlan.tenant_id == tenant_id)
+        # An "Outro" switched OFF (C7) is an unknown convênio here: never its rule.
+        .where(TenantInsurancePlan.tenant_id == tenant_id, TenantInsurancePlan.is_active.is_(True))
     )
     return [
         _Line(_line_names(plan.custom_name, entry), plan.custom_payment_note)
@@ -189,6 +190,7 @@ async def _doctor_lines(session: AsyncSession, tenant_id: UUID) -> list[_Line]:
             Professional.tenant_id == tenant_id,
             Professional.is_active.is_(True),
             ProfessionalInsurancePlan.tenant_plan_id.is_(None),
+            ProfessionalInsurancePlan.is_active.is_(True),
         )
         .order_by(Professional.name, Professional.id)
     )

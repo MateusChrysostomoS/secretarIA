@@ -223,6 +223,11 @@ class PlanNotFound(ValueError):
     """A `tenant_insurance_plans` id named in a request does not belong to this tenant."""
 
 
+class NotCustomPlan(ValueError):
+    """Only a typed-by-hand "Outro" row has the ON/OFF switch (TASK-090 Adendo 1, C7); a catalog
+    convênio is switched off by deleting its row."""
+
+
 class DuplicateCatalogEntry(ValueError):
     """An admin tried to create a catalog entry whose (normalized) name already exists."""
 
@@ -323,19 +328,26 @@ def _plan_display_name(plan: TenantInsurancePlan, entry: InsuranceCatalog | None
 
 
 async def list_tenant_plans(
-    session: AsyncSession, tenant_id: UUID
+    session: AsyncSession, tenant_id: UUID, *, active_only: bool = False
 ) -> list[tuple[TenantInsurancePlan, InsuranceCatalog | None]]:
     """The clinic's enabled plans (catalog-backed AND custom), in the clinic's order.
 
     Plans the clinic placed (`sort_order`) come first, by position; the rest follow
     by display name - which is the whole list for a clinic that never ordered.
     LEFT JOIN because a custom "Outro" row (TASK-008) has no catalog entry.
+
+    `active_only` (TASK-090 Adendo 1, C7): skip an "Outro" the clinic switched OFF - every
+    patient-facing or AI reader passes it; the manager's own screens (and the writes that
+    validate ids against the clinic's rows) see every row.
     """
-    rows = await session.execute(
+    stmt = (
         select(TenantInsurancePlan, InsuranceCatalog)
         .outerjoin(InsuranceCatalog, InsuranceCatalog.id == TenantInsurancePlan.catalog_id)
         .where(TenantInsurancePlan.tenant_id == tenant_id)
     )
+    if active_only:
+        stmt = stmt.where(TenantInsurancePlan.is_active.is_(True))
+    rows = await session.execute(stmt)
     pairs = [(plan, entry) for plan, entry in rows.all()]
     pairs.sort(key=lambda pair: _plan_sort_key(*pair))
     return pairs
@@ -371,15 +383,17 @@ async def set_tenant_plan_order(
 
 
 async def list_professional_plans(
-    session: AsyncSession, professional_id: UUID
+    session: AsyncSession, professional_id: UUID, *, active_only: bool = False
 ) -> list[tuple[ProfessionalInsurancePlan, InsuranceCatalog | None]]:
     """One doctor's OWN rows (independent mode: catalog picks + their "Outro").
 
     `clinic_with_exceptions` rows (`tenant_plan_id` set) are not returned here
     - use `professional_accepted_tenant_plan_ids` for those, since their
     display name/note live on `tenant_insurance_plans`, not here.
+
+    `active_only` (C7): skip the doctor's "Outro" switched OFF (patient/AI readers).
     """
-    rows = await session.execute(
+    stmt = (
         select(ProfessionalInsurancePlan, InsuranceCatalog)
         .outerjoin(InsuranceCatalog, InsuranceCatalog.id == ProfessionalInsurancePlan.catalog_id)
         .where(
@@ -387,6 +401,9 @@ async def list_professional_plans(
             ProfessionalInsurancePlan.tenant_plan_id.is_(None),
         )
     )
+    if active_only:
+        stmt = stmt.where(ProfessionalInsurancePlan.is_active.is_(True))
+    rows = await session.execute(stmt)
     pairs = [(plan, entry) for plan, entry in rows.all()]
     pairs.sort(key=lambda pair: normalize(pair[1].name if pair[1] else pair[0].custom_name or ""))
     return pairs
@@ -429,7 +446,8 @@ async def _load_independent_insurance(session: AsyncSession, tenant_id: UUID) ->
 
     Order (TASK-090 SPEC §4.6): the clinic's one per-doctor-mode order
     (`services/insurance_plan_order.py`), the same for every doctor; plans never
-    placed follow alphabetically.
+    placed follow alphabetically. A doctor's "Outro" switched OFF (C7) is neither
+    listed nor counted as accepted.
     """
     rows = await session.execute(
         select(ProfessionalInsurancePlan, InsuranceCatalog)
@@ -438,6 +456,7 @@ async def _load_independent_insurance(session: AsyncSession, tenant_id: UUID) ->
         .where(
             ProfessionalInsurancePlan.tenant_id == tenant_id,
             ProfessionalInsurancePlan.tenant_plan_id.is_(None),
+            ProfessionalInsurancePlan.is_active.is_(True),
             Professional.is_active.is_(True),
         )
     )
@@ -533,18 +552,30 @@ def _alias_same_named_plans(refused: Any, plans: list[dict]) -> Any:
 
 
 async def _load_clinic_insurance(session: AsyncSession, tenant_id: UUID) -> TenantInsurance:
-    """The non-`independent` lists of `load_tenant_insurance` (clinic plans + legacy names)."""
+    """The non-`independent` lists of `load_tenant_insurance` (clinic plans + legacy names).
+
+    An "Outro" switched OFF (C7) is not listed - nor is a legacy string of the same name, which
+    would otherwise bring it back as an id-less option.
+    """
+    rows = await list_tenant_plans(session, tenant_id)
     plans = [
         {
             "id": str(plan.id),
             "name": _plan_display_name(plan, entry),
             "mechanism": entry.mechanism if entry is not None else "desconhecido",
         }
-        for plan, entry in await list_tenant_plans(session, tenant_id)
+        for plan, entry in rows
+        if plan.is_active is not False
     ]
+    switched_off = {
+        normalize(_plan_display_name(plan, entry))
+        for plan, entry in rows
+        if plan.is_active is False
+    }
     plans.extend(
         {"id": None, "name": name, "mechanism": "desconhecido"}
         for name in await _legacy_only_names(session, tenant_id)
+        if normalize(name) not in switched_off
     )
 
     customized_ids = {
@@ -578,6 +609,8 @@ async def resolve_booking_plan_ids(
     tenant_id: UUID,
     insurance: str | None,
     professional_id: UUID | None = None,
+    *,
+    active_only: bool = True,
 ) -> tuple[UUID | None, UUID | None]:
     """The (tenant_plan_id, professional_plan_id) pair `appointments` records.
 
@@ -590,6 +623,10 @@ async def resolve_booking_plan_ids(
     (including no mode chosen, for a booking made before the step existed)
     matches against the clinic's own plans, exactly as `resolve_tenant_plan_id`
     did pre-TASK-008.
+
+    An "Outro" switched OFF (C7) matches nothing - like an unknown convênio - unless the caller
+    passes `active_only=False`: an edit of an EXISTING appointment that keeps its convênio
+    (services/appointment_edit_write.py) keeps pointing at the row it was booked with.
     """
     if not insurance or not insurance.strip():
         return None, None
@@ -597,14 +634,16 @@ async def resolve_booking_plan_ids(
     if mode == "independent" and professional_id is not None:
         candidates = [
             {"id": plan.id, "name": entry.name if entry else plan.custom_name}
-            for plan, entry in await list_professional_plans(session, professional_id)
+            for plan, entry in await list_professional_plans(
+                session, professional_id, active_only=active_only
+            )
         ]
         matched = match_plan(candidates, insurance)
         return None, (matched["id"] if matched is not None else None)
 
     candidates = [
         {"id": plan.id, "name": _plan_display_name(plan, entry)}
-        for plan, entry in await list_tenant_plans(session, tenant_id)
+        for plan, entry in await list_tenant_plans(session, tenant_id, active_only=active_only)
     ]
     matched = match_plan(candidates, insurance)
     return (matched["id"] if matched is not None else None), None
@@ -783,6 +822,23 @@ async def create_professional_custom_plan(
         professional_id=str(professional.id),
     )
     return plan
+
+
+def set_custom_plan_active(
+    plan: TenantInsurancePlan | ProfessionalInsurancePlan, is_active: bool
+) -> bool:
+    """Switch a typed-by-hand "Outro" ON/OFF (TASK-090 Adendo 1, C7). Returns whether it changed.
+
+    The row, its name and its payment rule are kept either way; only the patient-facing and AI
+    readers look at the switch. A catalog row (or a clinic-mode doctor row) raises NotCustomPlan.
+    The caller holds the convênio cap on a switch ON and commits. No commit.
+    """
+    if plan.custom_name is None or plan.catalog_id is not None:
+        raise NotCustomPlan()
+    if bool(plan.is_active) == bool(is_active):
+        return False
+    plan.is_active = bool(is_active)
+    return True
 
 
 async def sync_legacy_insurances(
