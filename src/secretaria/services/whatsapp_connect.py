@@ -26,6 +26,7 @@ is recorded.
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
 
@@ -41,7 +42,7 @@ from secretaria.models.whatsapp_connection_attempt import (
     ATTEMPT_FAILED,
     ATTEMPT_PENDING,
 )
-from secretaria.services import provisioning
+from secretaria.services import brain_onboarding, provisioning
 
 logger = get_logger(__name__)
 
@@ -64,6 +65,8 @@ __all__ = [
     "ConnectError",
     "complete_attempt",
     "exchange_code_for_token",
+    "notify_brain_connected",
+    "notify_pending_connections",
     "start_attempt",
     "subscribe_app_to_waba",
 ]
@@ -243,3 +246,61 @@ async def complete_attempt(
         attempt_id=attempt_id,
     )
     return attempt
+
+
+# --- telling brain-api (it owns the onboarding state and the charge tied to it) -------------
+
+# How many pending notices one worker tick resends at most.
+NOTIFY_BATCH = 50
+
+
+async def notify_brain_connected(
+    session: AsyncSession, attempt: WhatsAppConnectionAttempt
+) -> bool:
+    """Notify brain-api of ONE connected attempt; stamp `brain_notified_at` on a 200.
+
+    Never raises (the client folds every failure into False). Caller commits. A False leaves
+    the stamp NULL, so `notify_pending_connections` (worker cron) resends it later; brain-api
+    is idempotent on (tenant, attempt_id), so a resend never charges twice.
+    """
+    if attempt.status != ATTEMPT_CONNECTED or attempt.brain_notified_at is not None:
+        return attempt.brain_notified_at is not None
+    try:
+        ok = await brain_onboarding.notify_whatsapp_connected(
+            attempt.tenant_id,
+            attempt_id=attempt.attempt_id,
+            phone_number_id=attempt.phone_number_id or "",
+            waba_id=attempt.waba_id,
+        )
+    except Exception:  # noqa: BLE001 - a committed connection must never turn into an error
+        logger.warning(
+            "whatsapp_connected_notice_failed",
+            reason="unexpected_error",
+            tenant_id=str(attempt.tenant_id),
+        )
+        ok = False
+    if ok:
+        attempt.brain_notified_at = datetime.now(UTC)
+    return ok
+
+
+async def notify_pending_connections(session: AsyncSession, *, limit: int = NOTIFY_BATCH) -> int:
+    """Resend every connected attempt brain-api has not acknowledged yet (oldest first).
+
+    Returns how many were acknowledged now. Caller commits."""
+    pending = (
+        await session.scalars(
+            select(WhatsAppConnectionAttempt)
+            .where(
+                WhatsAppConnectionAttempt.status == ATTEMPT_CONNECTED,
+                WhatsAppConnectionAttempt.brain_notified_at.is_(None),
+            )
+            .order_by(WhatsAppConnectionAttempt.created_at)
+            .limit(limit)
+        )
+    ).all()
+    acknowledged = 0
+    for attempt in pending:
+        if await notify_brain_connected(session, attempt):
+            acknowledged += 1
+    return acknowledged

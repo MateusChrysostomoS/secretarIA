@@ -50,6 +50,7 @@ from secretaria.services.brain_onboarding import (
     list_onboarding_tenants,
     post_onboarding_event,
 )
+from secretaria.services import whatsapp_connect
 from secretaria.services.email import send_transactional_email_message
 from secretaria.services.entitlements_client import get_entitlements
 from secretaria.services.usage_events import emit_usage_event
@@ -331,6 +332,32 @@ async def run_onboarding_nudges(ctx: dict) -> None:
                 )
 
     logger.info("onboarding_nudges_swept", tenants=tenants_processed, **totals)
+
+
+# --------------------------------------------------------------------------
+# retry_whatsapp_connected_notices (TASK-093 Plano 3)
+# --------------------------------------------------------------------------
+
+#: Minutes of the hour the resend runs (every 20 minutes). Cheap: one indexed SELECT that is
+#: empty unless a notice to brain-api failed right after a connection.
+WHATSAPP_NOTICE_MINUTES = {3, 23, 43}
+
+
+async def retry_whatsapp_connected_notices(ctx: dict) -> None:
+    """arq cron: resend "WhatsApp connected" to brain-api for every connection it has not
+    acknowledged yet (`whatsapp_connection_attempts.brain_notified_at IS NULL`).
+
+    brain-api owns the onboarding state and the charge tied to it, so a connection made while
+    it was down must still reach it; it is idempotent on (tenant, attempt_id). A no-op while
+    WHATSAPP_CONNECT_BACKEND_ENABLED is off (nothing can be pending then anyway).
+    """
+    if not get_settings().WHATSAPP_CONNECT_BACKEND_ENABLED:
+        return
+    async with async_session_factory() as session:
+        acknowledged = await whatsapp_connect.notify_pending_connections(session)
+        await session.commit()
+    if acknowledged:
+        logger.info("whatsapp_connected_notices_resent", acknowledged=acknowledged)
 
 
 # --------------------------------------------------------------------------

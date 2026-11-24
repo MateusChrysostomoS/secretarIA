@@ -137,6 +137,11 @@ async def post_attempt(
             failure_code=PHONE_NUMBER_CONFLICT,
         )
         raise _failure(PHONE_NUMBER_CONFLICT) from None
+    # brain-api owns the onboarding state and the charge tied to it: tell it now. Best effort -
+    # the connection is already committed; a failure leaves `brain_notified_at` NULL and the
+    # worker cron (workers/onboarding_cron.py::retry_whatsapp_connected_notices) resends it.
+    if await whatsapp_connect.notify_brain_connected(session, attempt):
+        await session.commit()
     return WhatsAppAttemptOut(
         attempt_id=attempt.attempt_id, status=attempt.status, failure_code=attempt.failure_code
     )

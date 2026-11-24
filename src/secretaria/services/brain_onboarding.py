@@ -252,3 +252,52 @@ async def post_onboarding_event(
         return False
 
     return bool(body.get("applied"))
+
+
+async def notify_whatsapp_connected(
+    tenant_id: UUID,
+    *,
+    attempt_id: str,
+    phone_number_id: str,
+    waba_id: str | None,
+) -> bool:
+    """Tell brain-api the secretarIA connected this clinic's WhatsApp (TASK-093 Plano 3).
+
+    `POST {BRAIN_API_BASE_URL}/internal/tenants/{tenant_id}/whatsapp-connected` runs brain-api's
+    "became connected" logic (onboarding 'conectado' + the charge hook it owns). True only on a
+    200; False on anything else - unconfigured, network error, non-200. NEVER raises: the
+    caller keeps the connection and the worker cron (`retry_whatsapp_connected_notices`)
+    resends it; brain-api is idempotent on (tenant, attempt_id). No token is ever sent.
+    """
+    settings = get_settings()
+    if not settings.BRAIN_API_BASE_URL or not settings.INTERNAL_API_KEY:
+        logger.warning("whatsapp_connected_notice_unconfigured", tenant_id=str(tenant_id))
+        return False
+    try:
+        async with httpx.AsyncClient(
+            base_url=settings.BRAIN_API_BASE_URL,
+            headers={"X-Internal-Api-Key": settings.INTERNAL_API_KEY},
+            timeout=settings.BRAIN_API_TIMEOUT_SECONDS,
+        ) as client:
+            response = await client.post(
+                f"/internal/tenants/{tenant_id}/whatsapp-connected",
+                json={
+                    "attempt_id": attempt_id,
+                    "phone_number_id": phone_number_id,
+                    "waba_id": waba_id,
+                },
+            )
+    except httpx.HTTPError:
+        logger.warning(
+            "whatsapp_connected_notice_failed", reason="network_error", tenant_id=str(tenant_id)
+        )
+        return False
+    if response.status_code != 200:
+        logger.warning(
+            "whatsapp_connected_notice_failed",
+            reason="non_200_status",
+            tenant_id=str(tenant_id),
+            status_code=response.status_code,
+        )
+        return False
+    return True

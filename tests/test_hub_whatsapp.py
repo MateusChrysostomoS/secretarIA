@@ -19,7 +19,7 @@ from sqlalchemy.pool import StaticPool
 from secretaria.config import get_settings
 from secretaria.core.database import Base, get_session
 from secretaria.models import Tenant, WhatsAppConnectionAttempt
-from secretaria.services import whatsapp_connect
+from secretaria.services import brain_onboarding, whatsapp_connect
 from secretaria.services.tenant_config import has_waba_token
 from tests.hub_auth import install_fake_brain_api, make_hub_token, reset_fake_brain_api
 
@@ -57,6 +57,13 @@ def _wiring(db, monkeypatch):
 
     app.dependency_overrides[get_session] = _fake_get_session
     install_fake_brain_api(monkeypatch)
+
+    # The notice to brain-api after a connection is Task 4's subject
+    # (tests/test_whatsapp_connect_notify.py); here it simply succeeds.
+    async def _brain_acknowledges(*args, **kwargs):
+        return True
+
+    monkeypatch.setattr(brain_onboarding, "notify_whatsapp_connected", _brain_acknowledges)
     yield
     app.dependency_overrides.pop(get_session, None)
     reset_fake_brain_api()
