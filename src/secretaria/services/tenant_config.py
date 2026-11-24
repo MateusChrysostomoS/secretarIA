@@ -723,19 +723,6 @@ async def list_active_professionals(session: AsyncSession, tenant_id: UUID) -> l
     return list(rows)
 
 
-async def list_patient_professionals(session: AsyncSession, tenant_id: UUID) -> list[Professional]:
-    """The roster a PATIENT may book with: `list_active_professionals` minus every doctor who
-    has unit links but no usable unit (TASK-090 Adendo 1, owner ruling;
-    services/professional_units.patient_visible_professionals). The booking flow's doctor
-    list, the AI professional/availability/draft tools and the first-contact greeting read
-    this; calendar resolution of EXISTING appointments keeps the full active roster."""
-    # Lazy: professional_units imports this module.
-    from secretaria.services.professional_units import patient_visible_professionals
-
-    roster = await list_active_professionals(session, tenant_id)
-    return await patient_visible_professionals(session, tenant_id, roster)
-
-
 async def resolve_professional_calendar(
     session: AsyncSession,
     tenant: Tenant | None,

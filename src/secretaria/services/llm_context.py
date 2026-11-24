@@ -227,12 +227,16 @@ def _services_by_unit(professional, tenant) -> str | None:
 
 
 def _topology_lines(tenant, professionals) -> list[str]:
+    # The doctors LISTED are the ones a patient may book with; how many doctors the clinic has
+    # is counted on every active one (TASK-090 Adendo 1, C1): a clinic with a doctor hidden
+    # from patients is never described as "um só médico".
     roster = list(professionals or [])
+    multi = len(fr.everyone_of(professionals)) > 1
     if tenant is None or not hasattr(tenant, "appointment_types"):
         return []
     units_line = _units_line(roster)
     preamble = [_UNIT_GUIDANCE, units_line] if units_line is not None else []
-    if len(roster) > 1:
+    if multi:
         lines = ["- A clínica tem vários médicos. Especialidade e serviços de cada um:"]
         for professional in roster:
             by_unit = _services_by_unit(professional, tenant)
@@ -266,7 +270,8 @@ def _current_unit_name(current: dict, professionals) -> str | None:
     if not unit_id:
         return None
     owner_id = str(current.get("professional_id") or "")
-    roster = list(professionals or [])
+    # Every active doctor: the consultation's own (possibly hidden) doctor names his unit.
+    roster = fr.everyone_of(professionals)
     # The draft's doctor first (ids ride the JSON draft as strings), then anyone else.
     roster.sort(key=lambda professional: str(professional.id) != owner_id)
     for professional in roster:
@@ -336,7 +341,9 @@ def build_conversation_state(conversation, tenant, professionals) -> str | None:
             getattr(conversation, "flow_state", None), getattr(conversation, "flow_step", None)
         )
     ]
-    professional = fr._find_professional_by_id(
+    # `_find_owner_by_id`: a hidden doctor is only ever on the snapshot while HIS existing
+    # consultation is managed or edited (the turn drops him otherwise), and then he is named.
+    professional = fr._find_owner_by_id(
         professionals, getattr(conversation, "flow_selected_professional_id", None)
     )
     if professional is not None:

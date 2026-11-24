@@ -55,18 +55,40 @@ class PatientRoster(list):
     an EXISTING consultation (`flow_router._find_owner_by_id`). So hiding a doctor never turns
     a multi-doctor clinic into a "the only doctor IS the clinic" one.
 
-    A plain list keeps meaning "this is everybody": `everyone_of(list)` is the list itself.
+    COPY-PROOF (re-review C1-bis): every doctor of `everyone` also carries the full roster as
+    `ROSTER_EVERYONE_ATTR`, so `list(roster)`, a slice or a comprehension over the offered
+    doctors - which drop the list's own `everyone` - still answer `everyone_of` with every
+    active doctor. A plain list of doctors that never went through a `PatientRoster` keeps
+    meaning "this is everybody".
     """
 
     def __init__(self, offered: Sequence[Any] = (), everyone: Sequence[Any] | None = None):
         super().__init__(offered)
         self.everyone: list = list(everyone) if everyone is not None else list(offered)
+        full = tuple(self.everyone)
+        for professional in full:
+            try:
+                setattr(professional, ROSTER_EVERYONE_ATTR, full)
+            except (AttributeError, TypeError):  # a frozen/slotted test double: list-only
+                continue
+
+
+# The attribute `PatientRoster` stamps on each doctor (a tuple of every active doctor).
+ROSTER_EVERYONE_ATTR = "roster_everyone"
 
 
 def everyone_of(professionals: Sequence[Any] | None) -> list:
-    """Every active doctor of the roster (a `PatientRoster`'s `everyone`, or the list)."""
+    """Every active doctor of the roster: a `PatientRoster`'s `everyone`; else the roster any of
+    its doctors was stamped with (survives copies and filtered sub-lists); else the list."""
     everyone = getattr(professionals, "everyone", None)
-    return list(everyone) if everyone is not None else list(professionals or [])
+    if everyone is not None:
+        return list(everyone)
+    items = list(professionals or [])
+    for professional in items:
+        stamped = getattr(professional, ROSTER_EVERYONE_ATTR, None)
+        if isinstance(stamped, tuple):
+            return list(stamped)
+    return items
 
 
 BOOKING_TOPOLOGY_UNKNOWN = "unknown"
@@ -133,7 +155,9 @@ def resolve_booking_owner_id(
             if getattr(professional, "id", None) == selected_professional_id:
                 return selected_professional_id
         return None
-    professional = sole_active_professional(roster)
+    # No selection: the clinic's ONLY active doctor - counted on every active doctor, so a
+    # clinic with a hidden second doctor has no implied owner (re-review C1-bis).
+    professional = sole_active_professional(professionals)
     return getattr(professional, "id", None) if professional is not None else None
 
 

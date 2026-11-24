@@ -19,7 +19,7 @@ from tests._patching import workers_ns
 os.environ.setdefault("APP_ENV", "test")
 os.environ.setdefault("ENCRYPTION_KEY", "gBSpATEZoI21UX0_59nHvxdUDJ4drCttg2RAEaPJc1w=")
 
-from datetime import UTC, datetime  # noqa: E402
+from datetime import UTC, datetime, timedelta  # noqa: E402
 from types import SimpleNamespace  # noqa: E402
 from uuid import uuid4  # noqa: E402
 
@@ -39,6 +39,7 @@ from secretaria.core import database as core_database  # noqa: E402
 from secretaria.core.database import Base  # noqa: E402
 from secretaria.models import (  # noqa: E402
     Appointment,
+    AppointmentStatus,
     Conversation,
     FlowState,
     Message,
@@ -59,7 +60,6 @@ from secretaria.services import (  # noqa: E402
 )
 from secretaria.services.booking_scope import (  # noqa: E402
     BOOKING_TOPOLOGY_MULTI,
-    PatientRoster,
     booking_topology,
 )
 from secretaria.services.entitlements_client import EntitlementSummary  # noqa: E402
@@ -149,9 +149,14 @@ def wired(monkeypatch: pytest.MonkeyPatch, db):
     return db
 
 
-async def _seed(db, *, with_ana: bool = True):
+async def _seed(
+    db, *, with_ana: bool = True, with_caio: bool = False, state: FlowState | None = None
+):
     """Clinic list "Consulta Clínica" (all week); Dra. Ana does "Retina" at the complete Sede on
-    Monday mornings; Dra. Bia does "Retina" too but is linked only to the incomplete Nova."""
+    Monday mornings; Dra. Bia does "Retina" too but is linked only to the incomplete Nova.
+    `with_caio`: Dr. Caio, no unit link at all (legacy, offered), also does "Retina" - so the
+    doctor list of "Retina" really opens (Ana + Caio, never Bia). `state`: the conversation's
+    flow state (default: the clinic service list)."""
     async with db() as session:
         tenant = Tenant(
             id=uuid4(),
@@ -176,6 +181,13 @@ async def _seed(db, *, with_ana: bool = True):
             id=uuid4(), tenant_id=tenant.id, name="Dra. Bia", is_active=True,
             appointment_types=retina,
         )
+        if with_caio:
+            session.add(
+                Professional(
+                    id=uuid4(), tenant_id=tenant.id, name="Dr. Caio", is_active=True,
+                    appointment_types=retina,
+                )
+            )
         sede = Unit(id=uuid4(), tenant_id=tenant.id, name="Sede", **COMPLETE)
         nova = Unit(id=uuid4(), tenant_id=tenant.id, name="Nova", city="Campinas", state="SP")
         session.add_all([ana, bia, sede, nova])
@@ -199,8 +211,8 @@ async def _seed(db, *, with_ana: bool = True):
             id=uuid4(),
             tenant_id=tenant.id,
             patient_id=patient.id,
-            flow_state=FlowState.SERVICE_CATALOG,
-            flow_step=fr.STEP_AWAITING_CATALOG_SERVICE,
+            flow_state=state or FlowState.SERVICE_CATALOG,
+            flow_step=None if state is not None else fr.STEP_AWAITING_CATALOG_SERVICE,
             flow_attendee_name="",
         )
         session.add(conversation)
@@ -242,29 +254,8 @@ def _ids(rows) -> list[str]:
     return [row[0] for row in rows]
 
 
-async def test_c1_the_flow_books_the_visible_doctor_on_her_agenda_and_hours(db) -> None:
-    tenant, ana, bia, sede, _nova, _patient, conversation = await _seed(db)
-    # The clinic's catalog step: the union of the VISIBLE doctors' services, never the clinic
-    # list (a one-doctor clinic would show "Consulta Clínica").
-    roster = PatientRoster([SimpleRow(ana)], everyone=[SimpleRow(ana), SimpleRow(bia)])
-    assert fr._is_multi_professional(roster)
-
-    await _turn("Retina")
-    kind, _body, rows = _WireClient.sends[-1]
-    row = await _conversation(db, conversation.id)
-    if row.flow_step == fr.STEP_AWAITING_SERVICE_PROFESSIONAL:
-        # The doctor list offers Dra. Ana only; typing Dra. Bia never matches her.
-        assert kind == "list" and f"prof|{ana.id}" in _ids(rows)
-        assert f"prof|{bia.id}" not in _ids(rows)
-        await _turn("Dra. Bia")
-        assert (await _conversation(db, conversation.id)).flow_selected_professional_id != bia.id
-        async with db() as session, session.begin():
-            again = await session.get(Conversation, conversation.id)
-            again.flow_state = FlowState.SERVICE_CATALOG
-            again.flow_step = fr.STEP_AWAITING_SERVICE_PROFESSIONAL
-            again.flow_selected_type = "Retina"
-        await _turn("Dra. Ana", f"prof|{ana.id}")
-
+async def _finish_booking(db, conversation, sede) -> None:
+    """Drive whatever step the conversation is on to the confirmation and confirm."""
     for _ in range(6):
         row = await _conversation(db, conversation.id)
         kind, _body, rows = _WireClient.sends[-1]
@@ -284,6 +275,8 @@ async def test_c1_the_flow_books_the_visible_doctor_on_her_agenda_and_hours(db) 
         else:
             pytest.fail(f"unexpected step {row.flow_step!r}: {_WireClient.sends[-1][1]!r}")
 
+
+async def _assert_booked_with_ana_at_sede(db, ana, sede) -> None:
     async with db() as session:
         [appointment] = list(await session.scalars(select(Appointment)))
         [event] = list(await session.scalars(select(CalendarEvent)))
@@ -295,10 +288,101 @@ async def test_c1_the_flow_books_the_visible_doctor_on_her_agenda_and_hours(db) 
     assert event.id == appointment.google_event_id
 
 
-class SimpleRow:
-    def __init__(self, row) -> None:
-        self.id = row.id
-        self.name = row.name
+async def test_c1_the_roster_of_the_turn_stays_multi_even_copied(db) -> None:
+    """The real roster (not a hand-built one): offered = visible, `everyone` = all active, and a
+    plain `list(...)` copy - what several booking paths make - still counts every doctor."""
+    from secretaria.services.booking_scope import everyone_of, resolve_booking_owner_id
+    from secretaria.services.tenant_config import list_active_professionals
+    from secretaria.workers.shared.patient_roster import build_patient_roster
+
+    tenant, ana, bia, *_rest = await _seed(db)
+    async with db() as session:
+        rows = await list_active_professionals(session, tenant.id)
+        roster = await build_patient_roster(session, tenant, rows, None)
+    for view in (roster, list(roster), roster[:], [p for p in roster]):
+        assert [p.name for p in view] == ["Dra. Ana"]
+        assert {p.id for p in everyone_of(view)} == {ana.id, bia.id}
+        assert fr._is_multi_professional(view)
+        assert booking_topology(view) == BOOKING_TOPOLOGY_MULTI
+        # No implied owner on a 2-doctor clinic; an explicit visible pick only.
+        assert resolve_booking_owner_id(view, None) is None
+        assert resolve_booking_owner_id(view, ana.id) == ana.id
+        assert resolve_booking_owner_id(view, bia.id) is None
+
+
+async def test_c1_the_flow_books_the_visible_doctor_on_her_agenda_and_hours(db) -> None:
+    tenant, ana, bia, sede, _nova, _patient, conversation = await _seed(db, with_caio=True)
+    await _turn("Retina")
+    kind, _body, rows = _WireClient.sends[-1]
+    row = await _conversation(db, conversation.id)
+    # The doctor list really opens: Dra. Ana and Dr. Caio, never the hidden Dra. Bia.
+    assert row.flow_step == fr.STEP_AWAITING_SERVICE_PROFESSIONAL
+    assert kind == "list" and f"prof|{ana.id}" in _ids(rows)
+    assert f"prof|{bia.id}" not in _ids(rows)
+    # Typing her name never selects her.
+    await _turn("Dra. Bia")
+    assert (await _conversation(db, conversation.id)).flow_selected_professional_id != bia.id
+    async with db() as session, session.begin():
+        again = await session.get(Conversation, conversation.id)
+        again.flow_state = FlowState.SERVICE_CATALOG
+        again.flow_step = fr.STEP_AWAITING_SERVICE_PROFESSIONAL
+        again.flow_selected_type = "Retina"
+    await _turn("Dra. Ana", f"prof|{ana.id}")
+    await _finish_booking(db, conversation, sede)
+    await _assert_booked_with_ana_at_sede(db, ana, sede)
+
+
+async def test_c1_the_flow_with_one_visible_doctor_still_books_on_her_agenda(db) -> None:
+    """Only Dra. Ana offers Retina (Bia hidden): the flow picks her and books on HER agenda."""
+    tenant, ana, _bia, sede, _nova, _patient, conversation = await _seed(db)
+    await _turn("Retina")
+    await _finish_booking(db, conversation, sede)
+    await _assert_booked_with_ana_at_sede(db, ana, sede)
+
+
+async def _ai_draft_turn(monkeypatch, draft) -> None:
+    from secretaria.ai.graph import BOOKING_DRAFT_SENTINEL_PREFIX
+
+    async def _run_agent(message, context, **kwargs):
+        return BOOKING_DRAFT_SENTINEL_PREFIX + draft.to_payload()
+
+    monkeypatch.setattr(workers_ns, "run_agent", _run_agent)
+    await _turn("quero marcar retina com a dra ana")
+
+
+async def test_c1_an_ai_draft_for_her_service_resolves_on_her_catalog_and_agenda(
+    db, monkeypatch
+) -> None:
+    """Re-review C1-bis scenario 1: the AI's draft "Retina" was dropped as not in the CLINIC
+    list. Now it resolves on Dra. Ana's catalog, selects her, and the booking finished through
+    the main turn lands on her agenda at her unit."""
+    from secretaria.services.booking_draft import BookingDraft
+
+    tenant, ana, bia, sede, _nova, _patient, conversation = await _seed(
+        db, state=FlowState.LLM
+    )
+    await _ai_draft_turn(monkeypatch, BookingDraft(service="Retina", attendee="self"))
+    row = await _conversation(db, conversation.id)
+    assert row.flow_selected_type == "Retina"
+    assert row.flow_selected_professional_id == ana.id
+    await _finish_booking(db, conversation, sede)
+    await _assert_booked_with_ana_at_sede(db, ana, sede)
+
+
+async def test_c1_an_ai_draft_for_the_clinic_list_never_books_without_a_doctor(
+    db, monkeypatch
+) -> None:
+    """Re-review C1-bis scenario 2: "Consulta Clínica" (the clinic's legacy list, which no
+    bookable doctor offers) used to land on the day list with no doctor and book on the CLINIC
+    agenda with professional_id = Ana and no unit. Now it is not offered at all."""
+    from secretaria.services.booking_draft import BookingDraft
+
+    tenant, *_rest, conversation = await _seed(db, state=FlowState.LLM)
+    await _ai_draft_turn(monkeypatch, BookingDraft(service="Consulta Clínica", attendee="self"))
+    row = await _conversation(db, conversation.id)
+    assert row.flow_step != fr.STEP_AWAITING_DAY
+    assert row.flow_selected_type != "Consulta Clínica"
+    assert all("Consulta Clínica" not in str(send) for send in _WireClient.sends)
 
 
 async def test_c1_get_availability_reads_the_visible_doctors_own_agenda(db, monkeypatch) -> None:
@@ -389,3 +473,119 @@ async def test_m3_the_turn_itself_says_not_servable_when_every_doctor_is_hidden(
     await _turn("Retina")
     assert _WireClient.sends == []
     assert events == ["bot_reply_suppressed_no_complete_unit"]
+
+
+async def _bias_consultation(db, tenant, bia, nova, patient) -> Appointment:
+    start = datetime.now(UTC) + timedelta(days=5)
+    async with db() as session:
+        appointment = Appointment(
+            tenant_id=tenant.id,
+            patient_id=patient.id,
+            professional_id=bia.id,
+            unit_id=nova.id,
+            google_event_id=f"evt-{uuid4()}",
+            appointment_type="Retina",
+            start_at=start,
+            end_at=start + timedelta(minutes=30),
+            status=AppointmentStatus.SCHEDULED,
+        )
+        session.add(appointment)
+        await session.commit()
+        return appointment
+
+
+def _bia_keeps_nova(professionals, bia, nova) -> None:
+    owner = fr._find_owner_by_id(professionals, bia.id)
+    assert owner is not None and flow_units.find_unit(owner, nova.id) is not None
+    assert fr._find_professional_by_id(professionals, bia.id) is None  # never for a new booking
+
+
+class _Stop(Exception):
+    pass
+
+
+async def test_i1_the_ai_manage_handback_keeps_the_hidden_doctors_unit(db, monkeypatch) -> None:
+    """Re-review I-1: the AI's "manage this consultation" hand-back (v2) builds the patient
+    roster, so Dra. Bia's consultation at the incomplete Nova keeps that unit (and its hours)."""
+    from secretaria.services.manage_request import ManageRequest
+    from secretaria.workers.shared import sentinels
+
+    tenant, _ana, bia, _sede, nova, patient, conversation = await _seed(db, state=FlowState.LLM)
+    async with db() as session, session.begin():
+        row = await session.get(Tenant, tenant.id)
+        row.initial_flows = {fr.AI_DRAFT_V2_FLAG: True}
+    await _bias_consultation(db, tenant, bia, nova, patient)
+    seen: list = []
+
+    async def _spy(request, **kwargs):
+        seen.append(kwargs["professionals"])
+        raise _Stop
+
+    monkeypatch.setattr(sentinels, "resolve_manage_request", _spy)
+    reply = tasks._ReplyContext(
+        conversation_id=conversation.id, patient_ref=WA_ID, inbound_body="", tenant_id=tenant.id
+    )
+    async with db() as session:
+        fresh = await session.get(Tenant, tenant.id)
+    with pytest.raises(_Stop):
+        await sentinels._handle_manage_appointment(
+            reply, ManageRequest(action="reschedule").to_payload(), fresh, [], WA_ID
+        )
+    [professionals] = seen
+    _bia_keeps_nova(professionals, bia, nova)
+
+
+async def test_i1_the_service_change_rebook_keeps_the_hidden_doctors_unit(db, monkeypatch) -> None:
+    """Re-review I-1: "Outro horário" after a service change (`_rebook_entry`) builds the
+    patient roster too."""
+    from secretaria.workers.shared import service_change_actions as sca
+
+    tenant, _ana, bia, _sede, nova, patient, _conversation = await _seed(db)
+    appointment = await _bias_consultation(db, tenant, bia, nova, patient)
+    target = {
+        "id": str(appointment.id),
+        "professional_id": str(bia.id),
+        "unit_id": str(nova.id),
+        "rebook_adjustment_id": str(uuid4()),
+    }
+
+    async def _upcoming(*_args, **_kwargs):
+        return [target]
+
+    async def _calendar(*_args, **_kwargs):
+        return object()
+
+    monkeypatch.setattr(sca, "load_upcoming_appointments", _upcoming)
+    monkeypatch.setattr(sca, "_appointment_calendar", _calendar)
+    async with db() as session:
+        fresh = await session.get(Tenant, tenant.id)
+        entry = await sca._rebook_entry(session, fresh, patient.id, appointment.id)
+    assert entry is not None
+    _appointments, professionals, _calendar_used = entry
+    _bia_keeps_nova(professionals, bia, nova)
+
+
+async def test_m_b_the_ai_state_block_never_says_one_doctor_and_names_the_managed_one(db) -> None:
+    """Re-review M-b: with Dra. Bia hidden the AI is told the clinic has several doctors (Ana is
+    the one offered), and while Bia's own consultation is managed she is "Médico já escolhido"."""
+    from secretaria.services import llm_context
+    from secretaria.services.tenant_config import list_active_professionals
+    from secretaria.workers.shared.patient_roster import build_patient_roster
+
+    tenant, ana, bia, *_rest = await _seed(db)
+    async with db() as session:
+        rows = await list_active_professionals(session, tenant.id)
+        roster = await build_patient_roster(session, tenant, rows, None)
+    clinic = SimpleNamespace(appointment_types=[], initial_flows={})
+    lines = "\n".join(llm_context._topology_lines(clinic, roster))
+    assert "um só médico" not in lines and "vários médicos" in lines
+    assert "Dra. Ana" in lines and "Dra. Bia" not in lines
+    managed = SimpleNamespace(
+        flow_state=FlowState.MANAGE_BOOKING,
+        flow_step=None,
+        flow_selected_professional_id=bia.id,
+        flow_selected_type=None,
+        flow_attendee_name=None,
+    )
+    state = llm_context.build_conversation_state(managed, clinic, roster) or ""
+    assert "Médico já escolhido: Dra. Bia" in state

@@ -136,9 +136,10 @@ async def patient_visible_professionals(
 ) -> list[Professional]:
     """`professionals` minus the ones `patient_hidden_professional_ids` hides, order kept.
 
-    THE filter behind every roster a patient books from (tenant_config.
-    list_patient_professionals). Existing appointments keep resolving their doctor through the
-    full active roster, so a hidden doctor's consultations behave like a deactivated doctor's.
+    THE filter behind every roster a patient books from: `booking_scope.PatientRoster` (built by
+    workers/shared/patient_roster.build_patient_roster and plugins/multi_professional.
+    _active_professionals) offers these, while its `everyone` keeps every active doctor for the
+    topology and for EXISTING consultations (TASK-090 Adendo 1, I1/C1).
     """
     hidden = await patient_hidden_professional_ids(
         session, tenant_id, [professional.id for professional in professionals]

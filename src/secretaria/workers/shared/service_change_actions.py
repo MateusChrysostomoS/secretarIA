@@ -50,13 +50,12 @@ from secretaria.services.tenant_config import (
     list_active_professionals,
     load_tenant_config,
 )
-from secretaria.services.unit_booking import attach_unit_options
 from secretaria.workers.shared.context import _ReplyContext
-from secretaria.workers.shared.greeting import _flow_professionals
 from secretaria.workers.shared.llm_context import (
     _appointment_calendar,
     _appointment_calendar_target,
 )
+from secretaria.workers.shared.patient_roster import build_patient_roster
 from secretaria.workers.shared.sender import _reply_sender
 
 logger = get_logger(__name__)
@@ -405,10 +404,11 @@ async def _rebook_entry(session, tenant: Tenant, patient_id: UUID, appointment_i
     if target is None or not target.get("rebook_adjustment_id"):
         return None
     professional_rows = await list_active_professionals(session, tenant.id)
-    professionals = _flow_professionals(
-        professional_rows, await load_service_catalog(session, tenant.id)
+    # TASK-090 Adendo 1 (I1): the patient roster - a hidden doctor's EXISTING consultation
+    # keeps his units (incomplete ones too) and so his unit hours and blocked days.
+    professionals = await build_patient_roster(
+        session, tenant, professional_rows, await load_service_catalog(session, tenant.id)
     )
-    await attach_unit_options(session, tenant, professional_rows, professionals)
     calendar = await _appointment_calendar(
         session, tenant, _appointment_calendar_target(target, professional_rows)
     )

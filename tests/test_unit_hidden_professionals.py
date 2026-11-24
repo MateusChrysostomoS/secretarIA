@@ -8,7 +8,7 @@ the legacy "agenda without a unit". The manager views (`list_active_professional
 and the agendas of EXISTING consultations keep the full active roster.
 
 Single source: `professional_units.patient_hidden_professional_ids` ->
-`patient_visible_professionals` -> `tenant_config.list_patient_professionals`. All tests run the
+`patient_visible_professionals` -> `booking_scope.PatientRoster`. All tests run the
 REAL usable-unit rule (`real_unit_gate`): under the suite default (every active unit usable) a
 doctor linked only to an incomplete unit would still be offered - the old behaviour these tests
 must fail on.
@@ -24,10 +24,7 @@ from secretaria.models import Unit
 from secretaria.models.professional_unit import ProfessionalUnit
 from secretaria.plugins import multi_professional as mp
 from secretaria.services import professional_units, unit_booking
-from secretaria.services.tenant_config import (
-    list_active_professionals,
-    list_patient_professionals,
-)
+from secretaria.services.tenant_config import list_active_professionals
 from secretaria.workers.shared import unit_gate
 from tests._local_agenda import seed_professional, seed_tenant, wire_local_agenda
 from tests._reminder_fixtures import db  # noqa: F401 - fixture
@@ -98,8 +95,14 @@ async def test_only_doctors_with_a_usable_unit_or_no_link_are_offered(db) -> Non
         hidden = await professional_units.patient_hidden_professional_ids(
             session, tenant.id, [d.id for d in docs.values()]
         )
-        patient = [p.name for p in await list_patient_professionals(session, tenant.id)]
-        manager = [p.name for p in await list_active_professionals(session, tenant.id)]
+        manager_rows = await list_active_professionals(session, tenant.id)
+        patient = [
+            p.name
+            for p in await professional_units.patient_visible_professionals(
+                session, tenant.id, manager_rows
+            )
+        ]
+        manager = [p.name for p in manager_rows]
     assert hidden == {docs["bia"].id, docs["davi"].id, docs["eva"].id}
     assert sorted(patient) == ["Dr. Caio", "Dra. Ana"]
     # The manager's roster (and the agendas of existing consultations) keep everybody.

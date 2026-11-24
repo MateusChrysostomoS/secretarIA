@@ -1403,14 +1403,16 @@ async def _send_bot_reply_inner(reply: _ReplyContext, redis=None) -> None:
             with_refs=ai_draft_v2_enabled(tenant),
             service_guides=tenant_config.service_guides if tenant_config is not None else None,
             # TASK-083 follow-up A1: unit names come from the roster snapshot (no query).
+            # TASK-090 Adendo 1 (I1): every active doctor - existing consultations of a
+            # doctor hidden from patients keep his name and unit names here.
             unit_names={
                 str(unit.id): str(unit.name)
-                for p in (flow_professionals or [])
+                for p in everyone_of(flow_professionals or [])
                 for unit in flow_units.offered_units(p)
             }
             or None,
             # TASK-085 A13: the owner's per-unit price, from the same snapshot (no query).
-            professionals=flow_professionals,
+            professionals=everyone_of(flow_professionals or []),
         )
 
     # Every LLM turn is either a deliberate escape hatch ("Outro") or a gap in
