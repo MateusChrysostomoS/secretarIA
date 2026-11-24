@@ -149,9 +149,13 @@ Validação da onda da re-revisão: suíte completa @`e95c9b5`: 10648 passed, 13
 - **M7:** a simulação do hub mostra o que o paciente vê: um médico oculto some dela também.
 - **M9:** a prontidão do Pix (visão do gestor) ainda avisa preço de médico oculto.
 - Consulta EXISTENTE de médico VISÍVEL numa unidade que ficou incompleta perde as linhas de unidade no fluxo (as unidades dele no snapshot são só as utilizáveis).
+- **Re-revisão da onda 3 (READY, add1-back-rereview3.md), menor — Portal:** ao editar uma consulta EXISTENTE de médico oculto cujo catálogo passa de uma página, o toque vindo da página 2 ou da busca é recusado (`list_options.py` consulta só os médicos oferecidos; `flow_simulation_input.py` anexa unidades só aos oferecidos). Página 1 funciona e não gera marcação errada.
+- **Nota de projeto:** o marcador do roster completo vai em todo roster do turno; qualquer sub-lista de médicos passada às checagens de topologia conta a clínica inteira. Hoje nenhum chamador passa sub-lista filtrada; vale um aviso no docstring ou um teste-guarda se surgir um.
 - Front: as rotas de regra de pagamento são só do gestor, enquanto ligar convênio e criar "Outro" sem regra seguem para qualquer papel — a tela deve esconder o card da regra para quem não é gestor (senão o toggle salva e a regra volta 403).
 - O v2 diz a mesma regra de pagamento em três lugares (bloco RECURSOS compartilhado, linha da ferramenta, cláusula da chamada humana); dá para enxugar um deles se faltar espaço no teto.
 - `NFC` pode alongar texto em escritas raras (não pt-BR): o 422 informa o comprimento já normalizado.
 - O modelo real escolhendo `get_insurance_payment_rule` e explicando só a regra (e chamando a pessoa sem regra) não foi provado com LLM; só código e stubs. Rodar o eval antes do deploy.
 - Com `LLM_TRACE_CONTENT` ligado (captura de conteúdo opcional de `ai/trace.py`), a resposta da ferramenta (a regra) entra no trace como qualquer mensagem; o padrão é desligado.
 - `tests/postgres/*` e `tests/llm_eval/*` não rodaram (a suíte os pula). Prova no navegador do Adendo fica com o front.
+
+Validação final @`c6f7f7b`+docs: suíte completa 10654 passed, 131 skipped, 1 xfailed, 4 failed — 2 antigas de `tests/test_service_change_agenda.py` + 2 que dependem do relógio (`test_portal_context_opening::test_a_consult_still_in_progress_is_not_followed_up` e `test_payment_attention_hub::test_awaiting_payment_lists_only_live_payable_reservations_without_pii`: o `NOW` do módulo é lido na importação e a suíte leva ~37 min); as duas últimas passam rodando os arquivos sozinhos (102 passed).
