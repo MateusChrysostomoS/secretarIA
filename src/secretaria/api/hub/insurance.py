@@ -13,7 +13,8 @@ POST    /tenants/me/professionals/{id}/insurance-plans/custom - doctor's own "Ou
                                                                  (independent only).
 PUT     /tenants/me/professionals/{id}/insurance-plans/{plan_id}/payment-note
                                                                - a doctor line's payment rule
-                                                                 (independent only).
+                                                                 (independent only; manager
+                                                                 or that doctor himself, C8).
 PUT     /tenants/me/professionals/{id}/insurance-plans/{plan_id}/active
                                                                - the doctor's "Outro" ON/OFF
                                                                  (independent only).
@@ -27,7 +28,10 @@ switching OFF never is. A catalog line answers 422 `not_custom_plan` (OFF delete
 Payment rule (TASK-090 Adendo 1, contract C6): every line (catalog or "Outro", clinic or doctor)
 may carry an optional `custom_payment_note`, returned on every read. Writing it - the two PUT
 .../payment-note routes, or a note sent with a custom POST - is for a clinic MANAGER only
-(`require_clinic_manager` / `ensure_clinic_manager`), goes through
+(`require_clinic_manager` / `ensure_clinic_manager`), except a DOCTOR's line (contract C8, owner
+2026-11-24): the manager OR that doctor himself - the `doctor` user whose linked professional is
+the path's (`require_clinic_manager_or_own_professional` /
+`ensure_clinic_manager_or_own_professional`); secretaries and other doctors stay 403. Goes through
 services/insurance_payment_note.clean_payment_note (one place) and answers 422
 `payment_note_too_long` above 1000 characters of the cleaned text (never truncated). The note is
 never logged (only whether a rule is set). Only the AI reads it (`get_insurance_payment_rule`).
@@ -54,8 +58,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from secretaria.api.hub.deps import (
     ensure_clinic_manager,
+    ensure_clinic_manager_or_own_professional,
     get_current_tenant,
+    path_professional_uuid,
     require_clinic_manager,
+    require_clinic_manager_or_own_professional,
 )
 from secretaria.core.catalog_limits import (
     INSURANCE_PLANS_PER_CLINIC,
@@ -192,6 +199,19 @@ def _ensure_manager_writes_note(request: Request, note: str | None) -> None:
     if claim is None:  # fail closed: never an AttributeError -> 500
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid or inactive subscription token")
     ensure_clinic_manager(claim)
+
+
+def _ensure_rule_writer_for_professional(
+    request: Request, note: str | None, professional_id: str
+) -> None:
+    """A professional custom POST that carries a rule (C8): the manager or that doctor himself.
+    Decided from the path id before the 404 lookup; without a rule the POST keeps its gate."""
+    if note is None:
+        return
+    claim: SubscriptionClaim | None = getattr(request.state, "staff_subscription_claim", None)
+    if claim is None:  # fail closed: never an AttributeError -> 500
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid or inactive subscription token")
+    ensure_clinic_manager_or_own_professional(claim, path_professional_uuid(professional_id))
 
 
 def _not_custom_plan() -> HTTPException:
@@ -721,9 +741,9 @@ async def post_professional_insurance_plan_custom(
     session: AsyncSession = Depends(get_session),
 ) -> TenantInsurancePlanRead:
     """A doctor's own "Outro" convênio - `independent` mode only. An optional payment
-    rule (`custom_payment_note`, C6) rides along - manager only."""
+    rule (`custom_payment_note`, C6) rides along - the manager or that doctor himself (C8)."""
     note = _payment_note(body.custom_payment_note)
-    _ensure_manager_writes_note(request, note)
+    _ensure_rule_writer_for_professional(request, note, professional_id)
     professional = await _professional(session, tenant, professional_id)
     if tenant.insurance_mode != "independent":
         raise _mode_not_applicable(
@@ -755,11 +775,13 @@ async def put_professional_insurance_plan_payment_note(
     professional_id: str,
     plan_id: str,
     body: PaymentNoteUpdate,
-    tenant: Tenant = Depends(require_clinic_manager),
+    tenant: Tenant = Depends(require_clinic_manager_or_own_professional),
     session: AsyncSession = Depends(get_session),
 ) -> TenantInsurancePlanRead:
     """Set or clear the payment rule of one of the doctor's OWN lines (`independent` mode,
-    C6). `plan_id` is the id the picker shows: the catalog id of a pick the doctor accepts, or
+    C6). Written by the clinic manager (any doctor) or that doctor himself (C8, owner
+    2026-11-24); a secretary or another doctor gets 403 before any lookup.
+    `plan_id` is the id the picker shows: the catalog id of a pick the doctor accepts, or
     the row id of the doctor's "Outro". 404 for another clinic's doctor, a line the doctor does
     not have, or any other id; 409 outside `independent` (the clinic's line carries the rule)."""
     note = _payment_note(body.custom_payment_note)

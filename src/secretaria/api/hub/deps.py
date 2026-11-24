@@ -11,6 +11,9 @@ key, payment settings) or only clinical staff may take (resolving attention item
 
   * `require_clinic_manager`   — `manager`, or a `doctor` flagged `is_owner`/`is_manager`.
   * `require_clinic_clinician` — `manager` or `doctor`; never a `secretary`.
+  * `require_clinic_manager_or_own_professional` — a manager (any professional of the clinic),
+    or the `doctor` whose own account is linked to the path's `{professional_id}` (only that
+    one). Decided from the path id BEFORE the 404 lookup, so a non-manager cannot probe ids.
 
 Both return the `Tenant` exactly like `get_current_tenant`, so a route adopts a gate by
 swapping one `Depends`. They FAIL CLOSED with a structured 403 detail:
@@ -149,7 +152,7 @@ def ensure_clinic_clinician(claim: SubscriptionClaim) -> None:
 
 
 def ensure_clinic_manager_or_own_professional(
-    claim: SubscriptionClaim, professional_id: UUID
+    claim: SubscriptionClaim, professional_id: UUID | None
 ) -> None:
     """Raise a 403 unless the caller is a clinic manager or the doctor `professional_id` themself.
 
@@ -162,9 +165,47 @@ def ensure_clinic_manager_or_own_professional(
         raise _refuse(ROLE_CLAIM_MISSING, _MISSING_ROLE_MESSAGE, claim)
     if _is_manager(claim):
         return
-    if claim.role == ROLE_DOCTOR and claim.professional_id == professional_id:
+    # Fail closed: a doctor with no linked professional (None) matches nothing, not even an
+    # unparseable path id the caller turned into None.
+    if (
+        claim.role == ROLE_DOCTOR
+        and claim.professional_id is not None
+        and professional_id is not None
+        and claim.professional_id == professional_id
+    ):
         return
     raise _refuse(FORBIDDEN_ROLE, _MANAGER_OR_SELF_MESSAGE, claim)
+
+
+def path_professional_uuid(raw: str) -> UUID | None:
+    """The path's professional id as a UUID, or None when malformed (never equals a claim)."""
+    try:
+        return UUID(str(raw))
+    except ValueError:
+        return None
+
+
+async def require_clinic_manager_or_own_professional(
+    professional_id: str,
+    request: Request,
+    authorization: str | None = Header(default=None),
+    session: AsyncSession = Depends(get_session),
+) -> Tenant:
+    """A clinic manager, or the doctor whose account is linked to the path's `{professional_id}`.
+
+    Same refusal order as `require_clinic_manager`: 401 -> 403 (role, decided from the path id,
+    no database read) -> 404 (tenant; the route then 404s an unknown/foreign professional). A
+    manager with a malformed id passes here and gets the route's 404. Stores the claim on
+    `request.state` like `get_current_tenant`.
+    """
+    claim = await get_hub_claim(authorization)
+    target = path_professional_uuid(professional_id)
+    if target is None:
+        ensure_clinic_manager(claim)
+    else:
+        ensure_clinic_manager_or_own_professional(claim, target)
+    request.state.staff_subscription_claim = claim
+    return await _tenant_for_claim(session, claim)
 
 
 async def require_clinic_manager(
