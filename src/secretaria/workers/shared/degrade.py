@@ -12,6 +12,7 @@ from secretaria.services.tenant_config import (
 from secretaria.workers.shared.context import (
     _ReplyContext,
 )
+from secretaria.workers.shared.payment_notice import send_payment_notice_once
 from secretaria.workers.shared.sender import (
     _reply_sender,
     _send_simple_text,
@@ -56,6 +57,10 @@ async def _handle_service_unavailable(reply: _ReplyContext, redis=None) -> None:
             "bot_reply_suppressed_unentitled",
             tenant_id=str(tenant.id),
             status=summary.status if summary is not None else None,
+        )
+        # TASK-093: mensagem do paciente sem pagamento -> só o aviso neutro (1 por dia).
+        await send_payment_notice_once(
+            reply, tenant=tenant, waba_token=waba_token, summary=summary, redis=redis
         )
         return
 

@@ -197,6 +197,7 @@ from secretaria.workers.shared.llm_context import (
     _should_inject_appointment_context,
     _should_inject_post_consult_knowledge,
 )
+from secretaria.workers.shared.payment_notice import send_payment_notice_once
 from secretaria.workers.shared.reminder_opening import (
     _send_reminder_opening,
 )
@@ -642,6 +643,11 @@ async def _send_bot_reply_inner(reply: _ReplyContext, redis=None) -> None:
             entitlement_unknown=summary is None,
             tenant_resolved=tenant is not None,
             conversation_id=str(reply.conversation_id),
+        )
+        # TASK-093: a resposta a uma mensagem do paciente é um aviso neutro, no
+        # máximo 1 por dia (silêncio se o estado não foi lido). Nada mais roda.
+        await send_payment_notice_once(
+            reply, tenant=tenant, waba_token=waba_token, summary=summary, redis=redis
         )
         return
 
