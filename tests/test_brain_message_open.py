@@ -949,3 +949,47 @@ async def test_the_open_job_is_registered_on_the_worker(db) -> None:
     from secretaria.workers.arq_worker import registered_function_names
 
     assert OPEN_JOB in registered_function_names()
+
+
+@pytest.mark.parametrize("status", ["past_due", "canceled"])
+async def test_open_on_an_unpaid_clinic_says_nothing_not_even_the_payment_notice(
+    db, monkeypatch: pytest.MonkeyPatch, status: str
+) -> None:
+    """TASK-093 review H1: the patient only OPENED the link and wrote nothing.
+
+    The neutral payment notice answers a patient who wrote (owner decision 3); an opening
+    is proactive, so an unpaid clinic stays silent here - with Redis present, the path
+    where the notice would otherwise go out once a day.
+    """
+    from secretaria.workers.shared import payment_notice as notice_module
+    from tests.payments_support import FakeRedis
+
+    async def _unpaid(tenant_id, redis):
+        return EntitlementSummary(
+            tenant_id=str(tenant_id),
+            status=status,
+            active=False,
+            secretaria_enabled=True,
+            plan="bronze",
+            secretaria_tier="basico",
+            addons={},
+            limits={},
+        )
+
+    sent: list[str] = []
+
+    async def _record(patient_ref, text, client=None):
+        sent.append(text)
+
+    monkeypatch.setattr(workers_ns, "get_entitlements", _unpaid)
+    monkeypatch.setattr(notice_module, "_send_simple_text", _record)
+    tenant = await _seed_tenant(db)
+
+    await tasks.process_brain_message_open(
+        {"redis": FakeRedis()}, str(tenant.id), EXTERNAL_ID, patient_name="Maria"
+    )
+
+    assert sent == []
+    assert await _bodies(db, tenant, MessageDirection.OUTBOUND) == []
+    # Nothing was said, so the open can greet once the clinic pays again.
+    assert not await _claim_held(db, tenant)
