@@ -83,7 +83,10 @@ def _migration():
     config = Config(str(ROOT / "alembic.ini"))
     config.set_main_option("script_location", str(ROOT / "migrations"))
     scripts = ScriptDirectory.from_config(config)
-    assert scripts.get_heads() == [REVISION]
+    heads = scripts.get_heads()
+    # Junção 090+091+093: the single head is the empty merge ac6a0f8102de; C7 is on its chain.
+    assert len(heads) == 1
+    assert REVISION in {rev.revision for rev in scripts.walk_revisions("base", heads[0])}
     return scripts.get_revision(REVISION).module
 
 
