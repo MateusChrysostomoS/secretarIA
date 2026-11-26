@@ -523,10 +523,13 @@ async def test_independent_mode_reads_the_doctors_rules(tool_db):
         session.add(conversation)
         await session.commit()
 
+    # TASK-094 D7: no doctor yet and two different rules -> the AI asks which professional;
+    # no rule text reaches the model before that (the patient reads it from the system after).
     both = await _ask(tenant.id, "Unimed")
-    assert "Profissional: Dra. Ana" in both and "Regra da Ana" in both
-    assert "Profissional: Dra. Bia" in both and "Regra da Bia" in both
-    assert "Antiga" not in both  # an inactive doctor's rule is never read
+    assert "depende do profissional" in both
+    assert "Dra. Ana" in both and "Dra. Bia" in both
+    assert "Regra da Ana" not in both and "Regra da Bia" not in both
+    assert "Antiga" not in both and "Dr. Ex" not in both  # an inactive doctor never counts
     # The conversation is booking with Dra. Bia: only her rule, unlabelled.
     only_bia = await _ask(tenant.id, "Unimed", conversation_id=conversation.id)
     assert _inside(only_bia) == "Regra da Bia"
@@ -546,10 +549,9 @@ async def test_independent_mode_reads_the_doctors_rules(tool_db):
             )
         await session.commit()
     partial = await _ask(tenant.id, "Unimed")
-    assert ipn.PER_DOCTOR_TEXT in partial
-    assert "Profissional: Dra. Ana\n" + ipn.FENCE_OPEN + "\nRegra da Ana" in partial
-    assert f"Profissional: Dra. Bia - {ipn.DOCTOR_WITHOUT_RULE_TEXT}" in partial
-    assert partial.count(ipn.FENCE_OPEN) == 1
+    # TASK-094: who has a rule and who has none is said, never Ana's text before the choice.
+    assert "Com regra cadastrada: Dra. Ana" in partial and "Sem regra: Dra. Bia" in partial
+    assert "Regra da Ana" not in partial and ipn.FENCE_OPEN not in partial
     # The conversation's own doctor (Bia) has none: the plain "no rule" answer.
     # Owner 2026-11-24: Dra. Bia (no rule) while Dra. Ana has one -> the offer, never Ana's text.
     await _offered(tenant.id, "Unimed", conversation_id=conversation.id)
@@ -594,7 +596,7 @@ async def test_a_failed_lookup_hands_off_and_logs_no_text(tool_db, monkeypatch):
     async def _boom(*_args, **_kwargs):
         raise RuntimeError("Unimed secret")
 
-    monkeypatch.setattr(ipn, "payment_rules_for", _boom)
+    monkeypatch.setattr(ipn, "lookup_payment_rule", _boom)  # the tool's lookup (TASK-094)
     monkeypatch.setattr(
         ai_tools.logger, "warning", lambda event, **kw: events.append((event, kw))
     )

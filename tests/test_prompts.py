@@ -367,9 +367,12 @@ def test_legacy_prompt_keeps_calendar_path_without_flow_state():
 # (explain only the clinic's rule) and hands off only without one (+83 chars per occurrence).
 # Re-rendered 2026-11-24 (TASK-090 Adendo 1, owner): without a rule the secretária offers Sim/Não
 # (a fixed card) instead of transferring - the rule says so (+43 chars per occurrence).
+# Re-rendered 2026-11-26 (TASK-094 D6/D7, owner): any "como funciona o X" fires the tool and,
+# with a rule, the SYSTEM shows it verbatim - the model never repeats it (+129 chars per
+# occurrence of prompts.INSURANCE_PAYMENT_HANDOFF_RULE; nothing else changed).
 _V1_DIGESTS = {
-    "minimal": (14713, "2ae852a0e8563fc5336d8a01bad091c035c0fe8e22d50601a75bc788afe1f1b0"),
-    "full": (20789, "8384b7731186efa54e3e99d3b4a4faa387973be68bfe07f2ce4545bf76617815"),
+    "minimal": (14842, "b2f38ffb541ae3e687cf77e26523535ef7746df7eaef85ca7f4081a7e47198e0"),
+    "full": (21047, "f8ca3b71dd2dc6cc309b3e465cbfacc553069f965bae6592184a4d9b5783b420"),
 }
 
 

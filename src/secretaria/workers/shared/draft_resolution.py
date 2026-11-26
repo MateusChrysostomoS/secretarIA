@@ -20,13 +20,10 @@ from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import Any
 
-from sqlalchemy import func, select
-
 from secretaria.core.database import async_session_factory
 from secretaria.core.logging import get_logger
-from secretaria.models import Conversation, FlowState, Tenant, Unit
+from secretaria.models import Conversation, FlowState, Tenant
 from secretaria.services.attendee import real_attendee_name
-from secretaria.services.booking_details import clinic_address_line
 from secretaria.services.booking_draft import (
     DRAFT_ATTENDEE_OTHER,
     DRAFT_ATTENDEE_SELF,
@@ -53,6 +50,7 @@ from secretaria.services.flow_router import (
 )
 from secretaria.services.flow_units import STEP_AWAITING_UNIT, STEP_AWAITING_UNIT_CONFIRM
 from secretaria.services.insurance_catalog import load_tenant_insurance
+from secretaria.services.professional_units import usable_units
 from secretaria.services.service_catalog import load_service_catalog
 from secretaria.services.tenant_config import list_active_professionals
 from secretaria.workers.shared.channel_policy import policy_for
@@ -127,24 +125,17 @@ async def _load_draft_context(reply: _ReplyContext, tenant: Tenant) -> DraftCont
         professional_rows = await list_active_professionals(session, tenant.id)
         service_catalog = await load_service_catalog(session, tenant.id)
         tenant_insurance = await load_tenant_insurance(session, tenant.id)
-        active_units = await session.scalar(
-            select(func.count())
-            .select_from(Unit)
-            .where(Unit.tenant_id == tenant.id, Unit.is_active.is_(True))
-        )
+        clinic_units = await usable_units(session, tenant.id)
         # TASK-083 spec §8: each doctor's offered units, so the resolver asks "which unit?"
         # (or uses the only one) and the booking details name THAT unit's address.
         professionals = await build_patient_roster(
             session, tenant, professional_rows, service_catalog
         )
+    # TASK-094 D4 (owner, 2026-11-26): the address of a booking WITHOUT a unit is the clinic's
+    # only usable unit (`clinic_address`, set by the snapshot); with several, none - and never
+    # the legacy clinic-level address, which reached a patient with a junk CEP.
     tenant_snapshot = _flow_tenant_snapshot(
-        tenant, professional_rows, service_catalog, tenant_insurance
-    )
-    # The clinic's own address only when it has no unit: with units, the address a patient
-    # reads is the CHOSEN unit's (services/booking_draft.py::_booking_details), and without a
-    # chosen unit none at all - the clinic's could be the wrong building.
-    tenant_snapshot.clinic_address = (
-        None if active_units else clinic_address_line(getattr(tenant, "address", None))
+        tenant, professional_rows, service_catalog, tenant_insurance, usable_units=clinic_units
     )
     return DraftContext(
         tenant=tenant,

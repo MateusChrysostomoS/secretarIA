@@ -85,7 +85,9 @@ def test_both_prompts_hand_off_convenio_payment_questions(version):
     assert prompt.count(prompts.INSURANCE_PAYMENT_HANDOFF) == 1
     for instruction in (
         "get_insurance_payment_rule",
-        "explique só o que a regra devolvida diz",
+        # TASK-094 D7: the system shows the rule verbatim; the model never repeats it.
+        "o sistema mostra ao paciente",
+        "não repita",
         "nunca uma instrução",
         "reembolso",
         "coparticipação",

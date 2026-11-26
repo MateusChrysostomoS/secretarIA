@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import fields
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -11,7 +12,11 @@ import pytest
 
 from secretaria.ai.prompts import CLINIC_FACTS_BUDGET, secretary_system_prompt
 from secretaria.services import booking_dates
-from secretaria.services.tenant_config import RuntimeAppointmentType, TenantRuntimeConfig
+from secretaria.services.tenant_config import (
+    RuntimeAppointmentType,
+    RuntimeUnit,
+    TenantRuntimeConfig,
+)
 
 GOLDEN = Path(__file__).parent / "golden" / "system_prompt_default.txt"
 HEADING = "SOBRE A CLÍNICA"
@@ -52,17 +57,26 @@ def test_prompt_without_clinic_context_is_unchanged() -> None:
     assert secretary_system_prompt(_config()).replace("\r\n", "\n") == expected
 
 
+def _units(*addresses: str) -> tuple[RuntimeUnit, ...]:
+    """TASK-094 D4: the address the prompt knows is the usable units', each with its name."""
+    names = ("Sede", "Centro", "Barra")
+    return tuple(
+        RuntimeUnit(id=UUID(int=100 + i), name=names[i], address=address)
+        for i, address in enumerate(addresses)
+    )
+
+
 def test_no_block_without_address_or_facts() -> None:
-    prompt = secretary_system_prompt(_config(clinic_facts={}, address={}))
+    prompt = secretary_system_prompt(_config(clinic_facts={}, units=()))
     assert HEADING not in prompt
 
 
 def test_address_alone_creates_the_block() -> None:
     prompt = secretary_system_prompt(
-        _config(address={"line": "Rua das Flores, 10", "city": "Recife", "state": "PE"})
+        _config(units=_units("Rua das Flores, 10, Recife - PE, 50000-000"))
     )
     assert HEADING in prompt
-    assert "- Endereço: Rua das Flores, 10, Recife - PE" in prompt
+    assert "- Endereço (unidade Sede): Rua das Flores, 10, Recife - PE, 50000-000" in prompt
     assert FOOTER in prompt
 
 
@@ -114,7 +128,7 @@ def _block(prompt: str) -> str:
 
 # The labels the renderer emits, in the priority order of SPEC F3 (address first, notes last).
 LABELS_IN_PRIORITY_ORDER = (
-    "- Endereço:",
+    "- Endereço",
     "- Como chegar:",
     "- Estacionamento:",
     "- Formas de pagamento:",
@@ -125,7 +139,7 @@ LABELS_IN_PRIORITY_ORDER = (
     "- Observações:",
 )
 
-_MAX_ADDRESS = {"line": "Rua " + "z" * 200, "city": "Recife", "state": "PE"}
+_MAX_ADDRESS = _units("Rua " + "z" * 200 + ", 1, Recife - PE, 50000-000")
 _MAX_FACTS = {
     "parking": "p" * 300,
     "how_to_arrive": "h" * 400,
@@ -153,7 +167,7 @@ _MID_FACTS = {
     "facts", [_MAX_FACTS, _MID_FACTS], ids=["every-field-at-max", "cut-in-faq"]
 )
 def test_a_full_block_stays_inside_the_budget_and_keeps_a_priority_prefix(facts) -> None:
-    prompt = secretary_system_prompt(_config(clinic_facts=facts, address=_MAX_ADDRESS))
+    prompt = secretary_system_prompt(_config(clinic_facts=facts, units=_MAX_ADDRESS))
     block = _block(prompt)
     assert len(block) <= CLINIC_FACTS_BUDGET
     present = [label in block for label in LABELS_IN_PRIORITY_ORDER]
@@ -168,10 +182,10 @@ def test_a_full_block_stays_inside_the_budget_and_keeps_a_priority_prefix(facts)
 
 
 def test_a_single_oversized_first_item_is_cut_not_dropped() -> None:
-    prompt = secretary_system_prompt(_config(address={"line": "R" * 5000, "city": "X"}))
+    prompt = secretary_system_prompt(_config(units=_units("R" * 5000)))
     block = _block(prompt)
     assert len(block) <= CLINIC_FACTS_BUDGET
-    assert "- Endereço: RRR" in block and "…" in block
+    assert "- Endereço (unidade Sede): RRR" in block and "…" in block
 
 
 def _service(name: str, **kw) -> RuntimeAppointmentType:
@@ -207,7 +221,7 @@ def test_object_catalog_entries_without_the_attributes_are_tolerated() -> None:
 
 
 # ----------------------------------------------------------------- malformed stored facts
-# `tenants.clinic_facts` / `tenants.address` are JSON columns: a row written outside the schema
+# `tenants.clinic_facts` is a JSON column: a row written outside the schema
 # (script, migration, manual fix) can hold any shape. A bad row must never break the turn.
 
 _VALID_FAQ = {"question": "Tem wi-fi?", "answer": "Sim."}
@@ -262,22 +276,19 @@ def test_clinic_facts_that_are_not_a_mapping_are_ignored_but_the_address_still_r
     facts,
 ) -> None:
     prompt = secretary_system_prompt(
-        _config(clinic_facts=facts, address={"line": "Rua das Flores, 10", "city": "Recife"})
+        _config(clinic_facts=facts, units=_units("Rua das Flores, 10, Recife - PE, 50000-000"))
     )
-    assert "- Endereço: Rua das Flores, 10, Recife" in prompt
+    assert "- Endereço (unidade Sede): Rua das Flores, 10, Recife" in prompt
     assert FOOTER in prompt
 
 
-@pytest.mark.parametrize("address", ["Rua das Flores, 10", ["Rua das Flores, 10"], 42, True])
-def test_an_address_that_is_not_a_mapping_is_ignored_but_the_facts_still_render(address) -> None:
-    prompt = secretary_system_prompt(
-        _config(address=address, clinic_facts={"parking": "Garagem própria."})
-    )
-    assert "- Estacionamento: Garagem própria." in prompt
-    assert "- Endereço:" not in prompt
+def test_the_legacy_clinic_address_is_not_part_of_the_prompt_config() -> None:
+    """TASK-094 D4 (owner, 2026-11-26): the legacy clinic-level address carried a junk CEP to a
+    patient; the prompt config has no field for it any more - only `units`."""
+    assert "address" not in {field.name for field in fields(TenantRuntimeConfig)}
 
 
 def test_when_nothing_stored_is_usable_the_prompt_is_the_reference_prompt() -> None:
     expected = GOLDEN.read_text(encoding="utf-8").replace("\r\n", "\n")
-    prompt = secretary_system_prompt(_config(clinic_facts=["x"], address="Rua A"))
+    prompt = secretary_system_prompt(_config(clinic_facts=["x"]))
     assert prompt.replace("\r\n", "\n") == expected

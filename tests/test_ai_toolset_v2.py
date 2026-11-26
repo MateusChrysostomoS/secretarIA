@@ -97,6 +97,8 @@ _HANDBACKS = {
     "offer_human_handoff",
     # TASK-090 Adendo 1 (C6): read-only, rides with request_human_handoff.
     "get_insurance_payment_rule",
+    # TASK-094 D5: read-only - which convênios the clinic accepts, by name.
+    "list_accepted_insurances",
     "save_patient_name",
 }
 

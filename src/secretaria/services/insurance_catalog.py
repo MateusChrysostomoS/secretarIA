@@ -274,6 +274,38 @@ def catalog_match_keys(entry: InsuranceCatalog) -> set[str]:
     return {key for key in keys if key}
 
 
+# TASK-094 D6 (owner, 2026-11-26): how patients actually NAME the seeded convênios, for the AI's
+# payment-rule lookup ONLY (services/insurance_payment_note.py, compared by compact key - accents,
+# case, spaces and punctuation ignored, so "sul america" already finds "SulAmérica" without an
+# entry here). Deliberately NOT part of `catalog_match_keys`: that set also decides which legacy
+# strings are "known" (`_legacy_only_names`) and how a typed answer resolves in the booking flow,
+# and widening it would silently drop or re-map a clinic's plans. Kept in code (keyed by the
+# seed's slug), not in `insurance_catalog.aliases`, so no migration. A short brand ("bradesco",
+# "golden", "prevent") is listed only when it names ONE seeded entry; if a clinic also has an
+# "Outro" with that name, the lookup sees two convênios and the AI asks which (never a guess).
+CATALOG_LOOKUP_ALIASES: dict[str, tuple[str, ...]] = {
+    "amil": ("amil saude",),
+    "assim-saude": ("assim",),
+    "bradesco-saude": ("bradesco",),
+    "golden-cross": ("golden",),
+    "hapvida": ("hapvida saude",),
+    "notredame-intermedica": ("notredame", "notre dame", "intermedica", "gndi"),
+    "omint": ("omint saude",),
+    "porto-seguro-saude": ("porto seguro", "porto saude"),
+    "prevent-senior": ("prevent",),
+    "sulamerica": ("sulamerica saude",),
+}
+
+
+def catalog_lookup_keys(entry: InsuranceCatalog) -> set[str]:
+    """Every spelling (raw text) the AI's payment-rule lookup accepts for `entry`: its name, its
+    admin aliases and `CATALOG_LOOKUP_ALIASES` (TASK-094 D6). The caller compacts them."""
+    names = {str(entry.name)}
+    names.update(str(alias) for alias in (entry.aliases or []))
+    names.update(CATALOG_LOOKUP_ALIASES.get(str(getattr(entry, "slug", "") or ""), ()))
+    return {name for name in names if name.strip()}
+
+
 def match_plan(plans: Iterable[dict], text: str | None) -> dict | None:
     """The plan whose name IS `text` (normalized), or its 24-char row title.
 

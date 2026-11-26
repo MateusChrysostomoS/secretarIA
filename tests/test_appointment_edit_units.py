@@ -977,7 +977,9 @@ async def test_clinic_without_units_edit_flow_unchanged():
     )
     assert service.flow_step == fr.STEP_EDIT_CONFIRM
     body = service.bubbles[-1].body
-    assert "Unidade" not in body and "unidade" not in body
+    # TASK-094 D4: the booking has no unit, so the place shown is the clinic's ONLY usable
+    # unit (the snapshot's `sole_unit`), with its name - never the legacy clinic address.
+    assert "Unidade: Sede\n" in body
     assert "Endereço: Rua das Flores, 10" in body
     assert body.endswith("O que mudou: serviço.")
     listed = await _step(
@@ -1033,20 +1035,24 @@ async def test_summary_lists_unit_change_and_unit_address():
     assert agenda.log.descriptions and "Unidade: Leste" in agenda.log.descriptions[-1]
 
 
-async def test_summary_with_clinic_address_dict_does_not_crash():
+async def test_summary_never_shows_the_legacy_clinic_address():
+    """TASK-094 D4: a booking without a unit, in a clinic with several usable units (no
+    `sole_unit`), has no address line - and the legacy clinic-level address (even a dict, the
+    old crash of follow-up E1) is never read."""
     doctor = _doctor("Dra. Ana", [])
     agenda = _Agenda()
     appt = _appt(doctor, None)
     draft = ae.EditDraft.from_appointment(appt, TZ)
     clinic = tenant(
-        address={"line": "Rua X, 1", "neighborhood": "Centro", "city": "São Paulo", "state": "SP"}
+        sole_unit=None,
+        address={"line": "Rua X, 1", "neighborhood": "Centro", "city": "São Paulo", "state": "SP"},
     )
     ctx = ae.EditContext(calendars={str(doctor.id): agenda})
     card = await edit_step(
         conversation(draft, fr.STEP_EDIT_INSURANCE), clinic, "Amil", [appt], [doctor], ctx, "Maria"
     )
     assert card.flow_step == fr.STEP_EDIT_CONFIRM
-    assert "Endereço: Rua X, 1, Centro, São Paulo/SP" in card.bubbles[-1].body
+    assert "Endereço:" not in card.bubbles[-1].body and "Rua X" not in card.bubbles[-1].body
     confirmed = await edit_step(
         conversation(_draft(card), fr.STEP_EDIT_CONFIRM),
         clinic,
@@ -1057,7 +1063,7 @@ async def test_summary_with_clinic_address_dict_does_not_crash():
         "Maria",
     )
     assert confirmed.appointment_edit is not None
-    assert "Endereço: Rua X, 1, Centro, São Paulo/SP" in confirmed.bubbles[0].body
+    assert "Rua X" not in confirmed.bubbles[0].body
 
 
 async def test_ai_proposal_service_not_at_unit_opens_unit_list():

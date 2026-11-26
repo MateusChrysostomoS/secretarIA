@@ -402,7 +402,10 @@ def test_prompt_tells_model_to_hand_off_on_insurance_payment_rules(monkeypatch, 
         "reembolso",
         "coparticipação",
         "get_insurance_payment_rule",
-        "explique só o que ela diz",
+        # TASK-094 D6/D7: any "como funciona o X"; the system shows the rule, never the model.
+        "como funciona",
+        "o sistema mostra a regra",
+        "não repita",
         "sem regra, não explique",
         "oferece Sim/Não",
         f'reason "{REASON}"',
@@ -413,7 +416,7 @@ def test_prompt_tells_model_to_hand_off_on_insurance_payment_rules(monkeypatch, 
         line for line in v2.splitlines() if line.startswith("- get_insurance_payment_rule")
     )
     assert v2_rule_line == prompts_v2.INSURANCE_PAYMENT_RULE_V2
-    for words in ("reembolso", "coparticipação", "cobertura", "só a regra devolvida"):
+    for words in ("reembolso", "coparticipação", "cobertura", "como funciona", "não repita"):
         assert words in prompts_v2.INSURANCE_PAYMENT_RULE_V2
     # Adendo 1 (owner, 2026-11-24): no rule -> the Sim / Não offer (net-neutral in the v2 cap).
     for words in ("Convênio sem regra", f'reason "{REASON}"', "Sim/Não"):

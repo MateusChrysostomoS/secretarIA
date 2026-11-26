@@ -56,7 +56,9 @@ def tenant(**kwargs):
         appointment_duration_min=40,
         business_hours={},
         timezone="America/Sao_Paulo",
-        address="Rua das Flores, 10",
+        # TASK-094 D4: the flow snapshot carries the clinic's ONLY usable unit (never the
+        # legacy clinic-level address); a booking without a unit shows this one.
+        sole_unit=SimpleNamespace(name="Sede", address="Rua das Flores, 10"),
         clinic_name="Clínica Olhar",
         insurance_plans=[{"id": "p1", "name": "Unimed"}, {"id": "p2", "name": "Amil"}],
         insurance_mode="clinic_with_exceptions",

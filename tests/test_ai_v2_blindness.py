@@ -380,6 +380,8 @@ def _scripted_calls(own_ref: str, other_ref: str) -> dict[str, list[dict]]:
         "request_human_handoff": [{"reason": "nenhum"}, {"reason": "could_not_help"}],
         "offer_human_handoff": [{"message": "N?o tenho essa informa??o."}],
         "get_insurance_payment_rule": [{"insurance": "Unimed"}, {"insurance": OTHER_PATIENT_NAME}],
+        # TASK-094 D5: read-only, this clinic's accepted convênio names only.
+        "list_accepted_insurances": [{}],
         "save_patient_name": [{"name": "Joana Prado"}, {"name": "ok?"}],
         "create_event": [
             {"start": f"{last}T09:00", "service": "Consulta"},

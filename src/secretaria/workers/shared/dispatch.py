@@ -354,6 +354,33 @@ async def _send_plain_reply(
     return True
 
 
+async def _send_patient_notices(
+    reply: _ReplyContext,
+    notices: list[str],
+    *,
+    tenant: Tenant | None,
+    waba_token: str | None,
+) -> int:
+    """Send the fixed system messages a tool queued this turn (TASK-094 D7: the clinic's
+    payment rule, exactly as written), each as its own plain message, BEFORE anything the
+    model wrote. Channel-neutral: `_send_plain_reply` picks the sender by `reply.channel`
+    (Portal: the recorded row; WhatsApp: the clinic's number). The body is never logged.
+    Returns how many went out."""
+    if tenant is None:
+        return 0
+    sent = 0
+    for body in notices:
+        if await _send_plain_reply(
+            reply,
+            tenant=tenant,
+            waba_token=waba_token,
+            body=body,
+            event="patient_notice_sent",
+        ):
+            sent += 1
+    return sent
+
+
 async def _send_name_question(
     reply: _ReplyContext,
     *,

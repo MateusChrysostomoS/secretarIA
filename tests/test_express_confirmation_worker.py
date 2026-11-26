@@ -80,7 +80,6 @@ ADDRESS = {
     "state": "SP",
     "postal_code": "01000-000",
 }
-ADDRESS_LINE = "Endereço: Rua A, 1, Centro, São Paulo/SP, CEP 01000-000"
 SERVICE = {
     "name": "Consulta",
     "duration_min": 30,
@@ -345,8 +344,7 @@ async def test_a_full_draft_lands_on_the_details_and_the_card_and_books_nothing(
         "Confira os detalhes da sua consulta:\n\n"
         "🥼 Profissional: Dra. Única — Clínica Geral\n"
         "🏥 Serviço: Consulta\n"
-        "👤 Para: você\n"
-        f"{ADDRESS_LINE}\n\n"
+        "👤 Para: você\n\n"  # TASK-094 D4: the legacy clinic address is never shown
         "Avaliação completa.\n\n"
         "O que levar / preparo:\n"
         "• Jejum de 8 horas"
@@ -381,16 +379,16 @@ async def test_the_hand_back_is_logged_on_the_confirmation_card(wired):
     assert event["topology"] == "sole"
 
 
-@pytest.mark.parametrize(
-    "address, shown",
-    [(ADDRESS, True), (None, False), ({"city": "Recife"}, False)],
-)
-async def test_the_clinic_address_is_shown_only_when_stored(wired, address, shown):
+@pytest.mark.parametrize("address", [ADDRESS, None, {"city": "Recife"}])
+async def test_the_legacy_clinic_address_is_never_shown(wired, address):
+    """TASK-094 D4 (owner, 2026-11-26): the legacy clinic-level address reached a patient with
+    a junk CEP; a booking without a unit never shows it (a clinic without a usable unit is not
+    served at all, and one with a single usable unit shows THAT unit's address)."""
     tenant, _doctor, _patient, conversation = await _seed(wired.db, address=address)
 
     await _land(tenant, conversation)
 
-    assert ("Endereço:" in wired.sent[0].body) is shown
+    assert "Endereço:" not in wired.sent[0].body
 
 
 async def test_a_clinic_with_units_never_shows_the_clinic_address(wired):

@@ -59,6 +59,7 @@ from secretaria.ai.tools import (
     _calendar_ctx,
     _conversation_id_ctx,
     _editing_ctx,
+    _patient_notices_ctx,
     _redis_ctx,
     _tenant_config_ctx,
     _tenant_id_ctx,
@@ -181,6 +182,36 @@ def split_handback_intro(reply: str) -> tuple[str | None, str]:
     if not isinstance(intro, str) or not intro.strip():
         return None, rest
     return intro.strip(), rest
+
+
+# TASK-094 D7: fixed system messages a tool queued for the patient this turn (the clinic's
+# payment rule, verbatim - ai/tools.py::_patient_notices_ctx). They ride IN FRONT of whatever
+# run_agent returns (plain text, a sentinel, an intro envelope) as ONE JSON list line, so every
+# other shape is untouched after `split_patient_notices`; the worker sends them first.
+PATIENT_NOTICES_PREFIX = "__NOTICES__:"
+
+
+def with_patient_notices(reply: str, notices: list[str]) -> str:
+    """`reply`, prefixed by the notices envelope (duplicates dropped, order kept)."""
+    unique = list(dict.fromkeys(text for text in notices if (text or "").strip()))
+    if not unique:
+        return reply
+    return f"{PATIENT_NOTICES_PREFIX}{json.dumps(unique, ensure_ascii=False)}\n{reply}"
+
+
+def split_patient_notices(reply: str) -> tuple[list[str], str]:
+    """(notices, rest) - the inverse of `with_patient_notices`; ([], reply) without one. A
+    malformed envelope drops the notices and keeps the rest."""
+    if not reply.startswith(PATIENT_NOTICES_PREFIX):
+        return [], reply
+    head, _, rest = reply.partition("\n")
+    try:
+        notices = json.loads(head[len(PATIENT_NOTICES_PREFIX) :])
+    except ValueError:
+        return [], rest
+    if not isinstance(notices, list):
+        return [], rest
+    return [text for text in notices if isinstance(text, str) and text.strip()], rest
 
 
 # Per-async-task TenantRuntimeConfig, used by _prompt_with_today. Defined in
@@ -330,6 +361,7 @@ def effective_tools(
             "request_human_handoff",
             "offer_human_handoff",
             "get_insurance_payment_rule",
+            "list_accepted_insurances",
         }
         candidates = [*base_tools_for(topology, toolset_v2=toolset_v2), *extra_tools]
         kept = [
@@ -704,6 +736,25 @@ async def run_agent(
     message: str,
     context: dict,
     tenant_config: TenantRuntimeConfig | None = None,
+    **kwargs,
+) -> str:
+    """arq-side entry point - `_run_agent_turn` (every keyword documented there), plus the
+    patient notices a tool queued during the turn (TASK-094 D7): a fresh list per turn, and
+    the reply comes back wrapped by `with_patient_notices` whatever its shape (text, sentinel,
+    fallback), so a rule the patient must read is never lost to a hand-back or an error."""
+    notices: list[str] = []
+    token = _patient_notices_ctx.set(notices)
+    try:
+        reply = await _run_agent_turn(message, context, tenant_config, **kwargs)
+    finally:
+        _patient_notices_ctx.reset(token)
+    return with_patient_notices(reply, notices)
+
+
+async def _run_agent_turn(
+    message: str,
+    context: dict,
+    tenant_config: TenantRuntimeConfig | None = None,
     extra_tools: Sequence = (),
     redis=None,
     selected_professional=None,
@@ -716,6 +767,7 @@ async def run_agent(
     channel: str = CHANNEL_WHATSAPP,
     patient_identity: PatientIdentityStatus | None = None,
     clinic_features: ClinicFeatures | None = None,
+    selected_unit_id: UUID | None = None,
 ) -> str:
     """arq-side entry point: build history + run agent + return reply text.
 
@@ -787,6 +839,10 @@ async def run_agent(
         tenant_config = replace(
             tenant_config, patient_identity=patient_identity, clinic_features=clinic_features
         )
+    if tenant_config is not None and selected_unit_id is not None:
+        # TASK-094 D4: the unit this booking already has - the prompt then cites only its
+        # address (ai/prompts.py::_units_to_cite). Per turn, never loaded from the DB here.
+        tenant_config = replace(tenant_config, selected_unit_id=selected_unit_id)
 
     # Build a per-tenant CalendarService and inject it via ContextVar so the
     # cached process-wide agent uses the right credentials for this call.

@@ -22,6 +22,7 @@ from secretaria.ai.graph import (
     START_GUIDED_BOOKING_SENTINEL_PREFIX,
     run_agent,
     split_handback_intro,
+    split_patient_notices,
 )
 from secretaria.ai.tools import INSURANCE_PAYMENT_QUESTION
 from secretaria.core.database import async_session_factory
@@ -72,6 +73,7 @@ from secretaria.services.llm_context import (
     build_clinic_features,
     build_conversation_state,
     build_patient_identity,
+    selected_unit_id,
 )
 from secretaria.services.patient_context import (
     PatientOpeningState,
@@ -106,6 +108,7 @@ from secretaria.services.pending_identity import (
 )
 from secretaria.services.professional_units import (
     has_usable_units as clinic_has_active_units,
+    usable_units as clinic_usable_units,
 )
 from secretaria.services.sensitive_claim_guard import guard_reply
 from secretaria.services.service_catalog import (
@@ -175,6 +178,7 @@ from secretaria.workers.shared.dispatch import (
     _send_consent_notice,
     _send_greeting,
     _send_name_question,
+    _send_patient_notices,
     _send_plain_reply,
 )
 from secretaria.workers.shared.draft_resolution import _resume_booking_draft, _turn_booking_gate
@@ -216,7 +220,7 @@ from secretaria.workers.shared.sentinels import (
 from secretaria.workers.shared.state_expiry import (
     _write_flow_state,
 )
-from secretaria.workers.shared.text import _render_greeting_template
+from secretaria.workers.shared.text import _render_greeting_template, without_questions
 from secretaria.workers.shared.unit_gate import reply_blocked_no_usable_unit
 
 logger = get_logger(__name__)
@@ -440,6 +444,9 @@ async def _send_bot_reply_inner(reply: _ReplyContext, redis=None) -> None:
     # TASK-090: units are core, so the unit tools/prompt switch on from the clinic's own data
     # (>= 1 USABLE unit: active + complete address, Adendo 1 §A).
     has_active_units = False
+    # TASK-094 D4: the clinic's usable units, for the flow snapshot's address (the booking
+    # details and the edit recap name the only one; with several, none - never the legacy one).
+    usable_clinic_units: list = []
     # The reply gate's answer read in THIS turn's load (Adendo 1 §A + I1): True/False when the
     # read succeeded, None when it failed or never ran - the gate then reads it itself.
     clinic_ready: bool | None = None
@@ -529,6 +536,10 @@ async def _send_bot_reply_inner(reply: _ReplyContext, redis=None) -> None:
                     try:
                         async with session.begin_nested():
                             has_active_units = await clinic_has_active_units(session, tenant.id)
+                            if has_active_units:
+                                usable_clinic_units = await clinic_usable_units(
+                                    session, tenant.id
+                                )
                         units_ready = has_active_units
                     except Exception as exc:
                         has_active_units = False
@@ -629,7 +640,11 @@ async def _send_bot_reply_inner(reply: _ReplyContext, redis=None) -> None:
                             patient_id=conversation.patient_id,
                         ),
                         _flow_tenant_snapshot(
-                            tenant, professional_rows, service_catalog, tenant_insurance
+                            tenant,
+                            professional_rows,
+                            service_catalog,
+                            tenant_insurance,
+                            usable_units=usable_clinic_units,
                         ),
                     )
                     # Load the patient's future appointments whenever THIS turn
@@ -1535,6 +1550,10 @@ async def _send_bot_reply_inner(reply: _ReplyContext, redis=None) -> None:
             clinic_features=build_clinic_features(
                 tenant, flow_snapshot[1] if flow_snapshot is not None else None
             ),
+            # TASK-094 D4: the unit this booking already has (only its address is cited).
+            selected_unit_id=selected_unit_id(
+                flow_snapshot[0] if flow_snapshot is not None else None
+            ),
         )
     except Exception as exc:
         if not editing:
@@ -1557,7 +1576,18 @@ async def _send_bot_reply_inner(reply: _ReplyContext, redis=None) -> None:
     # A hand-back may carry the agent's own words for the patient (TASK-038,
     # ai/graph.py::HANDBACK_INTRO_PREFIX): split them off first so every sentinel
     # below matches exactly as before.
+    # TASK-094 D7: fixed system messages a tool queued (the clinic's payment rule, verbatim)
+    # go out FIRST and untouched - they are not the model's prose, so no guard rewrites them.
+    patient_notices, reply_text = split_patient_notices(reply_text)
+    if patient_notices:
+        await _send_patient_notices(
+            reply, patient_notices, tenant=tenant, waba_token=waba_token
+        )
     handback_intro, reply_text = split_handback_intro(reply_text)
+    if handback_intro and reply_text == HUMAN_HANDOFF_OFFER_SENTINEL:
+        # TASK-094 D7: the fixed card asks "Quer que eu chame nosso atendente humano?" right
+        # after; the model's own question/offer in the intro made it ask twice (26/11).
+        handback_intro = without_questions(handback_intro)
     if (
         editing
         and reply_text != HUMAN_HANDOFF_OFFER_SENTINEL

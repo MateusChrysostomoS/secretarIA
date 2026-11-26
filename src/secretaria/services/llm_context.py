@@ -19,6 +19,7 @@ the model; the pra-quem answer, the chosen time and the clinic's topology are st
 from __future__ import annotations
 
 from datetime import datetime
+from uuid import UUID
 
 from secretaria.models import FlowState
 from secretaria.services import flow_router as fr, flow_units
@@ -387,9 +388,36 @@ def build_conversation_state(conversation, tenant, professionals) -> str | None:
             lines.append(f"- Unidade já escolhida: {chosen}")
     plans = fr.insurance_plan_names(tenant) if tenant is not None else []
     if plans:
-        lines.append(f"- Convênios cadastrados na clínica: {len(plans)} (valores omitidos).")
+        lines.append(
+            f"- Convênios cadastrados na clínica: {len(plans)} (nomes omitidos aqui; para dizer "
+            "quais, use list_accepted_insurances)."
+        )
     lines.extend(_topology_lines(tenant, professionals))
     return "\n".join(lines)
+
+
+def selected_unit_id(conversation) -> UUID | None:
+    """The unit this conversation already has (TASK-094 D4): the appointment being edited, else
+    the booking in progress. None without one - the prompt then lists every usable unit."""
+    if conversation is None:
+        return None
+    raw_edit = getattr(conversation, "flow_edit_draft", None)
+    if getattr(conversation, "flow_state", None) == FlowState.EDIT_BOOKING and isinstance(
+        raw_edit, dict
+    ):
+        current = raw_edit.get("current")
+        if isinstance(current, dict) and current.get("unit_id"):
+            try:
+                return UUID(str(current["unit_id"]))
+            except ValueError:
+                return None
+    raw = getattr(conversation, "flow_selected_unit_id", None)
+    if raw is None:
+        return None
+    try:
+        return raw if isinstance(raw, UUID) else UUID(str(raw))
+    except ValueError:
+        return None
 
 
 def build_patient_identity(

@@ -28,6 +28,7 @@ from secretaria.ai.prompts_v2 import (  # noqa: E402
 )
 from secretaria.services.tenant_config import (  # noqa: E402
     RuntimeAppointmentType,
+    RuntimeUnit,
     TenantRuntimeConfig,
 )
 
@@ -55,6 +56,7 @@ ALL_TOOL_NAMES = frozenset(
         "get_service_info",
         "offer_human_handoff",
         "get_insurance_payment_rule",
+        "list_accepted_insurances",
     }
 )
 # The largest v2 set a turn can have (every addon on): tests/test_ai_toolset_v2.py. Since the
@@ -74,6 +76,8 @@ V2_FULL = frozenset(
         "get_service_info",
         "offer_human_handoff",
         "get_insurance_payment_rule",
+        # TASK-094 D5: every v2 turn with the flow on has it (workers/shared/llm_context.py).
+        "list_accepted_insurances",
         "create_event",
         "cancel_event",
     }
@@ -392,8 +396,10 @@ def test_the_v2_prompt_stays_under_its_ceiling():
 
 
 def test_current_clinic_facts_are_kept_and_only_present_tools_are_named():
+    # TASK-094 D4: the address comes from the usable units (the legacy clinic address is gone).
     config = _config(
-        address={"line": "Rua Fictícia, 123"}, clinic_facts={"parking": "Garagem gratuita"}
+        units=(RuntimeUnit(id=uuid4(), name="Sede", address="Rua Fictícia, 123"),),
+        clinic_facts={"parking": "Garagem gratuita"},
     )
     for names in (V2_FULL, frozenset(REQUIRED_TOOLS)):
         prompt = secretary_system_prompt_v2(config, tool_names=names)

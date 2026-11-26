@@ -53,7 +53,6 @@ from secretaria.services.attendee import (
     parse_attendee_name,
 )
 from secretaria.services.booking_dates import short_day_phrase
-from secretaria.services.booking_details import clinic_address_line
 from secretaria.services.calendar import (
     CalendarSlotTakenError,
     CalendarUnavailableError,
@@ -208,23 +207,28 @@ def _draft_unit(draft: ae.EditDraft, doctor) -> Any | None:
     return next((u for u in flow_units.offered_units(doctor) if u.id == unit_id), None)
 
 
-def _clinic_address(tenant) -> str | None:
-    """The clinic's address as one line. In production `Tenant.address` is the JSON dict
-    (`booking_details.clinic_address_line`); a plain string (older snapshots, tests) is used
-    as it is. Never `.strip()` on a dict (follow-up E1, D4)."""
-    raw = getattr(tenant, "address", None)
-    if isinstance(raw, str):
-        return raw.strip() or None
-    return clinic_address_line(raw)
+def _sole_unit_place(tenant) -> tuple[str | None, str | None]:
+    """(name, address) of the clinic's ONLY usable unit, as the flow snapshot carries it
+    (workers/shared/greeting.py::_flow_tenant_snapshot `sole_unit`), or (None, None).
+
+    TASK-094 D4 (owner, 2026-11-26): the legacy clinic-level `Tenant.address` is never read
+    here any more - it reached a patient with a junk CEP. Several usable units -> no address
+    (never a guess between buildings); none -> no address."""
+    unit = getattr(tenant, "sole_unit", None)
+    if unit is None:
+        return None, None
+    name = str(getattr(unit, "name", "") or "").strip() or None
+    address = str(getattr(unit, "address", "") or "").strip() or None
+    return name, address
 
 
 def _recap_place(draft: ae.EditDraft, doctor, tenant) -> tuple[str | None, str | None]:
     """(unit name, address) for the confirmation text (D4): a booking at a unit shows that
-    unit and ITS address (none when the unit has none - never the clinic's, which may be
-    another building); without a unit, the clinic's address exactly as before."""
+    unit and ITS address (none when the unit has none - never another building's); without a
+    unit, the clinic's only usable unit (TASK-094 D4), else no address."""
     unit = _draft_unit(draft, doctor)
     if unit is None:
-        return None, _clinic_address(tenant)
+        return _sole_unit_place(tenant)
     address = str(getattr(unit, "address", None) or "").strip() or None
     return str(getattr(unit, "name", "") or "") or None, address
 

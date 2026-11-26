@@ -198,7 +198,10 @@ TENANT_SCALAR_FIELDS: tuple[str, ...] = (
     "business_hours",
     "appointment_types",
     "initial_flows",
-    "address",
+    # `address` is no longer writable (TASK-094 D4, owner 2026-11-26): the legacy clinic-level
+    # address reached a patient with a junk CEP and the manager can no longer see it. The
+    # address a patient reads is the UNITS'. The config schema still accepts the key (an old
+    # Portal must not get a 422) and drops it here - the PUT and the batch alike.
     "clinic_facts",
     # `collect_insurance` is no longer writable (TASK-090): the convênio question
     # depends only on the clinic having convênios. The config schema still accepts

@@ -147,7 +147,8 @@ async def test_put_address_and_legacy_collect_insurance_succeeds_while_disconnec
     )
     assert response.status_code == 200
     body = response.json()
-    assert body["address"]["city"] == "São Paulo"
+    # TASK-094 D4: the legacy clinic address is accepted (no 422) and ignored - never stored.
+    assert body["address"] is None
     # TASK-090: accepted but ignored - the read is a legacy constant and the stored flag
     # does not change.
     assert body["collect_insurance"] is True
@@ -340,12 +341,11 @@ async def test_put_insurances_field_is_silently_ignored(client: AsyncClient) -> 
 
 
 async def test_put_address_partial_fields_allowed(client: AsyncClient) -> None:
-    """A clinic may fill in only what it has - the unset nested fields are
-    simply absent from what gets stored (exclude_unset all the way down),
-    not present-and-null."""
+    """A partial legacy address is still a valid body (an old Portal must not get a 422) -
+    and, since TASK-094 D4, it is ignored: the address a patient reads is the units'."""
     response = await client.put(CONFIG, json={"address": {"city": "Recife"}})
     assert response.status_code == 200
-    assert response.json()["address"] == {"city": "Recife"}
+    assert response.json()["address"] is None
 
 
 # --------------------------------------------------------------------------

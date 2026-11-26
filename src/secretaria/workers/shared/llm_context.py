@@ -9,6 +9,7 @@ from secretaria.ai.availability_tool import get_availability
 from secretaria.ai.staging_tools import cancel_event_v2, create_event_v2
 from secretaria.ai.tools import (
     get_insurance_payment_rule,
+    list_accepted_insurances,
     manage_existing_appointment,
     manage_existing_appointment_v2,
     offer_human_handoff,
@@ -373,6 +374,8 @@ def _flow_handback_tools(tenant: Tenant | None, topology: str, plugin_tools: lis
         # TASK-090 Adendo 1 (C6): read-only, rides with request_human_handoff - the clinic's
         # convênio payment rule, or "no rule" and the hand-off.
         get_insurance_payment_rule,
+        # TASK-094 D5: read-only - which convênios the clinic accepts, by name.
+        list_accepted_insurances,
         save_patient_name,
     ]
     if topology != BOOKING_TOPOLOGY_MULTI:

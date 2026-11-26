@@ -231,3 +231,23 @@ def _render_greeting_template(template: str, name: str | None) -> str:
 def _as_utc(dt: datetime) -> datetime:
     """Treat a naive timestamp (e.g. from SQLite) as UTC; pass tz-aware through."""
     return dt if dt.tzinfo is not None else dt.replace(tzinfo=UTC)
+
+
+# A sentence ends at . ! ? or … followed by space, or at a line break.
+_SENTENCE_BREAK = re.compile(r"(?<=[.!?…])\s+|\n+")
+# Closing marks that may trail the question mark ("?)", "?\"").
+_TRAILING_CLOSERS = " \t)]}\"'”’»"
+
+
+def without_questions(text: str | None) -> str | None:
+    """`text` without its sentences that end in "?" (TASK-094 D7), or None when nothing is left.
+
+    Used on the model's intro right before the FIXED human-offer card, which asks the question
+    itself: the intro used to ask too ("Quer que eu chame nossa equipe…?") and the patient got
+    the same offer twice (battery 2026-11-26)."""
+    kept = [
+        sentence.strip()
+        for sentence in _SENTENCE_BREAK.split(text or "")
+        if sentence.strip() and not sentence.strip().rstrip(_TRAILING_CLOSERS).endswith("?")
+    ]
+    return " ".join(kept) or None

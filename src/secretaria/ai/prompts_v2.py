@@ -64,9 +64,14 @@ INSURANCE_PAYMENT_HANDOFF_RULE_V2 = (
     'Convênio sem regra: reason "insurance_payment_question" (Sim/Não).'
 )
 INSURANCE_PAYMENT_RULE_V2 = (
-    "- get_insurance_payment_rule: pagar com convênio (reembolso, coparticipação, "
-    "cobertura): explique só a regra devolvida, sem inventar."
+    "- get_insurance_payment_rule: como funciona um convênio (reembolso, coparticipação, "
+    "cobertura): o sistema mostra a regra; não repita."
 )
+
+# TASK-094 D5: the read tool's short line; the full rule ("quais convênios vocês aceitam?" /
+# "aceitam X?", never a human) rides in the shared RECURSOS block (prompts.
+# ACCEPTED_INSURANCES_RULE). Room under the v2 ceiling came from the offer_human_handoff line.
+LIST_ACCEPTED_INSURANCES_V2 = "- list_accepted_insurances: quais convênios a clínica aceita."
 
 # Calendar reference shared with v1; not the availability tool's 14-day read limit.
 UPCOMING_DAYS = 20
@@ -252,11 +257,14 @@ def _format_tools_v2(names: frozenset[str]) -> str:
         )
     if "offer_human_handoff" in names:
         lines.append(
-            "- offer_human_handoff: se a informação falta ou você não consegue ajudar "
-            "depois de tentar, oferece atendente com Sim/Não; o paciente decide. "
-            "Em message: antes o que você sabe, depois o que faltou, sem prometer "
-            "contato futuro."
+            # TASK-094 D7: shorter (the v2 ceiling) and no question in message - the fixed
+            # Sim/Não card asks right after, and a "?" sentence there is dropped anyway.
+            "- offer_human_handoff: sem a informação, depois de tentar, oferece atendente "
+            "(Sim/Não). Em message: o que você sabe e o que faltou, sem pergunta nem "
+            "promessa de contato."
         )
+    if "list_accepted_insurances" in names:
+        lines.append(LIST_ACCEPTED_INSURANCES_V2)
     if "get_insurance_payment_rule" in names:
         lines.append(INSURANCE_PAYMENT_RULE_V2)
     if "request_human_handoff" in names:

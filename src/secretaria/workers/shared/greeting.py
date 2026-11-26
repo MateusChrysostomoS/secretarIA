@@ -47,6 +47,7 @@ from secretaria.services.patient_context import (
     PatientOpeningContext,
     PatientOpeningState,
 )
+from secretaria.services.professional_units import usable_only
 from secretaria.services.service_catalog import (
     load_service_catalog,
     normalize as normalize_service_name,
@@ -59,6 +60,8 @@ from secretaria.services.tenant_config import (
     professional_appointment_types,
     professional_business_hours,
 )
+from secretaria.services.unit_address import format_unit_address, parts_of
+from secretaria.services.unit_booking import unit_location
 from secretaria.workers.shared.channel_policy import policy_for
 from secretaria.workers.shared.context import (
     _ReplyContext,
@@ -365,8 +368,17 @@ def _flow_tenant_snapshot(
     professionals: list[Professional],
     services: list | None = None,
     insurance: TenantInsurance | None = None,
+    *,
+    usable_units: list | None = None,
 ) -> SimpleNamespace:
     """Build the tenant-shaped config consumed by the deterministic router.
+
+    TASK-094 D4 (owner, 2026-11-26): the legacy clinic-level `tenant.address` is never copied
+    here - it reached a patient with a junk CEP. `usable_units` (the clinic's units, filtered
+    again by `professional_units.usable_only`) gives the place a booking WITHOUT a unit shows:
+    exactly one usable unit -> `sole_unit` (name, derived address line) and `clinic_address`
+    ("<name> — <line>", the booking details' form); none or several -> both None (never a
+    guess between buildings).
 
     A single active professional is the effective clinic config, matching
     ``load_tenant_config``. Multi-professional flows select a professional
@@ -410,10 +422,20 @@ def _flow_tenant_snapshot(
         appointment_types = professional_appointment_types(professional, tenant, services)
         business_hours = professional_business_hours(professional, tenant)
 
+    usable = usable_only(usable_units or [])
+    sole_line = format_unit_address(parts_of(usable[0])) if len(usable) == 1 else ""
+    sole_unit = (
+        SimpleNamespace(id=usable[0].id, name=str(usable[0].name), address=sole_line)
+        if sole_line
+        else None
+    )
     return SimpleNamespace(
         initial_flows=tenant.initial_flows,
         reminders_v2_enabled=getattr(tenant, "reminders_v2_enabled", False),
-        address=getattr(tenant, "address", None),
+        sole_unit=sole_unit,
+        clinic_address=(
+            unit_location(sole_unit.name, sole_unit.address) if sole_unit is not None else None
+        ),
         timezone=getattr(tenant, "timezone", None),
         appointment_types=appointment_types,
         appointment_duration_min=tenant.appointment_duration_min,

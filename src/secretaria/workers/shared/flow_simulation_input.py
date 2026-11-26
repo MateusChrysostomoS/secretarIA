@@ -25,7 +25,10 @@ from secretaria.services.hub_configuration import (
 )
 from secretaria.services.insurance_catalog import load_tenant_insurance
 from secretaria.services.list_options import needs_unit_options
-from secretaria.services.professional_units import patient_hidden_professional_ids
+from secretaria.services.professional_units import (
+    patient_hidden_professional_ids,
+    usable_units,
+)
 from secretaria.services.service_catalog import load_service_catalog, resolve_entries
 from secretaria.services.tenant_config import (
     list_active_professionals,
@@ -88,7 +91,14 @@ async def load_simulation_inputs(
         overlay_professional(p, draft_professional, applies=(p.id == professional_id))
         for p in rows
     ]
-    snapshot = _flow_tenant_snapshot(tenant_view, professional_views, catalog, insurance)
+    # TASK-094 D4: the address a booking without a unit shows comes from the usable units.
+    snapshot = _flow_tenant_snapshot(
+        tenant_view,
+        professional_views,
+        catalog,
+        insurance,
+        usable_units=await usable_units(session, tenant.id),
+    )
     everyone = [
         SimpleNamespace(
             id=p.id,

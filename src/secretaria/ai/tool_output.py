@@ -110,6 +110,8 @@ V2_TOOL_OUTPUTS: Mapping[str, OutputAllowlist] = {
     # TASK-090 Adendo 1 (C6): one of its own sentences - the clinic's rule fenced as data
     # (services/insurance_payment_note.fence_payment_rules) or the fixed "no rule" text.
     "get_insurance_payment_rule": OutputAllowlist(frozenset({"error"}), text=True),
+    # TASK-094 D5: fixed sentences around the accepted convênio names (one per line).
+    "list_accepted_insurances": OutputAllowlist(frozenset({"error"}), text=True),
     "iniciar_pre_consulta": OutputAllowlist(frozenset({"error"}), text=True),
     "propose_appointment_edit": _ERROR_ONLY,
     "create_event": _ERROR_ONLY,

@@ -116,6 +116,21 @@ class ClinicFeatures:
 
 
 @dataclass(frozen=True)
+class RuntimeUnit:
+    """One USABLE unit of the clinic as the agent may cite it (TASK-094 D4).
+
+    Usable = `professional_units.unit_is_usable` (active + complete address). `address` is the
+    line `unit_address.format_unit_address` derives from the unit's parts; `professional_ids`
+    are the doctors with an ACTIVE link to it ("the chosen doctor attends only one unit").
+    """
+
+    id: UUID
+    name: str
+    address: str
+    professional_ids: frozenset[UUID] = frozenset()
+
+
+@dataclass(frozen=True)
 class TenantRuntimeConfig:
     """Everything needed to run the agent for one tenant, resolved + decrypted."""
 
@@ -148,8 +163,15 @@ class TenantRuntimeConfig:
     post_consult_knowledge: str | None = None
     # TASK-025: what the LLM may say about the clinic itself. Loaded from the tenant, rendered
     # by ai/prompts.py::_format_clinic_facts. Defaults keep every other constructor valid.
-    address: dict | None = None
+    # TASK-094 D4 (owner, 2026-11-26): the legacy clinic-level `tenants.address` is NOT here
+    # any more - it carried a junk CEP to a patient. The address the agent knows is the clinic's
+    # USABLE units (`units`, loaded by `load_tenant_config`), narrowed per turn by
+    # `selected_unit_id` / `professional_id` (ai/prompts.py::_unit_address_lines).
     clinic_facts: dict | None = None
+    units: tuple[RuntimeUnit, ...] = ()
+    # Per-turn: the unit this conversation's booking (or edit draft) already has, threaded in by
+    # run_agent's `selected_unit_id` (services/llm_context.py::selected_unit_id). NEVER from DB.
+    selected_unit_id: UUID | None = None
     # Per-turn rendered "consultas marcadas" block, set by the worker
     # (workers/tasks.py::_appointment_context_text) via run_agent's
     # `appointment_context` parameter for a qualifying turn (see
@@ -1104,6 +1126,39 @@ def _runtime_appointment_type(t: dict, tenant: Tenant, terms_view) -> RuntimeApp
     )
 
 
+async def _runtime_units(session: AsyncSession, tenant_id: UUID) -> tuple[RuntimeUnit, ...]:
+    """The clinic's USABLE units for the agent (TASK-094 D4), ordered by name, each with the
+    doctors holding an ACTIVE link to it. Two queries; no unit -> no link query."""
+    # Lazy: professional_units imports this module.
+    from secretaria.models.professional_unit import ProfessionalUnit
+    from secretaria.services.professional_units import usable_units
+    from secretaria.services.unit_address import format_unit_address, parts_of
+
+    units = await usable_units(session, tenant_id)
+    if not units:
+        return ()
+    rows = await session.execute(
+        select(ProfessionalUnit.unit_id, ProfessionalUnit.professional_id).where(
+            ProfessionalUnit.unit_id.in_([unit.id for unit in units]),
+            ProfessionalUnit.is_active.is_(True),
+        )
+    )
+    attending: dict[UUID, set[UUID]] = {}
+    for unit_id, professional_id in rows.all():
+        attending.setdefault(unit_id, set()).add(professional_id)
+    lines = {unit.id: format_unit_address(parts_of(unit)) for unit in units}
+    return tuple(
+        RuntimeUnit(
+            id=unit.id,
+            name=str(unit.name),
+            address=lines[unit.id],
+            professional_ids=frozenset(attending.get(unit.id, ())),
+        )
+        for unit in units
+        if lines[unit.id]  # never a unit without an address line to cite
+    )
+
+
 async def load_tenant_config(session: AsyncSession, tenant: Tenant) -> TenantRuntimeConfig:
     """Resolve a tenant row into the fully-decrypted runtime config.
 
@@ -1195,8 +1250,8 @@ async def load_tenant_config(session: AsyncSession, tenant: Tenant) -> TenantRun
         specialty=specialty,
         about=about,
         post_consult_knowledge=tenant.post_consult_knowledge,
-        address=tenant.address,
         clinic_facts=tenant.clinic_facts,
+        units=await _runtime_units(session, tenant.id),
         service_guides=runtime_service_guides(services, offered),
         shared_agenda_professional_ids=await professionals_with_siblings(
             session, active_professionals
