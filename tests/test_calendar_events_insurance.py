@@ -123,7 +123,7 @@ def test_a_legacy_event_gains_three_null_fields_and_loses_nothing():
 
 
 def test_the_plan_wire_carries_exactly_two_keys():
-    """custom_payment_note / mechanism / note must never be widened into this
+    """Catalog mechanism / note must never be widened into this
     shape by accident: the agenda shows a name. No sinal flag (TASK-085 R D-R12/U1b: a
     convênio never exempts the sinal)."""
     assert set(CalendarInsurancePlanRead.model_fields) == {"id", "name"}
@@ -220,7 +220,6 @@ async def _tenant_plan(
     *,
     catalog_id: UUID | None = None,
     custom_name: str | None = None,
-    note: str | None = None,
     legacy_no_sinal: bool = False,
 ) -> UUID:
     async with db() as session:
@@ -229,7 +228,6 @@ async def _tenant_plan(
             tenant_id=tenant_id,
             catalog_id=catalog_id,
             custom_name=custom_name,
-            custom_payment_note=note,
         )
         session.add(plan)
         await session.flush()
@@ -245,7 +243,6 @@ async def _professional_plan(
     *,
     catalog_id: UUID | None = None,
     custom_name: str | None = None,
-    note: str | None = None,
     tenant_plan_id: UUID | None = None,
     legacy_no_sinal: bool = False,
 ) -> UUID:
@@ -260,7 +257,6 @@ async def _professional_plan(
             tenant_plan_id=tenant_plan_id,
             catalog_id=catalog_id,
             custom_name=custom_name,
-            custom_payment_note=note,
         )
         session.add(plan)
         await session.flush()
@@ -330,7 +326,7 @@ async def test_a_catalog_backed_clinic_plan_resolves_to_its_catalog_name(db, ten
 
 
 async def test_a_clinic_outro_resolves_to_its_custom_name(db, tenant):
-    plan = await _tenant_plan(db, tenant.id, custom_name="Cabesp", note="Paga na recepcao")
+    plan = await _tenant_plan(db, tenant.id, custom_name="Cabesp")
 
     async with db() as session:
         lookup = await load_appointment_plans(
@@ -339,7 +335,7 @@ async def test_a_clinic_outro_resolves_to_its_custom_name(db, tenant):
 
     resolved = lookup.resolve(plan, None)
     assert resolved == AppointmentPlan(plan, "Cabesp")
-    assert not hasattr(resolved, "custom_payment_note")
+    assert set(vars(resolved)) == {"id", "name"}
 
 
 async def test_an_independent_doctors_rows_resolve_for_catalog_and_outro(db, tenant):
@@ -643,13 +639,10 @@ async def test_the_independent_path_resolves_through_the_professional_row(
     assert body["insurance_plan"] == {"id": str(doctor_plan), "name": "Amil"}
 
 
-async def test_a_clinic_outro_shows_its_name_and_never_its_payment_note(
-    client: AsyncClient, db, tenant
-):
+async def test_a_clinic_outro_shows_only_its_name(client: AsyncClient, db, tenant):
+    """TASK-090: an "Outro" has no payment text at all; the agenda shows its name."""
     await _connect_calendar(db, tenant)
-    plan = await _tenant_plan(
-        db, tenant.id, custom_name="Cabesp", note="NOTA-INTERNA-NAO-VAZAR paga na recepcao"
-    )
+    plan = await _tenant_plan(db, tenant.id, custom_name="Cabesp")
     await _appointment(db, tenant.id, "evt-1", insurance="Cabesp", plan_id=plan)
     _FakeCalendarService.next_events = [_wire_event("evt-1")]
 
@@ -658,7 +651,6 @@ async def test_a_clinic_outro_shows_its_name_and_never_its_payment_note(
     body = resp.json()[0]
     assert body["insurance_plan"]["name"] == "Cabesp"
     assert set(body["insurance_plan"]) == {"id", "name"}
-    assert "NOTA-INTERNA-NAO-VAZAR" not in resp.text
 
 
 async def test_a_label_without_a_resolved_plan_keeps_the_label_and_no_plan(

@@ -458,3 +458,81 @@ def test_city_match_ignores_case_and_accents() -> None:
 
     assert "em São Paulo" not in rendered
     assert "atendemos em sao paulo.\n" in rendered
+
+
+# --------------------------------------------------------------------------
+# TASK-090 B3: the place can be a city, a state or the country
+# --------------------------------------------------------------------------
+
+
+def test_greeting_uses_em_for_city_and_state() -> None:
+    assert "assistente virtual da clínica, em Campinas." in render_greeting(
+        "Clinic", "", city="Campinas"
+    )
+    assert "assistente virtual da clínica, em Minas Gerais." in render_greeting(
+        "Clinic", "", city="Minas Gerais", preposition="em"
+    )
+
+
+def test_greeting_uses_preposition_no_for_brasil() -> None:
+    rendered = render_greeting("Clinic", "Oftalmologia.", city="Brasil", preposition="no")
+    assert "assistente virtual da clínica, oftalmologia, no Brasil." in rendered
+    assert "em Brasil" not in rendered
+
+
+def test_place_already_named_in_description_is_not_repeated() -> None:
+    rendered = render_greeting(
+        "Clinic", "Atendemos em Minas Gerais.", city="Minas Gerais", preposition="em"
+    )
+    assert rendered.count("Minas Gerais") == 1
+
+
+def test_place_is_matched_as_a_whole_word_not_a_substring() -> None:
+    # "Pará" folds to "para", which is also the preposition inside the description.
+    rendered = render_greeting(
+        "Clinic", "Atendemos para toda a família.", city="Pará", preposition="no"
+    )
+    assert "no Pará" in rendered
+    # ...while a real mention (any case) is still recognised, and so is a whole phrase.
+    named = render_greeting("Clinic", "Atendemos no PARÁ.", city="Pará", preposition="no")
+    assert "no Pará" not in named
+    # A longer word that merely contains the place is not a mention either.
+    contained = render_greeting("Clinic", "Atendemos em Paraná.", city="Pará", preposition="no")
+    assert "no Pará" in contained
+
+
+def test_default_preposition_keeps_the_old_wording() -> None:
+    assert render_greeting("Clinic", "x", city="Recife") == render_greeting(
+        "Clinic", "x", city="Recife", preposition="em"
+    )
+
+
+def test_preview_template_carries_the_preposition() -> None:
+    template = greeting_preview_template("Clinic", "Brasil", "no")
+    assert PREVIEW_PLACEHOLDER in template and ", no Brasil." in template
+
+
+@pytest.mark.parametrize(
+    ("place", "preposition"),
+    [
+        ("Rio Grande do Norte", "no"),
+        ("Rio Grande do Sul", "no"),
+        ("Mato Grosso do Sul", "no"),
+        ("Brasil", "no"),
+        ("Campos dos Goytacazes", "em"),
+    ],
+)
+@pytest.mark.parametrize("name", CLINIC_NAMES)
+def test_budget_accounts_for_longest_state_name(place: str, preposition: str, name: str) -> None:
+    budget = clinic_description_budget(name, place, None, preposition)
+    # Budget is smaller than with no place at all, by the rendered ", em X" cost...
+    assert budget < clinic_description_budget(name)
+    # ...and a description of exactly that size still fits in 1024 chars.
+    description = "d" * budget
+    rendered = render_greeting(name, description, city=place, preposition=preposition)
+    assert len(rendered) <= MAX_INTERACTIVE_BODY_CHARS
+    # One more character would not have fit (the budget is tight, not loose).
+    assert (
+        len(render_greeting(name, description + "d", city=place, preposition=preposition))
+        > MAX_INTERACTIVE_BODY_CHARS
+    )

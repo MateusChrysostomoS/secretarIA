@@ -1,5 +1,7 @@
 # CHECKPOINT — Contexto da clínica que a LLM enxerga (TASK-025, parte backend)
 
+> **Nota TASK-090 (2026-11-22, local):** o endereço deixou de ser campo da clínica no /contexto — mora na unidade; o item "endereço" da completude fica satisfeito por unidade ativa com endereço completo (Adendo 1, 2026-11-23: CEP, rua, número, cidade e UF; `tenants.address` legado não conta mais) e a cidade da saudação vem da região comum das unidades (`services/clinic_region.py`). Ver [CHECKPOINT_contexto_ajustes_finais.md](CHECKPOINT_contexto_ajustes_finais.md).
+
 Spec: `C:\TECH\BRAIN\tasks\TASK-025\SPEC.md` (BRAIN, fora deste repo). Plano: `tasks/TASK-025/` (BRAIN). Executado em 2026-10-04.
 
 **Estado (atualizado em 2026-10-05): mesclado em `main` como `f7a903e` e pushado em 2026-10-05; deployado pelo dono no mesmo dia. A versão no ar (`main@f7a903e`) tinha a lacuna das orientações por serviço em clínicas com 2+ profissionais, descrita e corrigida na §9.** A migração `e5a1c9d3b7f2` está APLICADA em produção desde o deploy de 2026-10-05 (confirmado ao vivo: salvar `clinic_facts` pelo hub persistiu e voltou); a ordem de deploy da §6 é histórica.

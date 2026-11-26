@@ -892,7 +892,11 @@ async def _apply_flow_result(
     # human is already on it), then tell the patient. The setter sends the
     # operational handoff alert after committing the transition.
     if result.action == "handover":
-        await _set_conversation_human_active(reply.conversation_id)
+        # The Sim / Não card carries WHY (TASK-090 Adendo 1: `insurance_payment_question`);
+        # every other hand-over keeps the generic reason.
+        await _set_conversation_human_active(
+            reply.conversation_id, reason=result.handover_reason or "could_not_help"
+        )
         if result.bubbles:
             await _dispatch_bubbles(reply, result.bubbles, tenant=tenant, waba_token=waba_token)
         return True

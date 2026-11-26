@@ -35,7 +35,7 @@ set) rides along in the tool result under `professional_context` — this is
 how the LLM "loads" that professional's context for the rest of the turn.
 
 `create_event_for_professional` also accepts an optional `unit_name` (used
-only when the multi_unit addon is ALSO active for this tenant — see
+only when the clinic ALSO has an active unit — see
 plugins/multi_unit.py). When provided, the unit is resolved the same
 case-insensitive way and its id is persisted on the Appointment row alongside
 professional_id. An empty/omitted `unit_name` behaves exactly as before unit
@@ -93,15 +93,22 @@ logger = get_logger(__name__)
 
 
 async def _active_professionals(tenant_id: UUID) -> list:
-    """Active professionals for `tenant_id`, ordered by name. Never raises."""
+    """The professionals a PATIENT may book with for `tenant_id`, ordered by name: active, and
+    not a doctor whose unit links are all unusable (TASK-090 Adendo 1). A
+    `booking_scope.PatientRoster`: its `everyone` (every active doctor) decides the topology,
+    so hiding never turns a multi-doctor clinic into a one-doctor one (owner ruling, C1)."""
     # Imported lazily, same rationale as ai/tools.py's _persist_appointment:
     # keeps this module importable without a DB/ORM in dev scripts, and avoids
     # an import cycle through models -> services.
     from secretaria.core.database import async_session_factory
+    from secretaria.services.booking_scope import PatientRoster
+    from secretaria.services.professional_units import patient_visible_professionals
     from secretaria.services.tenant_config import list_active_professionals
 
     async with async_session_factory() as session:
-        return await list_active_professionals(session, tenant_id)
+        everyone = await list_active_professionals(session, tenant_id)
+        offered = await patient_visible_professionals(session, tenant_id, everyone)
+    return PatientRoster(offered, everyone=everyone)
 
 
 async def _professional_services(tenant_id: UUID, professional) -> list[dict]:

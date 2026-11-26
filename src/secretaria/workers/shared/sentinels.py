@@ -38,6 +38,7 @@ from secretaria.services.flow_router import (
     booking_gate_scope,
     enter_guided_booking,
     enter_human_offer,
+    enter_insurance_payment_offer,
     enter_manage_action,
     flows_enabled,
     main_menu_buttons,
@@ -60,7 +61,6 @@ from secretaria.services.tenant_config import (
     list_active_professionals,
     professional_appointment_types,
 )
-from secretaria.services.unit_booking import attach_unit_options
 from secretaria.workers.shared import handback_log as hb
 from secretaria.workers.shared.context import (
     _ReplyContext,
@@ -78,11 +78,11 @@ from secretaria.workers.shared.draft_resolution import (
 from secretaria.workers.shared.flow_runner import (
     _apply_flow_result,
 )
-from secretaria.workers.shared.greeting import _flow_professionals
 from secretaria.workers.shared.llm_context import (
     _appointment_calendar,
     _appointment_calendar_target,
 )
+from secretaria.workers.shared.patient_roster import build_patient_roster
 
 logger = get_logger(__name__)
 
@@ -550,10 +550,11 @@ async def _handle_manage_appointment(
             # The router-shaped roster with each doctor's units, unit marks and per-unit terms
             # (TASK-087 re-review of P1), never the ORM rows: the reschedule day list reads the
             # unit's hours and blocked weekdays off it. The rows stay for the agenda target.
-            professionals = _flow_professionals(
-                professional_rows, await load_service_catalog(session, tenant.id)
+            # TASK-090 Adendo 1 (I1): the patient roster - a hidden doctor's EXISTING
+            # consultation keeps his units (incomplete ones too) and so his unit hours.
+            professionals = await build_patient_roster(
+                session, tenant, professional_rows, await load_service_catalog(session, tenant.id)
             )
-            await attach_unit_options(session, tenant, professional_rows, professionals)
         tz = ZoneInfo(tenant.timezone or "America/Sao_Paulo")
         target = manage_target(request, appointments, tz)
         owner = target if request.action == ACTION_RESCHEDULE else None
@@ -1182,11 +1183,17 @@ async def _handle_offer_human_handoff(
     patient_wa: str | None,
     redis=None,
     waba_token: str | None = None,
+    *,
+    insurance_payment: bool = False,
 ) -> bool:
     """The agent's offer_human_handoff hand-back: send the fixed "quer que eu chame nosso
     atendente humano?" card (TASK-038). The patient's tap decides - see
     services/flow_router.py::_handle_human_offer. No tenant: nothing is sent and the
     turn's safety net answers instead.
+
+    `insurance_payment` (TASK-090 Adendo 1, owner 2026-11-24): no payment rule for the
+    convênio asked about - the fixed "não tenho cadastrada a regra..." card on its own step,
+    so "✅ Sim" hands over with `insurance_payment_question`.
     """
     if tenant is None:
         logger.warning(
@@ -1199,10 +1206,13 @@ async def _handle_offer_human_handoff(
         conversation_id=str(reply.conversation_id),
         tenant_id=str(tenant.id),
         channel=reply.channel,
+        reason="insurance_payment_question" if insurance_payment else "could_not_help",
     )
     return await _apply_flow_result(
         reply,
-        enter_human_offer(conversation),
+        enter_insurance_payment_offer(conversation)
+        if insurance_payment
+        else enter_human_offer(conversation),
         patient_wa,
         redis=redis,
         tenant=tenant,

@@ -427,7 +427,6 @@ async def _persist_plan(ctx, kind, *, tenant_id=None):
         elif kind == "clinic_custom":
             session.add(TenantInsurancePlan(
                 id=plan_id, tenant_id=owner_id, custom_name="Plano Clínica Especial",
-                custom_payment_note="PRIVATE METADATA",
             ))
             ctx.appointment.insurance_plan_id = plan_id
             name = "Plano Clínica Especial"
@@ -437,7 +436,7 @@ async def _persist_plan(ctx, kind, *, tenant_id=None):
             await session.flush()
             session.add(ProfessionalInsurancePlan(
                 id=plan_id, tenant_id=owner_id, professional_id=doctor_id,
-                custom_name="Plano Médico Especial", custom_payment_note="PRIVATE METADATA",
+                custom_name="Plano Médico Especial",
             ))
             ctx.appointment.insurance_professional_plan_id = plan_id
             name = "Plano Médico Especial"

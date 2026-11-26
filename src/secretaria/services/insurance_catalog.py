@@ -47,6 +47,11 @@ from secretaria.models.insurance import (
 from secretaria.models.insurance_acceptance_exception import InsuranceAcceptanceException
 from secretaria.models.professional import Professional
 from secretaria.models.tenant import Tenant
+from secretaria.services.insurance_plan_order import (
+    clinic_order_sort_key,
+    load_clinic_order,
+    plan_key_for_row,
+)
 from secretaria.services.service_catalog import normalize
 
 logger = get_logger(__name__)
@@ -218,6 +223,11 @@ class PlanNotFound(ValueError):
     """A `tenant_insurance_plans` id named in a request does not belong to this tenant."""
 
 
+class NotCustomPlan(ValueError):
+    """Only a typed-by-hand "Outro" row has the ON/OFF switch (TASK-090 Adendo 1, C7); a catalog
+    convênio is switched off by deleting its row."""
+
+
 class DuplicateCatalogEntry(ValueError):
     """An admin tried to create a catalog entry whose (normalized) name already exists."""
 
@@ -227,13 +237,14 @@ class TenantInsurance:
     """What the pure flow router needs about one clinic's convênios.
 
     `plans` keeps catalog order (by name) as plain dicts, `{"id": str, "name":
-    str, "note": str | None, "mechanism": str}`, so it travels on the tenant snapshot like
+    str, "mechanism": str}`, so it travels on the tenant snapshot like
     `appointment_types` does. `id` is the row's own identity - a
     `tenant_insurance_plans.id` (shared/clinic_with_exceptions modes) or a
     `professional_insurance_plans.id`/catalog id (independent mode, see
     `_load_independent_insurance`) - never a bare catalog id, because a custom
-    "Outro" plan has none. `note` is `custom_payment_note` for a custom plan,
-    else None (catalog metadata is never patient-facing prose). `mechanism` is the catalog
+    "Outro" plan has none. No plan carries a payment text any more (TASK-090, owner
+    2026-11-22: the "Outro" note is gone; catalog metadata never was patient-facing
+    prose). `mechanism` is the catalog
     entry's payment mechanism ("desconhecido" for a custom plan or a legacy string); the patient no
     longer sees it (TASK-085 R D-R12 removed the list row's payment text) and it never decides
     whether a deposit is charged.
@@ -317,19 +328,26 @@ def _plan_display_name(plan: TenantInsurancePlan, entry: InsuranceCatalog | None
 
 
 async def list_tenant_plans(
-    session: AsyncSession, tenant_id: UUID
+    session: AsyncSession, tenant_id: UUID, *, active_only: bool = False
 ) -> list[tuple[TenantInsurancePlan, InsuranceCatalog | None]]:
     """The clinic's enabled plans (catalog-backed AND custom), in the clinic's order.
 
     Plans the clinic placed (`sort_order`) come first, by position; the rest follow
     by display name - which is the whole list for a clinic that never ordered.
     LEFT JOIN because a custom "Outro" row (TASK-008) has no catalog entry.
+
+    `active_only` (TASK-090 Adendo 1, C7): skip an "Outro" the clinic switched OFF - every
+    patient-facing or AI reader passes it; the manager's own screens (and the writes that
+    validate ids against the clinic's rows) see every row.
     """
-    rows = await session.execute(
+    stmt = (
         select(TenantInsurancePlan, InsuranceCatalog)
         .outerjoin(InsuranceCatalog, InsuranceCatalog.id == TenantInsurancePlan.catalog_id)
         .where(TenantInsurancePlan.tenant_id == tenant_id)
     )
+    if active_only:
+        stmt = stmt.where(TenantInsurancePlan.is_active.is_(True))
+    rows = await session.execute(stmt)
     pairs = [(plan, entry) for plan, entry in rows.all()]
     pairs.sort(key=lambda pair: _plan_sort_key(*pair))
     return pairs
@@ -365,15 +383,17 @@ async def set_tenant_plan_order(
 
 
 async def list_professional_plans(
-    session: AsyncSession, professional_id: UUID
+    session: AsyncSession, professional_id: UUID, *, active_only: bool = False
 ) -> list[tuple[ProfessionalInsurancePlan, InsuranceCatalog | None]]:
     """One doctor's OWN rows (independent mode: catalog picks + their "Outro").
 
     `clinic_with_exceptions` rows (`tenant_plan_id` set) are not returned here
     - use `professional_accepted_tenant_plan_ids` for those, since their
     display name/note live on `tenant_insurance_plans`, not here.
+
+    `active_only` (C7): skip the doctor's "Outro" switched OFF (patient/AI readers).
     """
-    rows = await session.execute(
+    stmt = (
         select(ProfessionalInsurancePlan, InsuranceCatalog)
         .outerjoin(InsuranceCatalog, InsuranceCatalog.id == ProfessionalInsurancePlan.catalog_id)
         .where(
@@ -381,6 +401,9 @@ async def list_professional_plans(
             ProfessionalInsurancePlan.tenant_plan_id.is_(None),
         )
     )
+    if active_only:
+        stmt = stmt.where(ProfessionalInsurancePlan.is_active.is_(True))
+    rows = await session.execute(stmt)
     pairs = [(plan, entry) for plan, entry in rows.all()]
     pairs.sort(key=lambda pair: normalize(pair[1].name if pair[1] else pair[0].custom_name or ""))
     return pairs
@@ -420,6 +443,11 @@ async def _load_independent_insurance(session: AsyncSession, tenant_id: UUID) ->
     pick is deduplicated across doctors by catalog id (two doctors who both
     take "Unimed" show ONE row); a doctor's own "Outro" is never deduplicated
     with anyone else's - it is identified by that row's own id.
+
+    Order (TASK-090 SPEC §4.6): the clinic's one per-doctor-mode order
+    (`services/insurance_plan_order.py`), the same for every doctor; plans never
+    placed follow alphabetically. A doctor's "Outro" switched OFF (C7) is neither
+    listed nor counted as accepted.
     """
     rows = await session.execute(
         select(ProfessionalInsurancePlan, InsuranceCatalog)
@@ -428,10 +456,12 @@ async def _load_independent_insurance(session: AsyncSession, tenant_id: UUID) ->
         .where(
             ProfessionalInsurancePlan.tenant_id == tenant_id,
             ProfessionalInsurancePlan.tenant_plan_id.is_(None),
+            ProfessionalInsurancePlan.is_active.is_(True),
             Professional.is_active.is_(True),
         )
     )
     plans_by_id: dict[str, dict] = {}
+    order_keys: dict[str, str] = {}
     accepted: dict[str, set[str]] = {}
     for plan, entry in rows.all():
         plan_id = _independent_plan_id(plan.catalog_id, plan.id)
@@ -440,11 +470,15 @@ async def _load_independent_insurance(session: AsyncSession, tenant_id: UUID) ->
             plans_by_id[plan_id] = {
                 "id": plan_id,
                 "name": name,
-                "note": plan.custom_payment_note if entry is None else None,
                 "mechanism": entry.mechanism if entry is not None else "desconhecido",
             }
+            order_keys[plan_id] = plan_key_for_row(plan.catalog_id, plan.id)
         accepted.setdefault(str(plan.professional_id), set()).add(plan_id)
-    plans = sorted(plans_by_id.values(), key=lambda item: normalize(item["name"]))
+    order = await load_clinic_order(session, tenant_id) if plans_by_id else {}
+    plans = sorted(
+        plans_by_id.values(),
+        key=lambda item: clinic_order_sort_key(order, order_keys[item["id"]], item["name"]),
+    )
     return TenantInsurance(
         plans=plans, accepted_by={key: frozenset(value) for key, value in accepted.items()}
     )
@@ -518,19 +552,30 @@ def _alias_same_named_plans(refused: Any, plans: list[dict]) -> Any:
 
 
 async def _load_clinic_insurance(session: AsyncSession, tenant_id: UUID) -> TenantInsurance:
-    """The non-`independent` lists of `load_tenant_insurance` (clinic plans + legacy names)."""
+    """The non-`independent` lists of `load_tenant_insurance` (clinic plans + legacy names).
+
+    An "Outro" switched OFF (C7) is not listed - nor is a legacy string of the same name, which
+    would otherwise bring it back as an id-less option.
+    """
+    rows = await list_tenant_plans(session, tenant_id)
     plans = [
         {
             "id": str(plan.id),
             "name": _plan_display_name(plan, entry),
-            "note": plan.custom_payment_note if entry is None else None,
             "mechanism": entry.mechanism if entry is not None else "desconhecido",
         }
-        for plan, entry in await list_tenant_plans(session, tenant_id)
+        for plan, entry in rows
+        if plan.is_active is not False
     ]
+    switched_off = {
+        normalize(_plan_display_name(plan, entry))
+        for plan, entry in rows
+        if plan.is_active is False
+    }
     plans.extend(
-        {"id": None, "name": name, "note": None, "mechanism": "desconhecido"}
+        {"id": None, "name": name, "mechanism": "desconhecido"}
         for name in await _legacy_only_names(session, tenant_id)
+        if normalize(name) not in switched_off
     )
 
     customized_ids = {
@@ -564,6 +609,8 @@ async def resolve_booking_plan_ids(
     tenant_id: UUID,
     insurance: str | None,
     professional_id: UUID | None = None,
+    *,
+    active_only: bool = True,
 ) -> tuple[UUID | None, UUID | None]:
     """The (tenant_plan_id, professional_plan_id) pair `appointments` records.
 
@@ -576,6 +623,10 @@ async def resolve_booking_plan_ids(
     (including no mode chosen, for a booking made before the step existed)
     matches against the clinic's own plans, exactly as `resolve_tenant_plan_id`
     did pre-TASK-008.
+
+    An "Outro" switched OFF (C7) matches nothing - like an unknown convênio - unless the caller
+    passes `active_only=False`: an edit of an EXISTING appointment that keeps its convênio
+    (services/appointment_edit_write.py) keeps pointing at the row it was booked with.
     """
     if not insurance or not insurance.strip():
         return None, None
@@ -583,14 +634,16 @@ async def resolve_booking_plan_ids(
     if mode == "independent" and professional_id is not None:
         candidates = [
             {"id": plan.id, "name": entry.name if entry else plan.custom_name}
-            for plan, entry in await list_professional_plans(session, professional_id)
+            for plan, entry in await list_professional_plans(
+                session, professional_id, active_only=active_only
+            )
         ]
         matched = match_plan(candidates, insurance)
         return None, (matched["id"] if matched is not None else None)
 
     candidates = [
         {"id": plan.id, "name": _plan_display_name(plan, entry)}
-        for plan, entry in await list_tenant_plans(session, tenant_id)
+        for plan, entry in await list_tenant_plans(session, tenant_id, active_only=active_only)
     ]
     matched = match_plan(candidates, insurance)
     return (matched["id"] if matched is not None else None), None
@@ -732,17 +785,13 @@ async def create_tenant_custom_plan(
     tenant: Tenant,
     *,
     custom_name: str,
-    custom_payment_note: str | None,
 ) -> TenantInsurancePlan:
-    """The clinic's "Outro" convênio (TASK-008 §3.3) - outside the catalog.
+    """The clinic's "Outro" convênio (TASK-008 §3.3) - outside the catalog. Just a name
+    (TASK-090: no payment text).
 
     Never touched by `set_tenant_plans`' replace semantics. No commit.
     """
-    plan = TenantInsurancePlan(
-        tenant_id=tenant.id,
-        custom_name=custom_name.strip()[:120],
-        custom_payment_note=(custom_payment_note or "").strip()[:2000] or None,
-    )
+    plan = TenantInsurancePlan(tenant_id=tenant.id, custom_name=custom_name.strip()[:120])
     session.add(plan)
     await session.flush()
     logger.info("hub_insurance_custom_plan_created", tenant_id=str(tenant.id))
@@ -754,9 +803,9 @@ async def create_professional_custom_plan(
     professional: Professional,
     *,
     custom_name: str,
-    custom_payment_note: str | None,
 ) -> ProfessionalInsurancePlan:
-    """A doctor's OWN "Outro" convênio - `independent` mode only (caller-gated).
+    """A doctor's OWN "Outro" convênio - `independent` mode only (caller-gated). Just a
+    name (TASK-090: no payment text).
 
     No commit.
     """
@@ -764,7 +813,6 @@ async def create_professional_custom_plan(
         professional_id=professional.id,
         tenant_id=professional.tenant_id,
         custom_name=custom_name.strip()[:120],
-        custom_payment_note=(custom_payment_note or "").strip()[:2000] or None,
     )
     session.add(plan)
     await session.flush()
@@ -774,6 +822,23 @@ async def create_professional_custom_plan(
         professional_id=str(professional.id),
     )
     return plan
+
+
+def set_custom_plan_active(
+    plan: TenantInsurancePlan | ProfessionalInsurancePlan, is_active: bool
+) -> bool:
+    """Switch a typed-by-hand "Outro" ON/OFF (TASK-090 Adendo 1, C7). Returns whether it changed.
+
+    The row, its name and its payment rule are kept either way; only the patient-facing and AI
+    readers look at the switch. A catalog row (or a clinic-mode doctor row) raises NotCustomPlan.
+    The caller holds the convênio cap on a switch ON and commits. No commit.
+    """
+    if plan.custom_name is None or plan.catalog_id is not None:
+        raise NotCustomPlan()
+    if bool(plan.is_active) == bool(is_active):
+        return False
+    plan.is_active = bool(is_active)
+    return True
 
 
 async def sync_legacy_insurances(
@@ -1082,7 +1147,7 @@ async def reconcile_unmatched_insurances(
 class AppointmentPlan:
     """One convênio row as the agenda shows it: an identity and a name.
 
-    Never carries `custom_payment_note` or catalog metadata - the read model is
+    Never carries a payment text or catalog metadata - the read model is
     the wrong place to widen what leaves the clinic's own screen. No sinal flag
     either (TASK-085 R D-R12: a convênio never exempts the sinal).
     """

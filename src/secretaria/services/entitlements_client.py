@@ -72,6 +72,11 @@ ADDON_IDS: frozenset[str] = frozenset(
     }
 )
 
+# Add-ons that are no longer sold: every clinic with an active subscription has them, whatever the
+# brain-api summary says. `multi_unit` (TASK-090, owner decision): units are core, not a paid
+# add-on. The key stays in ADDON_IDS above (mirror of brain-api's catalog, which is untouched).
+CORE_ADDON_IDS: frozenset[str] = frozenset({"multi_unit"})
+
 _STALE_TTL_SECONDS = 86400
 
 
@@ -108,7 +113,9 @@ def is_entitled(summary: EntitlementSummary, key: str) -> bool:
     - An inactive tenant (`not summary.active`) is entitled to nothing.
     - A tier name is entitled iff the tenant's tier rank is >= that tier's
       rank (cumulative — kept generic even though TIERS is single-element today).
-    - An addon id is entitled iff `summary.addons.get(key) is True`.
+    - A core addon id (`CORE_ADDON_IDS`, e.g. `multi_unit`) is entitled whenever the tenant is
+      active, whatever `summary.addons` says.
+    - Any other addon id is entitled iff `summary.addons.get(key) is True`.
     - Anything else is a caller bug (a plugin misconfigured its
       `entitlement_key`) -> raise loudly instead of silently returning False.
     """
@@ -116,6 +123,8 @@ def is_entitled(summary: EntitlementSummary, key: str) -> bool:
         return False
     if key in TIERS:
         return _tier_rank(summary.secretaria_tier) >= _tier_rank(key)
+    if key in CORE_ADDON_IDS:
+        return True
     if key in ADDON_IDS:
         return summary.addons.get(key) is True
     raise ValueError(f"is_entitled: unknown entitlement key {key!r}")

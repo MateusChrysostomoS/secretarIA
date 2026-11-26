@@ -14,10 +14,9 @@ PUT /tenants/me/professionals/{professional_id}/units
       * a unit of another tenant (or an unknown id) is a 404 and nothing is written;
       * two saves at once: the professional's row is locked for the replace; a save that still
         collides answers 409 `professional_units_changed` and keeps nothing;
-      * multi-unit entitlement is judged on the RESULTING set: 403 `multi_unit_not_entitled` only
-        when it would hold MORE than one active unit (one link is just "the clinic's address" and
-        needs nothing); 409 `unit_limit_reached` when it exceeds `limits["units"]`; an entitlement
-        fetch failure fails CLOSED with 503 - same rules and codes as api/hub/units.py.
+      * units are not a paid add-on any more (TASK-090): any set of links is accepted - no
+        entitlement or `limits["units"]` check (no 403 `multi_unit_not_entitled`, no 409
+        `unit_limit_reached`, no 503 from an entitlement fetch).
 
 Service marks ("this service is done only at these units") travel in the same body and the same
 transaction: `service_marks` is the COMPLETE restriction state (absent service = every unit);
@@ -47,7 +46,6 @@ from secretaria.api.hub.deps import (
     ensure_clinic_manager_or_own_professional,
     get_current_tenant,
 )
-from secretaria.api.hub.units import ADDON_KEY, LIMIT_KEY
 from secretaria.core.database import get_session
 from secretaria.core.logging import get_logger
 from secretaria.core.subscription import SubscriptionClaim
@@ -66,7 +64,6 @@ from secretaria.services import (
     professional_units as pu,
     tenant_config as cfg,
 )
-from secretaria.services.entitlements_client import get_entitlements, is_entitled
 from secretaria.services.payments import price_change
 from secretaria.services.service_catalog import entry_service_id, load_service_catalog
 
@@ -162,24 +159,6 @@ async def _require_marked_units_in_clinic(
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Unit not found")
 
 
-async def _require_entitled_within_limit(tenant: Tenant, linked_count: int) -> None:
-    """Gate a resulting set of MORE than one linked unit. Raises HTTPException on failure.
-
-    Fetches entitlements fresh (redis=None, not a hot path). None (fetch failure) fails CLOSED:
-    503, never treated as "allowed".
-    """
-    summary = await get_entitlements(tenant.id, redis=None)
-    if summary is None:
-        raise HTTPException(
-            status.HTTP_503_SERVICE_UNAVAILABLE, "Could not verify entitlements right now"
-        )
-    if not is_entitled(summary, ADDON_KEY):
-        raise HTTPException(status.HTTP_403_FORBIDDEN, "multi_unit_not_entitled")
-    limit = summary.limits.get(LIMIT_KEY)
-    if limit is not None and linked_count > limit:
-        raise HTTPException(status.HTTP_409_CONFLICT, "unit_limit_reached")
-
-
 @router.get("/{professional_id}/units", response_model=ProfessionalUnitsRead)
 async def get_professional_units(
     professional_id: str,
@@ -232,9 +211,6 @@ async def put_professional_units(
     marks = _requested_marks(body)
     if marks is not None:
         await _require_marked_units_in_clinic(session, tenant, marks)
-
-    if len(targets) > 1:
-        await _require_entitled_within_limit(tenant, len(targets))
 
     ids = {"tenant_id": str(tenant.id), "professional_id": str(professional.id)}
     try:

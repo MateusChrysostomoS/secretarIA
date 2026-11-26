@@ -17,6 +17,11 @@ from secretaria.models.insurance import (
     INSURANCE_MODES_SELECTABLE,
 )
 
+# The payment rule's hard ceiling BEFORE cleaning (anti-abuse: a megabyte body is refused by
+# the schema). The real limit - 1000 characters of the CLEANED text - is
+# services/insurance_payment_note.MAX_PAYMENT_NOTE_CHARS, checked by the route.
+PAYMENT_NOTE_RAW_MAX = 5000
+
 
 class InsuranceCatalogRead(BaseModel):
     """One global catalog entry. `mechanism`/`note` are metadata, never a rule."""
@@ -33,9 +38,10 @@ class TenantInsurancePlanRead(BaseModel):
 
     `id` (a `tenant_insurance_plans` row id) is the identifier every write
     endpoint below keys on - `catalog_id` alone cannot, since a custom line has
-    none. `is_custom` tells the hub which set of fields to show
-    (`custom_payment_note` vs. the catalog's own mechanism/note, read
-    separately from `GET /insurance-catalog`).
+    none. `is_custom` tells the hub the line is the clinic's (or doctor's) own
+    "Outro". `custom_payment_note` (TASK-090 Adendo 1, contract C6) is the clinic's
+    optional payment rule for this convênio - on EVERY line, catalog or "Outro" -
+    read only by the AI when a patient asks; null = no rule.
     """
 
     id: str
@@ -46,6 +52,9 @@ class TenantInsurancePlanRead(BaseModel):
     # Position the clinic chose in the patient's list (0 = first); None = not placed,
     # follows the placed ones alphabetically. The list itself comes back in this order.
     sort_order: int | None = None
+    # ON/OFF of an "Outro" (TASK-090 Adendo 1, contract C7). False = kept (name and rule) but
+    # offered to no patient and no AI tool. A catalog line is always true.
+    is_active: bool = True
 
 
 class TenantInsurancePlanIn(BaseModel):
@@ -73,12 +82,38 @@ class TenantInsurancePlanCustomCreate(BaseModel):
     """POST /tenants/me/insurance-plans/custom - the clinic's "Outro" convênio.
 
     Unknown keys are ignored (an older Portal's retired sinal flag - see TenantInsurancePlanIn).
+    `custom_payment_note` is optional (TASK-090 Adendo 1, C6); see `PaymentNoteUpdate`.
     """
 
     model_config = ConfigDict(extra="ignore")
 
     custom_name: str = Field(min_length=1, max_length=120)
-    custom_payment_note: str = Field(min_length=1, max_length=2000)
+    custom_payment_note: str | None = Field(default=None, max_length=PAYMENT_NOTE_RAW_MAX)
+
+
+class PaymentNoteUpdate(BaseModel):
+    """PUT .../insurance-plans/{plan_id}/payment-note (TASK-090 Adendo 1, contract C6).
+
+    `custom_payment_note`: the rule text; null or blank deletes it. The 1000-character limit
+    is checked by the route AFTER cleaning (services/insurance_payment_note.py), so it counts
+    what is stored; `PAYMENT_NOTE_RAW_MAX` only refuses an absurd payload before that.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    custom_payment_note: str | None = Field(max_length=PAYMENT_NOTE_RAW_MAX)
+
+
+class PlanActiveUpdate(BaseModel):
+    """PUT .../insurance-plans/{plan_id}/active (TASK-090 Adendo 1, contract C7).
+
+    Only a typed-by-hand "Outro" line has the switch; OFF keeps the line, its name and its
+    payment rule. Setting the value it already has is a no-op (200).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    is_active: bool
 
 
 class TenantInsurancePlanOrderUpdate(BaseModel):
@@ -144,12 +179,13 @@ class ProfessionalInsuranceCustomCreate(BaseModel):
     """POST .../professionals/{id}/insurance-plans/custom - independent mode only.
 
     Unknown keys are ignored (an older Portal's retired sinal flag - see TenantInsurancePlanIn).
+    `custom_payment_note` is optional (TASK-090 Adendo 1, C6); see `PaymentNoteUpdate`.
     """
 
     model_config = ConfigDict(extra="ignore")
 
     custom_name: str = Field(min_length=1, max_length=120)
-    custom_payment_note: str = Field(min_length=1, max_length=2000)
+    custom_payment_note: str | None = Field(default=None, max_length=PAYMENT_NOTE_RAW_MAX)
 
 
 # ---------------------------------------------------------------------------

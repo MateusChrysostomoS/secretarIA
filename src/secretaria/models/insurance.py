@@ -17,8 +17,19 @@ reviewing that round:
   still have no match, so adding a catalog row can reconcile them without a
   code migration.
 - **Convênio "Outro"**: a clinic (or, in `independent` mode, a professional)
-  can register a plan outside the catalog - `custom_name` +
-  `custom_payment_note`, shown to the patient in place of catalog metadata.
+  can register a plan outside the catalog - a `custom_name`.
+- **Regra de pagamento** (TASK-090 Adendo 1, contract C6): ANY plan row - catalog
+  or "Outro", clinic or doctor - may carry an optional `custom_payment_note`
+  (the column keeps its historical name): how payment works in the clinic's
+  contract with that convênio. Only the AI reads it, on demand, through the
+  `get_insurance_payment_rule` tool (fenced as data); no rule = a person
+  answers (`insurance_payment_question`). Never shown in a confirmation, a
+  sinal message or the Portal; never logged. Written only through
+  services/insurance_payment_note.py::clean_payment_note (<= 1000 chars).
+- **"Outro" ON/OFF** (TASK-090 Adendo 1, contract C7, owner 2026-11-24): a custom
+  row (`custom_name` set) carries `is_active`. OFF keeps the row, its name and its
+  rule, but every patient-facing and AI reader skips it (it behaves like an unknown
+  convênio); ON restores it. Catalog rows are always active (OFF deletes them).
 
 Three tables, three levels:
 
@@ -34,7 +45,7 @@ Three tables, three levels:
   TASK-085 R D-R12/U1b (owner, 2026-11-18): a convênio never exempts the sinal,
   so the old per-plan "não cobra sinal" option is deleted (see LEGACY COLUMNS
   below). TASK-008: `catalog_id`
-  is now nullable - a row with `custom_name`/`custom_payment_note` instead is
+  is now nullable - a row with `custom_name` instead is
   the clinic's own "Outro" convênio, exactly one of the two must be set.
 - `professional_insurance_plans` - what ONE doctor accepts. TASK-008 gives it
   three mutually-exclusive shapes (`ck_professional_insurance_plans_exactly_one_source`),
@@ -173,8 +184,8 @@ class InsuranceCatalog(Base):
 class TenantInsurancePlan(Base):
     """A convênio this clinic accepts: a catalog entry, or the clinic's own "Outro".
 
-    The table still has one LEGACY COLUMN this model does not map (see the module's
-    LEGACY COLUMNS note).
+    The table still has one LEGACY COLUMN this model does not map (`charge_deposit` - see
+    the module's LEGACY COLUMNS note).
     """
 
     __tablename__ = "tenant_insurance_plans"
@@ -195,14 +206,19 @@ class TenantInsurancePlan(Base):
     # The clinic's own convênio name, outside the catalog. Exactly one of
     # (catalog_id, custom_name) is set - see the CHECK constraint above.
     custom_name: Mapped[str | None] = mapped_column(String(120), nullable=True)
-    # How the clinic says payment works for this custom convênio. Shown to the
-    # patient at booking confirmation, and again with the Pix-deposit ask
-    # (services/payments/deposit_lifecycle.py).
+    # The clinic's payment rule for THIS convênio (catalog or "Outro"), optional, <= 1000
+    # chars after services/insurance_payment_note.clean_payment_note. Read only by the AI
+    # tool `get_insurance_payment_rule` (TASK-090 Adendo 1, C6); never logged.
     custom_payment_note: Mapped[str | None] = mapped_column(Text, nullable=True)
     # The clinic's chosen position in the patient's convênio list (0 = first). NULL =
     # never placed: such plans follow every placed one, alphabetically. Set only by
     # `insurance_catalog.set_tenant_plan_order` (Instituto Gicovate, 2026-11-09).
     sort_order: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # ON/OFF of the clinic's own "Outro" (TASK-090 Adendo 1, contract C7): OFF keeps the row,
+    # its name and its rule, but the convênio is offered to no patient and no AI tool. A catalog
+    # row is always true (switching a catalog convênio off deletes its row). Migration
+    # c7e3a9f1d5b8.
+    is_active: Mapped[bool] = mapped_column(Boolean, server_default=text("true"), default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
@@ -244,7 +260,12 @@ class ProfessionalInsurancePlan(Base):
     )
     # mode independent: this doctor's OWN "Outro" convênio.
     custom_name: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    # mode independent: this doctor's payment rule for the convênio (catalog pick or own
+    # "Outro"); same rules as TenantInsurancePlan.custom_payment_note.
     custom_payment_note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # mode independent: ON/OFF of this doctor's own "Outro" - same meaning as
+    # TenantInsurancePlan.is_active (C7). Catalog picks and clinic-mode rows are always true.
+    is_active: Mapped[bool] = mapped_column(Boolean, server_default=text("true"), default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 

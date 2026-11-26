@@ -257,7 +257,10 @@ async def test_the_wrapper_filters_keeps_identity_and_lets_handbacks_propagate(l
 
 
 def _v2_turn_tools(topology, addons):
-    extras = _flow_handback_tools(TENANT_ON, topology, reg.agent_tools_for(addons))
+    plugin_tools = reg.agent_tools_for(
+        addons, has_active_units=addons.addons.get("multi_unit") is True
+    )
+    extras = _flow_handback_tools(TENANT_ON, topology, plugin_tools)
     return graph.effective_tools(topology, extras, toolset_v2=True)
 
 

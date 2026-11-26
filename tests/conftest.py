@@ -48,6 +48,38 @@ def _no_turn_apology(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(workers_ns, "_send_turn_fallback", _noop)
 
 
+def pytest_configure(config: pytest.Config) -> None:
+    config.addinivalue_line(
+        "markers",
+        "real_unit_gate: run with the REAL usable-unit rule (TASK-090 Adendo 1 §A) instead of "
+        "the suite default that treats every active unit as usable and never gates a reply",
+    )
+
+
+@pytest.fixture(autouse=True)
+def _units_usable_by_default(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch):
+    """TASK-090 Adendo 1 §A: the secretária answers only a clinic with a USABLE unit (active +
+    complete address), and patients are offered only usable units. Almost every older test
+    builds a clinic with no unit, or units with a bare `address` text and no CEP/street/number
+    parts, and exercises something else entirely - under the real rule they would all be
+    silenced or lose their units.
+
+    So, like `_no_turn_apology` above, the suite default keeps the pre-Adendo behaviour at the
+    two seams: the predicate (`professional_units.unit_is_usable`) counts every ACTIVE unit, and
+    the reply gate (`workers/shared/unit_gate.reply_blocked_no_usable_unit`) never blocks.
+    Tests of the rule itself carry `@pytest.mark.real_unit_gate` and run the real code.
+    """
+    if request.node.get_closest_marker("real_unit_gate") is not None:
+        return
+    from secretaria.services import professional_units
+
+    async def _never_blocked(*_args, **_kwargs) -> bool:
+        return False
+
+    monkeypatch.setattr(professional_units, "unit_is_usable", lambda unit: bool(unit.is_active))
+    monkeypatch.setattr(workers_ns, "reply_blocked_no_usable_unit", _never_blocked)
+
+
 @pytest.fixture
 async def client() -> AsyncIterator[AsyncClient]:
     """An httpx AsyncClient bound to the FastAPI app via ASGITransport.

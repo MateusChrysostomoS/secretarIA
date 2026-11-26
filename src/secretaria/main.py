@@ -153,8 +153,9 @@ def create_app() -> FastAPI:
     app.include_router(payment_attention.router)
     app.include_router(release_offers.router)
     app.include_router(payment_settings.router)
-    # Addon CRUD: multi_professional / multi_unit (entitlement + limit gated
-    # in the routers themselves; see api/hub/professionals.py, api/hub/units.py).
+    # CRUD: multi_professional (entitlement + limit gated in the router itself; see
+    # api/hub/professionals.py) and units (core since TASK-090: no entitlement, no limit; see
+    # api/hub/units.py).
     app.include_router(professionals.router)
     app.include_router(units.router)
     # Units per professional (TASK-083): which units a doctor attends + hours per unit.

@@ -52,10 +52,10 @@ from secretaria.services import (
     reminder_schedule,
     tenant_config as cfg,
 )
+from secretaria.services.clinic_region import load_clinic_region
 from secretaria.services.greeting_template import (
     clinic_description_budget,
     greeting_preview_template,
-    tenant_city,
 )
 from secretaria.services.operating_channel import available_operating_channels
 from secretaria.services.payments import settings as payment_settings
@@ -155,7 +155,9 @@ TENANT_SCALAR_FIELDS: tuple[str, ...] = (
     "initial_flows",
     "address",
     "clinic_facts",
-    "collect_insurance",
+    # `collect_insurance` is no longer writable (TASK-090): the convênio question
+    # depends only on the clinic having convênios. The config schema still accepts
+    # the key and drops it here.
     "pix_deposit_enabled",
     "pix_deposit_percent",
     "pix_refund_window_hours",
@@ -166,8 +168,15 @@ TENANT_SCALAR_FIELDS: tuple[str, ...] = (
     "payment_provider",
     "deposit_timing",
     "deposit_hold_ttl_minutes",
-    "paid_notices_auto_approved",
+    # `paid_notices_auto_approved` is NOT here: it is revoke-only (TASK-090), see
+    # REVOKE_ONLY_TENANT_FIELDS / tenant_scalar_updates.
 )
+
+# Fields a save may switch OFF but never ON. The clinic's standing "approve billed WhatsApp
+# notices" is no longer offered anywhere, so the server refuses to turn it back on (a
+# stale client sending true gets 200 and the stored value is left alone); a clinic that
+# still holds a true can be switched off, and reads keep returning the stored value.
+REVOKE_ONLY_TENANT_FIELDS: tuple[str, ...] = ("paid_notices_auto_approved",)
 
 PROFESSIONAL_CONFIG_FIELDS: tuple[str, ...] = (
     "specialty",
@@ -363,6 +372,18 @@ def _apply_extra_reminder(tenant: Tenant, data: dict) -> None:
     tenant.reminder_extra_lead_minutes = extra_reminder.legacy_lead_minutes(days)
 
 
+def tenant_scalar_updates(data: dict) -> dict:
+    """The `{column: value}` assignments `data` is allowed to make on a tenant.
+
+    Plain scalar fields pass through; a revoke-only field passes only when it is False.
+    """
+    updates = {name: data[name] for name in TENANT_SCALAR_FIELDS if name in data}
+    for name in REVOKE_ONLY_TENANT_FIELDS:
+        if data.get(name) is False:
+            updates[name] = False
+    return updates
+
+
 async def apply_tenant_config(session: AsyncSession, tenant: Tenant, data: dict) -> None:
     """Apply a validated TenantConfigUpdate dump onto `tenant`. No commit.
 
@@ -377,16 +398,21 @@ async def apply_tenant_config(session: AsyncSession, tenant: Tenant, data: dict)
     gate cannot run any earlier.
     """
     previous_extra = _extra_reminder_state(tenant)
-    for field_name in TENANT_SCALAR_FIELDS:
-        if field_name in data:
-            setattr(tenant, field_name, data[field_name])
+    for field_name, value in tenant_scalar_updates(data).items():
+        setattr(tenant, field_name, value)
     _apply_extra_reminder(tenant, data)
 
     # Budget check for the greeting's clinic slot. Runs on the PATCHED tenant
     # so a PUT that changes `clinic_name` and `clinic_description` together is
     # judged against the name it is actually saving, not the stored one.
     if "clinic_description" in data:
-        budget = clinic_description_budget(tenant.clinic_name, tenant_city(tenant.address))
+        region = await load_clinic_region(session, tenant)
+        budget = clinic_description_budget(
+            tenant.clinic_name,
+            region.name if region else "",
+            None,
+            region.preposition if region else "em",
+        )
         typed = len((tenant.clinic_description or "").strip())
         if typed > budget:
             raise ClinicDescriptionTooLong(
@@ -482,6 +508,9 @@ def config_source_fields(professional: Professional) -> dict[str, str]:
 
 
 async def tenant_read_model(session: AsyncSession, tenant: Tenant) -> TenantConfigRead:
+    region = await load_clinic_region(session, tenant)
+    place = region.name if region else ""
+    preposition = region.preposition if region else "em"
     connected = await cfg.has_google_refresh_token(session, tenant.id)
     asaas_connected = await cfg.has_asaas_api_key(session, tenant.id)
     return TenantConfigRead(
@@ -495,10 +524,10 @@ async def tenant_read_model(session: AsyncSession, tenant: Tenant) -> TenantConf
         # receives cannot drift. The alternative — re-typing the frame in the
         # frontend — guarantees they eventually do.
         greeting_preview_template=greeting_preview_template(
-            tenant.clinic_name, tenant_city(tenant.address)
+            tenant.clinic_name, place, preposition
         ),
         clinic_description_max=clinic_description_budget(
-            tenant.clinic_name, tenant_city(tenant.address)
+            tenant.clinic_name, place, None, preposition
         ),
         returning_greeting_message=tenant.returning_greeting_message,
         persona_notes=tenant.persona_notes,
@@ -514,7 +543,8 @@ async def tenant_read_model(session: AsyncSession, tenant: Tenant) -> TenantConf
         initial_flows=tenant.initial_flows or {},
         address=tenant.address,
         clinic_facts=tenant.clinic_facts,
-        collect_insurance=tenant.collect_insurance,
+        # Legacy constant: the question depends only on the clinic having convênios (TASK-090).
+        collect_insurance=True,
         is_active=tenant.is_active,
         calendar_connected=connected,
         calendar_backend="google" if connected else "local",

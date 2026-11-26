@@ -19,6 +19,7 @@ from secretaria.workers.shared.sender import (
 from secretaria.workers.shared.text import (
     SERVICE_UNAVAILABLE_MESSAGE,
 )
+from secretaria.workers.shared.unit_gate import reply_blocked_no_usable_unit
 
 logger = get_logger(__name__)
 
@@ -57,6 +58,8 @@ async def _handle_service_unavailable(reply: _ReplyContext, redis=None) -> None:
             tenant_id=str(tenant.id),
             status=summary.status if summary is not None else None,
         )
+        return
+    if await reply_blocked_no_usable_unit(tenant.id, conversation_id=reply.conversation_id):
         return
 
     client = _reply_sender(reply, tenant, waba_token)

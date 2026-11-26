@@ -45,6 +45,52 @@ from secretaria.core.whatsapp_limits import strip_decoration, truncate_list_row_
 # derived from the SAME active-professionals roster the flow router and the
 # prompt already use — never from an entitlement, and never from the prompt.
 
+class PatientRoster(list):
+    """The router-shaped roster of one turn (TASK-090 Adendo 1, owner rulings on I1/C1).
+
+    The LIST ITSELF holds the doctors a patient may be OFFERED for a NEW booking (lists, taps,
+    typed names, the draft, the AI tools). `everyone` holds every ACTIVE doctor, hidden ones
+    included, and is what decides the TOPOLOGY (one doctor vs several: `everyone_of`,
+    `sole_active_professional`, `flow_router._is_multi_professional`) and resolves the doctor of
+    an EXISTING consultation (`flow_router._find_owner_by_id`). So hiding a doctor never turns
+    a multi-doctor clinic into a "the only doctor IS the clinic" one.
+
+    COPY-PROOF (re-review C1-bis): every doctor of `everyone` also carries the full roster as
+    `ROSTER_EVERYONE_ATTR`, so `list(roster)`, a slice or a comprehension over the offered
+    doctors - which drop the list's own `everyone` - still answer `everyone_of` with every
+    active doctor. A plain list of doctors that never went through a `PatientRoster` keeps
+    meaning "this is everybody".
+    """
+
+    def __init__(self, offered: Sequence[Any] = (), everyone: Sequence[Any] | None = None):
+        super().__init__(offered)
+        self.everyone: list = list(everyone) if everyone is not None else list(offered)
+        full = tuple(self.everyone)
+        for professional in full:
+            try:
+                setattr(professional, ROSTER_EVERYONE_ATTR, full)
+            except (AttributeError, TypeError):  # a frozen/slotted test double: list-only
+                continue
+
+
+# The attribute `PatientRoster` stamps on each doctor (a tuple of every active doctor).
+ROSTER_EVERYONE_ATTR = "roster_everyone"
+
+
+def everyone_of(professionals: Sequence[Any] | None) -> list:
+    """Every active doctor of the roster: a `PatientRoster`'s `everyone`; else the roster any of
+    its doctors was stamped with (survives copies and filtered sub-lists); else the list."""
+    everyone = getattr(professionals, "everyone", None)
+    if everyone is not None:
+        return list(everyone)
+    items = list(professionals or [])
+    for professional in items:
+        stamped = getattr(professional, ROSTER_EVERYONE_ATTR, None)
+        if isinstance(stamped, tuple):
+            return list(stamped)
+    return items
+
+
 BOOKING_TOPOLOGY_UNKNOWN = "unknown"
 BOOKING_TOPOLOGY_NONE = "none"
 BOOKING_TOPOLOGY_SOLE = "sole"
@@ -61,7 +107,7 @@ def booking_topology(professionals: Sequence[Any] | None) -> str:
     """
     if professionals is None:
         return BOOKING_TOPOLOGY_UNKNOWN
-    count = len(list(professionals))
+    count = len(everyone_of(professionals))  # hidden doctors count (TASK-090 Adendo 1, C1)
     if count == 0:
         return BOOKING_TOPOLOGY_NONE
     if count == 1:
@@ -78,8 +124,11 @@ def sole_active_professional(professionals: Sequence[Any] | None) -> Any | None:
     (`workers/tasks.py::_flow_tenant_snapshot`) and the effective OWNER
     (`resolve_booking_owner_id` below) can never be resolved from different
     professionals.
+
+    Counted on EVERY active doctor (`everyone_of`): a doctor hidden from patients still makes
+    the clinic a multi-doctor one (TASK-090 Adendo 1, owner ruling on C1).
     """
-    roster = list(professionals or [])
+    roster = everyone_of(professionals)
     return roster[0] if len(roster) == 1 else None
 
 
@@ -106,7 +155,9 @@ def resolve_booking_owner_id(
             if getattr(professional, "id", None) == selected_professional_id:
                 return selected_professional_id
         return None
-    professional = sole_active_professional(roster)
+    # No selection: the clinic's ONLY active doctor - counted on every active doctor, so a
+    # clinic with a hidden second doctor has no implied owner (re-review C1-bis).
+    professional = sole_active_professional(professionals)
     return getattr(professional, "id", None) if professional is not None else None
 
 

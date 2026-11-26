@@ -1,7 +1,7 @@
 """What is still missing in a clinic's context - deterministic, no LLM (TASK-025).
 
-`compute_completeness(tenant, services, professionals)` returns the checklist the manager sees
-next to the context form and a 0-100 score. Required items weigh 1, recommended ones 0.5. A
+`compute_completeness(tenant, services, professionals, units)` returns the checklist the manager
+sees next to the context form and a 0-100 score. Required items weigh 1, recommended ones 0.5. A
 required item that is not filled is `missing`; a recommended one is `optional`. Pure: it reads
 attributes of the objects it is given and touches no database, so it is trivially testable.
 
@@ -20,6 +20,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Literal
 
+from secretaria.services import professional_units
 from secretaria.services.tenant_config import (
     active_appointment_types,
     professional_appointment_types,
@@ -31,6 +32,11 @@ Status = Literal["done", "missing", "optional"]
 REQUIRED_WEIGHT = 1.0
 RECOMMENDED_WEIGHT = 0.5
 FAQ_TARGET = 3
+
+# The "address" item (TASK-090 Adendo 1 §A): the secretária only answers once one unit has a
+# complete address, so the hint says exactly what is missing.
+NO_UNIT_HINT = "Cadastre uma unidade com endereço completo."
+INCOMPLETE_UNIT_HINT = "Complete o endereço da unidade (CEP, rua, número, cidade e UF)."
 
 
 @dataclass(frozen=True)
@@ -62,10 +68,15 @@ def _has_hours(business_hours: Any) -> bool:
     return isinstance(business_hours, dict) and any(_filled(v) for v in business_hours.values())
 
 
-def _has_address(address: Any) -> bool:
-    return (
-        isinstance(address, dict) and _filled(address.get("line")) and _filled(address.get("city"))
-    )
+def _has_usable_unit(units: list[Any] | None) -> bool:
+    """At least one USABLE unit: active AND with a complete address (CEP, street, number, city,
+    UF - `professional_units.unit_is_usable`, the same rule that decides whether the secretária
+    answers at all, TASK-090 Adendo 1 §A). The legacy `Tenant.address` no longer counts."""
+    return any(professional_units.unit_is_usable(unit) for unit in units or [])
+
+
+def _has_active_unit(units: list[Any] | None) -> bool:
+    return any(getattr(unit, "is_active", True) for unit in units or [])
 
 
 def _has_guidance(service: Any) -> bool:
@@ -178,7 +189,10 @@ def _booking_items(
 
 
 def compute_completeness(
-    tenant: Any, services: list[Any], professionals: list[Any] | None = None
+    tenant: Any,
+    services: list[Any],
+    professionals: list[Any] | None = None,
+    units: list[Any] | None = None,
 ) -> Completeness:
     # JSON column: a row written outside the schema can hold any shape; ignore a bad one.
     stored = getattr(tenant, "clinic_facts", None)
@@ -200,8 +214,10 @@ def compute_completeness(
             "address",
             "Endereço da clínica",
             REQUIRED_WEIGHT,
-            _has_address(getattr(tenant, "address", None)),
-            "Informe pelo menos a rua e a cidade.",
+            _has_usable_unit(units),
+            # A clinic whose units are all incomplete completes one; with no active unit at
+            # all it registers the first.
+            INCOMPLETE_UNIT_HINT if _has_active_unit(units) else NO_UNIT_HINT,
             "address",
         ),
         (

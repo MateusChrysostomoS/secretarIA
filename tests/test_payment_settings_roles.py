@@ -159,11 +159,11 @@ async def test_a_manager_saves_the_payment_fields(client: AsyncClient, db, role,
 
 async def test_a_save_that_touches_no_payment_field_needs_no_manager(client: AsyncClient, db):
     world = await _world(db)
-    # `collect_insurance` is a clinic setting that is NOT financial (spec 12.2: the other fields of
+    # `clinic_description` is a clinic setting that is NOT financial (spec 12.2: the other fields of
     # the envelope keep their rule): a secretary still saves it.
-    response = await _put(client, world, "secretary", {"collect_insurance": True})
+    response = await _put(client, world, "secretary", {"clinic_description": "Clínica de olhos."})
     assert response.status_code == 200
-    assert (await _stored(db, world)).collect_insurance is True
+    assert (await _stored(db, world)).clinic_description == "Clínica de olhos."
 
 
 async def test_the_role_refusal_comes_before_the_payment_rules_and_brain_api(

@@ -55,11 +55,11 @@ from secretaria.services.flow_units import STEP_AWAITING_UNIT, STEP_AWAITING_UNI
 from secretaria.services.insurance_catalog import load_tenant_insurance
 from secretaria.services.service_catalog import load_service_catalog
 from secretaria.services.tenant_config import list_active_professionals
-from secretaria.services.unit_booking import attach_unit_options
 from secretaria.workers.shared.channel_policy import policy_for
 from secretaria.workers.shared.context import _ReplyContext
-from secretaria.workers.shared.greeting import _flow_professionals, _flow_tenant_snapshot
+from secretaria.workers.shared.greeting import _flow_tenant_snapshot
 from secretaria.workers.shared.llm_context import _appointment_calendar
+from secretaria.workers.shared.patient_roster import build_patient_roster
 
 logger = get_logger(__name__)
 _UNIT_ANSWER_STEPS = (
@@ -122,6 +122,8 @@ async def _load_draft_context(reply: _ReplyContext, tenant: Tenant) -> DraftCont
         if tenant is None:
             return None
         snapshot = _conversation_flow_snapshot(conversation)
+        # Every ACTIVE doctor: the topology and the agendas (TASK-090 Adendo 1, C1); the roster
+        # below OFFERS only the ones a patient may book with (I1).
         professional_rows = await list_active_professionals(session, tenant.id)
         service_catalog = await load_service_catalog(session, tenant.id)
         tenant_insurance = await load_tenant_insurance(session, tenant.id)
@@ -130,10 +132,11 @@ async def _load_draft_context(reply: _ReplyContext, tenant: Tenant) -> DraftCont
             .select_from(Unit)
             .where(Unit.tenant_id == tenant.id, Unit.is_active.is_(True))
         )
-        professionals = _flow_professionals(professional_rows, service_catalog)
         # TASK-083 spec §8: each doctor's offered units, so the resolver asks "which unit?"
         # (or uses the only one) and the booking details name THAT unit's address.
-        await attach_unit_options(session, tenant, professional_rows, professionals)
+        professionals = await build_patient_roster(
+            session, tenant, professional_rows, service_catalog
+        )
     tenant_snapshot = _flow_tenant_snapshot(
         tenant, professional_rows, service_catalog, tenant_insurance
     )

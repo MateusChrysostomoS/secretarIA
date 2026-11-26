@@ -27,7 +27,7 @@ from sqlalchemy.pool import StaticPool  # noqa: E402
 
 from secretaria.api.hub.deps import get_current_tenant  # noqa: E402
 from secretaria.core.database import Base, get_session  # noqa: E402
-from secretaria.models import Tenant  # noqa: E402
+from secretaria.models import Tenant, Unit  # noqa: E402
 
 CONFIG = "/tenants/me/config"
 CONFIGURATION = "/tenants/me/configuration"
@@ -173,13 +173,15 @@ async def test_completeness_of_an_empty_clinic(client: AsyncClient) -> None:
     assert keys["payment_methods"]["section"] == "facts"
 
 
+@pytest.mark.real_unit_gate
 async def test_completeness_follows_what_was_saved(client: AsyncClient) -> None:
     await client.put(
         CONFIG, json={"clinic_facts": FACTS, "address": {"line": "Rua A", "city": "Recife"}}
     )
     body = (await client.get(COMPLETENESS)).json()
     status = {i["key"]: i["status"] for i in body["items"]}
-    assert status["address"] == "done" and status["parking_or_arrival"] == "done"
+    # TASK-090 Adendo 1 §A: the legacy clinic address no longer satisfies "address".
+    assert status["address"] == "missing" and status["parking_or_arrival"] == "done"
     assert status["payment_methods"] == "done" and status["cancellation_policy"] == "done"
     assert status["hours"] == "missing" and 0 < body["score"] < 100
 
@@ -201,3 +203,61 @@ async def test_get_config_survives_an_address_or_facts_stored_in_any_shape(
     assert response.status_code == 200, response.text
     assert response.json()["address"] == stored
     assert response.json()["clinic_facts"] == stored
+
+
+_COMPLETE_UNIT = {
+    "cep": "50010000",
+    "street": "Rua A",
+    "number": "10",
+    "city": "Recife",
+    "state": "PE",
+}
+
+
+@pytest.mark.real_unit_gate
+async def test_completeness_counts_an_active_unit_with_a_complete_address(
+    client: AsyncClient, db, tenant: Tenant
+) -> None:
+    async with db() as session:
+        session.add(
+            Unit(tenant_id=tenant.id, name="Incompleta", street="Rua B", city="Recife", state="PE")
+        )
+        await session.commit()
+    items = {i["key"]: i for i in (await client.get(COMPLETENESS)).json()["items"]}
+    assert items["address"]["status"] == "missing"
+    assert items["address"]["hint"] == (
+        "Complete o endereço da unidade (CEP, rua, número, cidade e UF)."
+    )
+    async with db() as session:
+        session.add(Unit(tenant_id=tenant.id, name="Sede", **_COMPLETE_UNIT))
+        await session.commit()
+    status = {i["key"]: i["status"] for i in (await client.get(COMPLETENESS)).json()["items"]}
+    assert status["address"] == "done"
+
+
+@pytest.mark.real_unit_gate
+async def test_completeness_ignores_another_clinics_unit(client: AsyncClient, db) -> None:
+    async with db() as session:
+        other = Tenant(id=uuid4(), clinic_name="Other", phone_number_id=None)
+        session.add(other)
+        await session.flush()
+        session.add(Unit(tenant_id=other.id, name="Sede", **_COMPLETE_UNIT))
+        await session.commit()
+    status = {i["key"]: i["status"] for i in (await client.get(COMPLETENESS)).json()["items"]}
+    assert status["address"] == "missing"
+
+
+async def test_config_preview_names_the_region_of_the_units(
+    client: AsyncClient, db, tenant: Tenant
+) -> None:
+    async with db() as session:
+        session.add_all(
+            [
+                Unit(tenant_id=tenant.id, name="A", street="R", city="Campinas", state="SP"),
+                Unit(tenant_id=tenant.id, name="B", street="R", city="Recife", state="PE"),
+            ]
+        )
+        await session.commit()
+    body = (await client.get(CONFIG)).json()
+    assert ", no Brasil." in body["greeting_preview_template"]
+    assert body["clinic_description_max"] > 0

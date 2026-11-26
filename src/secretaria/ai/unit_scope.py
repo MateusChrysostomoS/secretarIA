@@ -200,7 +200,9 @@ async def service_unit_refusal(
 
     async with async_session_factory() as session:
         try:
-            await check_unit(session, tenant_id, professional, unit.id, service_id)
+            await check_unit(
+                session, tenant_id, professional, unit.id, service_id, for_patient=True
+            )
         except UnitRefused as refused:
             if refused.code != "unit_service_not_offered":
                 return {"error": refused.message}

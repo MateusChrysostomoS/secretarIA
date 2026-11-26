@@ -88,7 +88,9 @@ class OptionSource:
     `pinned` are the fixed rows ("Não sei", "Particular", "Outro") drawn after it.
     `has_clinic_notes` (convênio lists only, TASK-085 R U1b): whether any listed plan carries
     the clinic's own note - the Portal shows "Ver regras de pagamento dos convênios" only
-    then; None on every other kind.
+    then; None on every other kind. TASK-090: the notes no longer exist, so it is always False
+    on a convênio card (kept only for deploy-window compatibility; follow-up: remove it with the
+    BMF sheet).
     WhatsApp ignores all of this and sends `SlotsBubble.rows`, exactly as before.
     """
 

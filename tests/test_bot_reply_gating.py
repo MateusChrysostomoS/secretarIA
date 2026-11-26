@@ -394,7 +394,7 @@ async def test_run_agent_receives_plugin_tools_for_entitled_addons(
 
     monkeypatch.setattr(workers_ns, "get_entitlements", _fake_get_entitlements)
     monkeypatch.setattr(workers_ns, "run_agent", _fake_run_agent)
-    monkeypatch.setattr(workers_ns, "agent_tools_for", lambda summary: sentinel_tools)
+    monkeypatch.setattr(workers_ns, "agent_tools_for", lambda summary, **_kw: sentinel_tools)
 
     await tasks._send_bot_reply(_reply_context(conversation, patient, _LLM_ANSWER))
 
@@ -404,6 +404,87 @@ async def test_run_agent_receives_plugin_tools_for_entitled_addons(
     # than an exact list; the hand-back tool has its own tests above.
     assert len(run_agent_calls) == 1
     assert "sentinel-tool" in run_agent_calls[0]["extra_tools"]
+
+
+@pytest.mark.parametrize("with_unit", [False, True])
+async def test_unit_tools_switch_on_from_the_clinics_active_units(
+    monkeypatch: pytest.MonkeyPatch, db, with_unit: bool
+) -> None:
+    """TASK-090: `multi_unit` is no add-on; the worker tells the registry whether the clinic has
+    an ACTIVE unit, and a clinic without one keeps the toolset it always had."""
+    from secretaria.models import Unit
+
+    tenant, patient, conversation = await _make_conversation(db, flow_state=FlowState.LLM)
+    async with db() as session:
+        # An inactive unit alone never counts; another clinic's active unit never counts either.
+        session.add(Unit(tenant_id=tenant.id, name="Centro", address="Rua A, 1", is_active=False))
+        session.add(Unit(tenant_id=uuid4(), name="Other clinic", address="x", is_active=True))
+        if with_unit:
+            session.add(Unit(tenant_id=tenant.id, name="Sul", address="Rua B, 2", is_active=True))
+        await session.commit()
+    seen: list[bool] = []
+
+    async def _fake_get_entitlements(tenant_id, redis):
+        return _summary()
+
+    async def _fake_run_agent(message, context, **kwargs):
+        return "Oi!"
+
+    def _fake_agent_tools_for(summary, *, has_active_units):
+        seen.append(has_active_units)
+        return []
+
+    monkeypatch.setattr(workers_ns, "get_entitlements", _fake_get_entitlements)
+    monkeypatch.setattr(workers_ns, "run_agent", _fake_run_agent)
+    monkeypatch.setattr(workers_ns, "agent_tools_for", _fake_agent_tools_for)
+
+    await tasks._send_bot_reply(_reply_context(conversation, patient, _LLM_ANSWER))
+
+    assert seen == [with_unit]
+
+
+async def test_a_failing_active_units_check_only_turns_the_unit_tools_off(
+    monkeypatch: pytest.MonkeyPatch, db
+) -> None:
+    """The units query has its own try: when it raises, the catalog / insurance / unit-option
+    loads and the flow snapshot of the same turn still happen, the unit tools stay off, and the
+    warning carries no PII."""
+    tenant, patient, conversation = await _make_conversation(db, flow_state=FlowState.LLM)
+    seen: list[bool] = []
+    loaded: list[str] = []
+
+    async def _boom(session, tenant_id):
+        raise RuntimeError("units table unreachable")
+
+    def _spy(name, original):
+        async def _wrapper(*args, **kwargs):
+            loaded.append(name)
+            return await original(*args, **kwargs)
+
+        return _wrapper
+
+    async def _fake_get_entitlements(tenant_id, redis):
+        return _summary()
+
+    async def _fake_run_agent(message, context, **kwargs):
+        return "Oi!"
+
+    def _fake_agent_tools_for(summary, *, has_active_units):
+        seen.append(has_active_units)
+        return []
+
+    monkeypatch.setattr(orchestrator, "clinic_has_active_units", _boom)
+    # TASK-090 Adendo 1: the units ride on the patient roster (`build_patient_roster`).
+    for name in ("load_service_catalog", "load_tenant_insurance", "build_patient_roster"):
+        monkeypatch.setattr(orchestrator, name, _spy(name, getattr(orchestrator, name)))
+    monkeypatch.setattr(workers_ns, "get_entitlements", _fake_get_entitlements)
+    monkeypatch.setattr(workers_ns, "run_agent", _fake_run_agent)
+    monkeypatch.setattr(workers_ns, "agent_tools_for", _fake_agent_tools_for)
+
+    await tasks._send_bot_reply(_reply_context(conversation, patient, _LLM_ANSWER))
+
+    assert seen == [False]
+    assert loaded == ["load_service_catalog", "load_tenant_insurance", "build_patient_roster"]
 
 
 # --------------------------------------------------------------------------
@@ -896,3 +977,128 @@ async def test_the_human_offer_card_then_yes_hands_over(monkeypatch, db) -> None
     async with db() as session:
         stored = await session.get(Conversation, conversation.id)
         assert stored.handover_state == HandoverState.HUMAN_ACTIVE
+
+
+# --------------------------------------------------------------------------
+# TASK-090 Adendo 1 §A: the secretária only answers a clinic with a usable unit
+# --------------------------------------------------------------------------
+
+_COMPLETE_ADDRESS = {
+    "cep": "13010100",
+    "street": "Rua Barão de Jaguara",
+    "number": "100",
+    "city": "Campinas",
+    "state": "SP",
+}
+
+
+async def _add_unit(db, tenant: Tenant, name: str, **parts) -> None:
+    from secretaria.models import Unit
+
+    async with db() as session:
+        session.add(Unit(tenant_id=tenant.id, name=name, is_active=True, **parts))
+        await session.commit()
+
+
+def _entitled_llm(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    calls: list[str] = []
+
+    async def _fake_get_entitlements(tenant_id, redis):
+        return _summary()
+
+    async def _fake_run_agent(message, context, **kwargs):
+        calls.append(message)
+        return "Oi!"
+
+    monkeypatch.setattr(workers_ns, "get_entitlements", _fake_get_entitlements)
+    monkeypatch.setattr(workers_ns, "run_agent", _fake_run_agent)
+    return calls
+
+
+@pytest.mark.real_unit_gate
+async def test_a_clinic_without_a_usable_unit_gets_no_reply(
+    monkeypatch: pytest.MonkeyPatch, db
+) -> None:
+    """Same silence as an unentitled clinic: no reply, the inbound stays, own log event with
+    ids only. A unit with an incomplete address (no CEP) does not count."""
+    from secretaria.workers.shared import unit_gate
+
+    tenant, patient, conversation = await _make_conversation(db, flow_state=FlowState.LLM)
+    await _add_unit(db, tenant, "Sede", street="Rua A", number="1", city="Campinas", state="SP")
+    calls = _entitled_llm(monkeypatch)
+    events: list[tuple[str, dict]] = []
+    monkeypatch.setattr(
+        unit_gate.logger, "warning", lambda event, **kw: events.append((event, kw))
+    )
+
+    await tasks._send_bot_reply(_reply_context(conversation, patient, _LLM_ANSWER))
+
+    assert calls == []
+    assert _FakeWhatsAppClient.created == []
+    assert events == [
+        (
+            "bot_reply_suppressed_no_complete_unit",
+            {"tenant_id": str(tenant.id), "conversation_id": str(conversation.id)},
+        )
+    ]
+    async with db() as session:
+        after = await session.get(Conversation, conversation.id)
+        assert after.handover_state == HandoverState.BOT_ACTIVE
+
+
+@pytest.mark.real_unit_gate
+async def test_one_usable_unit_is_enough_for_the_reply(monkeypatch: pytest.MonkeyPatch, db) -> None:
+    tenant, patient, conversation = await _make_conversation(db, flow_state=FlowState.LLM)
+    await _add_unit(db, tenant, "Nova", city="Recife", state="PE")
+    await _add_unit(db, tenant, "Sede", **_COMPLETE_ADDRESS)
+    calls = _entitled_llm(monkeypatch)
+
+    await tasks._send_bot_reply(_reply_context(conversation, patient, _LLM_ANSWER))
+
+    assert calls == [_LLM_ANSWER]
+    assert _FakeWhatsAppClient.created and _FakeWhatsAppClient.created[0].sent
+
+
+@pytest.mark.real_unit_gate
+async def test_a_failing_unit_check_fails_open(monkeypatch: pytest.MonkeyPatch, db) -> None:
+    """The entitlement gate is the security gate; this readiness gate must not silence a
+    healthy clinic because of a database hiccup."""
+    from secretaria.services import professional_units
+
+    tenant, patient, conversation = await _make_conversation(db, flow_state=FlowState.LLM)
+    await _add_unit(db, tenant, "Sede", **_COMPLETE_ADDRESS)
+
+    async def _boom(session, tenant_id):
+        raise RuntimeError("units table unreachable")
+
+    monkeypatch.setattr(professional_units, "has_usable_units", _boom)
+    monkeypatch.setattr(orchestrator, "clinic_has_active_units", _boom)
+    calls = _entitled_llm(monkeypatch)
+
+    await tasks._send_bot_reply(_reply_context(conversation, patient, _LLM_ANSWER))
+
+    assert calls == [_LLM_ANSWER]
+
+
+async def test_the_inactive_tenant_degrade_respects_the_unit_gate(
+    monkeypatch: pytest.MonkeyPatch, db
+) -> None:
+    tenant, patient, _conversation = await _make_conversation(db, is_active=False)
+    await _assert_llm_never_called(monkeypatch)
+
+    async def _blocked(*_args, **_kwargs) -> bool:
+        return True
+
+    monkeypatch.setattr(workers_ns, "reply_blocked_no_usable_unit", _blocked)
+
+    await tasks._send_bot_reply(
+        tasks._ReplyContext(
+            conversation_id=None,
+            tenant_id=tenant.id,
+            patient_ref=patient.wa_id,
+            inbound_body="",
+            service_unavailable=True,
+        )
+    )
+
+    assert _FakeWhatsAppClient.created == []

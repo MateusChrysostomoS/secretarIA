@@ -58,7 +58,6 @@ from secretaria.services.tenant_config import (
     load_tenant_config,
     resolve_professional_calendar,
 )
-from secretaria.services.unit_booking import attach_unit_options
 from secretaria.workers.shared.appointment_edit_support import (
     edit_guards,
     visit_suspended,
@@ -74,13 +73,13 @@ from secretaria.workers.shared.flow_runner import (
     _apply_flow_result,
 )
 from secretaria.workers.shared.greeting import (
-    _flow_professionals,
     _format_appointment_when,
 )
 from secretaria.workers.shared.llm_context import (
     _appointment_calendar,
     _appointment_calendar_target,
 )
+from secretaria.workers.shared.patient_roster import build_patient_roster, hidden_ids
 from secretaria.workers.shared.release_offer_actions import handle_release_offer_tap
 from secretaria.workers.shared.reminder_actions import (
     CONTINUE_CANCEL_AND_ASK_WHY,
@@ -98,6 +97,7 @@ from secretaria.workers.shared.service_change_actions import (
 from secretaria.workers.shared.text import (
     _as_utc,
 )
+from secretaria.workers.shared.unit_gate import reply_blocked_no_usable_unit
 
 logger = get_logger(__name__)
 
@@ -225,10 +225,12 @@ async def _router_roster(
     doctor's units, per-service unit marks and per-unit terms (`attach_unit_options`), exactly
     like `service_change_actions._rebook_entry`. Without them the picker would use the base
     hours and the base blocked weekdays instead of the unit's (TASK-087 review P1).
+
+    TASK-090 Adendo 1: the patient roster (`workers/shared/patient_roster.py`) - it OFFERS only
+    the doctors a patient may book with, while `everyone` keeps the topology and the doctor of
+    the EXISTING consultation the button acts on. `professional_rows` = every active doctor.
     """
-    professionals = _flow_professionals(professional_rows, services)
-    await attach_unit_options(session, tenant, professional_rows, professionals)
-    return professionals
+    return await build_patient_roster(session, tenant, professional_rows, services)
 
 
 async def _announce_button_cancel(redis, tenant: Tenant, appointment_id, was_live: bool) -> None:
@@ -512,6 +514,10 @@ async def _handle_action_button(
             services = await load_service_catalog(session, tenant.id)
             professionals = await _router_roster(session, tenant, professional_rows, services)
             same = action == "rebooksame"
+            if same and appointment.professional_id in hidden_ids(professionals):
+                # A rebooking is a NEW booking: a doctor hidden from patients (TASK-090
+                # Adendo 1) is not offered again - the patient picks among the others.
+                same = False
             service_name = appointment.appointment_type
             candidates: list = []
             prefix = offer_prefix
@@ -728,5 +734,7 @@ async def _handle_greeting_button_unavailable(reply: _ReplyContext, suffix: str)
         client = _reply_sender(reply, tenant, waba_token)
     if client is None:
         return  # fail closed - never on the global scaffold (PROMPT_FIX_21)
+    if await reply_blocked_no_usable_unit(tenant.id, conversation_id=reply.conversation_id):
+        return
     text = _GREETING_ACTION_UNAVAILABLE_TEXT.get(suffix, _GREETING_ACTION_UNAVAILABLE_DEFAULT)
     await _send_simple_text(reply.patient_ref, text, client=client)

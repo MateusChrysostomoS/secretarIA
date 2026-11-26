@@ -15,10 +15,10 @@ from secretaria.models import (
     PixDeposit,
     ProcessedEvent,
 )
+from secretaria.services.clinic_region import load_clinic_region
 from secretaria.services.entitlements_client import get_entitlements
 from secretaria.services.greeting_template import (
     render_greeting,
-    tenant_city,
 )
 from secretaria.services.tenant_config import (
     get_waba_token,
@@ -36,6 +36,7 @@ from secretaria.workers.shared.dispatch import (
 )
 from secretaria.workers.shared.greeting import (
     _fit_clinic_description,
+    greeting_place,
 )
 from secretaria.workers.shared.sender import (
     _send_simple_text,
@@ -258,10 +259,13 @@ async def _handle_remove_context_command(
                 # degrade below is now unreachable for a tenant with a name, and
                 # this command is once again a faithful rehearsal of what a
                 # brand-new patient sees.
+                region = await load_clinic_region(session, tenant)
+                place, preposition = greeting_place(tenant, region)
                 greeting = render_greeting(
                     tenant.clinic_name,
-                    _fit_clinic_description(tenant),
-                    city=tenant_city(tenant.address),
+                    _fit_clinic_description(tenant, None, region),
+                    city=place,
+                    preposition=preposition,
                 )
                 waba_token = await get_waba_token(session, tenant.id)
         except IntegrityError:

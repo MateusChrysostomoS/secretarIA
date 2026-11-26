@@ -302,17 +302,15 @@ async def test_overview_has_no_per_plan_payment_text_or_deposit(db):
     async with db() as session:
         tenant, _patient = await _clinic(session)
         session.add(TenantInsurancePlan(tenant_id=tenant.id, catalog_id=UNIMED))
-        geap = TenantInsurancePlan(
-            tenant_id=tenant.id, custom_name="GEAP", custom_payment_note="Pagamento na recepção."
-        )
+        geap = TenantInsurancePlan(tenant_id=tenant.id, custom_name="GEAP")
         session.add(geap)
         await session.flush()
         await set_legacy_flag(session, "tenant_insurance_plans", geap.id, False)
         await session.commit()
         overview = await patient_insurance_overview(session, tenant.id)
     assert overview["deposit"] == {"enabled": True, "percent": 30}
-    # U1b: only the plans with a clinic note are listed (Unimed has none).
-    assert overview["plans"] == [{"name": "GEAP", "clinic_note": "Pagamento na recepção."}]
+    # TASK-090: no plan carries a clinic payment note any more, so none is listed.
+    assert overview["plans"] == []
 
 
 async def test_overview_route_returns_the_slim_shape(db, client):
@@ -424,13 +422,11 @@ async def test_hub_ignores_an_old_flag_and_never_rewrites_a_legacy_value(
     assert saved.status_code == 200, saved.text
     custom = await client.post(
         "/tenants/me/insurance-plans/custom",
-        json={
-            "custom_name": "GEAP",
-            "custom_payment_note": "Na recepção.",
-            "charge_deposit": False,
-        },
+        json={"custom_name": "GEAP", "charge_deposit": False},
     )
     assert custom.status_code == 201, custom.text
+    # TASK-090 Adendo 1 (C6): no rule sent, none stored.
+    assert custom.json()["custom_payment_note"] is None
     listed = await client.get("/tenants/me/insurance-plans")
     assert all("charge_deposit" not in plan for plan in listed.json())
     async with db() as session:

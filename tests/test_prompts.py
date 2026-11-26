@@ -360,9 +360,16 @@ def test_legacy_prompt_keeps_calendar_path_without_flow_state():
 # Re-rendered 2026-10-29 (TASK-072): the fixed "AO RESPONDER" block (several questions in one reply,
 # an unavailable time is never "reserved"); the DADOS/RECURSOS blocks only render with turn facts.
 # Re-rendered 2026-10-29 (TASK-072 reteste): a handoff offer's text carries the answered parts.
+# Re-rendered 2026-11-22 (TASK-090): a convênio payment-rule question goes to a person
+# (prompts.INSURANCE_PAYMENT_HANDOFF_RULE, +219 chars in COMO ATENDER and, in "full", again in
+# the ESTADO DA CONVERSA rules).
+# Re-rendered 2026-11-23 (TASK-090 Adendo 1, C6): the rule first reads get_insurance_payment_rule
+# (explain only the clinic's rule) and hands off only without one (+83 chars per occurrence).
+# Re-rendered 2026-11-24 (TASK-090 Adendo 1, owner): without a rule the secretária offers Sim/Não
+# (a fixed card) instead of transferring - the rule says so (+43 chars per occurrence).
 _V1_DIGESTS = {
-    "minimal": (14368, "c8d0af33fd3299e87b490f6fd49c2d71a622eec2fcd73d7af3404280ef4b74c4"),
-    "full": (20099, "b5bf6b4b4e1441a19302b647905b97ac3a27abeecc112456169293d8fea554af"),
+    "minimal": (14713, "2ae852a0e8563fc5336d8a01bad091c035c0fe8e22d50601a75bc788afe1f1b0"),
+    "full": (20789, "8384b7731186efa54e3e99d3b4a4faa387973be68bfe07f2ce4545bf76617815"),
 }
 
 

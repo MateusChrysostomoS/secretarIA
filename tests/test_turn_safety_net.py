@@ -200,3 +200,15 @@ async def test_a_looping_sender_gets_at_most_three_apologies(monkeypatch, wired)
     for _ in range(10):
         await _real_send_turn_fallback(reply, redis, cause="exception")
     assert len(wired) == 3
+
+
+async def test_no_apology_for_a_clinic_without_a_usable_unit(monkeypatch, wired) -> None:
+    """TASK-090 Adendo 1 §A: the main path's deliberate silence never becomes an apology."""
+    _entitled(monkeypatch, SimpleNamespace(active=True, secretaria_enabled=True, status="active"))
+
+    async def _blocked(*_args, **_kwargs) -> bool:
+        return True
+
+    monkeypatch.setattr(workers_ns, "reply_blocked_no_usable_unit", _blocked)
+    await _real_send_turn_fallback(_reply(), _FakeRedis(), cause="silent_return")
+    assert wired == []

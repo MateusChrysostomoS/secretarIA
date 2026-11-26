@@ -26,8 +26,10 @@ from secretaria.api.hub import (
 from secretaria.core.database import get_session  # noqa: E402
 from secretaria.core.subscription import SubscriptionClaim  # noqa: E402
 from secretaria.models import Professional, ProfessionalUnit, Unit  # noqa: E402
-from secretaria.services import professional_units as pu_service  # noqa: E402
-from secretaria.services.entitlements_client import EntitlementSummary  # noqa: E402
+from secretaria.services import (  # noqa: E402
+    entitlements_client,
+    professional_units as pu_service,
+)
 from tests._local_agenda import WEEK_HOURS, seed_professional, seed_tenant  # noqa: E402
 from tests._reminder_fixtures import db  # noqa: E402,F401
 
@@ -36,28 +38,13 @@ MORNING = {"monday": [{"start": "08:00", "end": "12:00"}]}
 EVENING = {"tuesday": [{"start": "18:00", "end": "21:00"}]}
 
 
-def _summary(*, entitled: bool, limits: dict | None = None) -> EntitlementSummary:
-    return EntitlementSummary(
-        tenant_id=str(uuid4()),
-        status="active",
-        active=True,
-        secretaria_enabled=True,
-        plan="bronze",
-        secretaria_tier="basico",
-        addons={"multi_unit": entitled},
-        limits=limits or {},
-    )
+def _entitlements_never_consulted(monkeypatch) -> None:
+    """Units are core (TASK-090): any entitlement fetch from these endpoints fails the test."""
 
+    async def _boom(tenant_id, redis=None):
+        raise AssertionError("units never consult entitlements (TASK-090)")
 
-def _entitlements(monkeypatch, *, entitled=True, limits=None, fail=False) -> list:
-    calls: list = []
-
-    async def _fake(tenant_id, redis=None):
-        calls.append(tenant_id)
-        return None if fail else _summary(entitled=entitled, limits=limits)
-
-    monkeypatch.setattr(pu_api, "get_entitlements", _fake)
-    return calls
+    monkeypatch.setattr(entitlements_client, "get_entitlements", _boom)
 
 
 @pytest_asyncio.fixture
@@ -108,7 +95,7 @@ async def world(db, monkeypatch):
 
     app.dependency_overrides[get_session] = _session
     monkeypatch.setattr(hub_deps, "verify_subscription_token", _verify)
-    _entitlements(monkeypatch, entitled=True)
+    _entitlements_never_consulted(monkeypatch)
     yield {
         "db": db,
         "tenant": tenant,
@@ -199,11 +186,10 @@ async def test_get_without_links_has_nothing_linked(client, world):
     assert rows and not any(r["linked"] for r in rows)
 
 
-async def test_get_never_calls_entitlements(client, world, monkeypatch):
-    calls = _entitlements(monkeypatch, entitled=False)
+async def test_get_never_calls_entitlements(client, world):
+    # The `world` fixture makes any entitlement fetch fail the test.
     response = await client.get(_url(world["doctor"]), headers=HEADERS)
     assert response.status_code == 200
-    assert calls == []
 
 
 @pytest.mark.parametrize("role", ["secretary", "doctor", "manager"])
@@ -225,48 +211,45 @@ async def test_get_without_token_is_401(client, world):
     assert (await client.get(_url(world["doctor"]))).status_code == 401
 
 
-# ---------------------------------------------------------------- PUT: entitlement / limit
+# ---------------------------------------------------------------- PUT: no add-on, no limit
 
 
-async def test_put_two_links_not_entitled_is_403(client, world, monkeypatch):
-    _entitlements(monkeypatch, entitled=False)
+async def test_professional_units_without_addon_succeeds(client, world):
+    """TASK-090: more than one link needs no add-on (403 `multi_unit_not_entitled` is gone)."""
     response = await _put(client, world["doctor"], _link(world["centro"]), _link(world["norte"]))
-    assert response.status_code == 403
-    assert response.json()["detail"] == "multi_unit_not_entitled"
-    assert await _db_links(world, world["doctor"]) == {}
-
-
-async def test_put_one_link_not_entitled_is_allowed_without_asking(client, world, monkeypatch):
-    calls = _entitlements(monkeypatch, entitled=False)
-    response = await _put(client, world["doctor"], _link(world["centro"]))
     assert response.status_code == 200, response.text
-    assert calls == []
-    assert set(await _db_links(world, world["doctor"])) == {str(world["centro"].id)}
+    assert set(await _db_links(world, world["doctor"])) == {
+        str(world["centro"].id),
+        str(world["norte"].id),
+    }
 
 
-async def test_put_empty_set_not_entitled_clears_links(client, world, monkeypatch):
+async def test_put_three_links_has_no_unit_limit(client, world):
+    """TASK-090: no `limits["units"]` (409 `unit_limit_reached` is gone)."""
+    w = world
+    links = [_link(w["centro"]), _link(w["norte"]), _link(w["sul"])]
+    response = await _put(client, w["doctor"], *links)
+    assert response.status_code == 200, response.text
+    assert len(await _db_links(w, w["doctor"])) == 3
+
+
+async def test_put_empty_set_clears_links(client, world):
     await _seed_link(world, world["doctor"], world["centro"])
-    _entitlements(monkeypatch, entitled=False)
     response = await _put(client, world["doctor"])
     assert response.status_code == 200
     assert await _db_links(world, world["doctor"]) == {}
     assert not any(r["linked"] for r in response.json()["units"])
 
 
-async def test_put_reducing_but_still_over_one_without_entitlement_is_403(
-    client, world, monkeypatch
-):
-    """Final wave T6: the RESULTING set decides - three links reduced to two is still more than
-    one unit without the add-on (403, nothing written); reduced to one is allowed."""
+async def test_put_reducing_the_set_keeps_the_resulting_links(client, world):
+    """Three links reduced to two, then to one: each save is accepted and is the resulting set."""
     w = world
     for position, unit in enumerate((w["centro"], w["norte"], w["sul"])):
         await _seed_link(w, w["doctor"], unit, sort_order=position)
-    _entitlements(monkeypatch, entitled=False)
 
-    still_two = await _put(client, w["doctor"], _link(w["centro"]), _link(w["norte"]))
-    assert still_two.status_code == 403
-    assert still_two.json()["detail"] == "multi_unit_not_entitled"
-    assert len(await _db_links(w, w["doctor"])) == 3
+    two = await _put(client, w["doctor"], _link(w["centro"]), _link(w["norte"]))
+    assert two.status_code == 200, two.text
+    assert len(await _db_links(w, w["doctor"])) == 2
 
     one = await _put(client, w["doctor"], _link(w["centro"]))
     assert one.status_code == 200, one.text
@@ -313,33 +296,6 @@ async def test_replace_locks_the_professional_row_first():
     await pu_service.replace_links(_Session(), professional, [])
     assert seen and seen[0].startswith("SELECT professionals.id")
     assert "FOR UPDATE" in seen[0]
-
-
-async def test_put_two_links_entitled_within_limit(client, world, monkeypatch):
-    _entitlements(monkeypatch, entitled=True, limits={"units": 2})
-    response = await _put(client, world["doctor"], _link(world["centro"]), _link(world["norte"]))
-    assert response.status_code == 200, response.text
-
-
-async def test_put_over_unit_limit_is_409(client, world, monkeypatch):
-    _entitlements(monkeypatch, entitled=True, limits={"units": 2})
-    response = await _put(
-        client,
-        world["doctor"],
-        _link(world["centro"]),
-        _link(world["norte"]),
-        _link(world["sul"]),
-    )
-    assert response.status_code == 409
-    assert response.json()["detail"] == "unit_limit_reached"
-    assert await _db_links(world, world["doctor"]) == {}
-
-
-async def test_put_entitlement_failure_fails_closed_503(client, world, monkeypatch):
-    _entitlements(monkeypatch, fail=True)
-    response = await _put(client, world["doctor"], _link(world["centro"]), _link(world["norte"]))
-    assert response.status_code == 503
-    assert await _db_links(world, world["doctor"]) == {}
 
 
 # ---------------------------------------------------------------- PUT: tenant isolation
@@ -414,8 +370,7 @@ async def test_put_ignores_an_inactive_unit_id_in_the_body(client, world):
     assert set(await _db_links(w, w["doctor"])) == {str(w["centro"].id)}
 
 
-async def test_put_inactive_unit_id_does_not_count_for_entitlement(client, world, monkeypatch):
-    _entitlements(monkeypatch, entitled=False)
+async def test_put_inactive_unit_id_alongside_an_active_one_is_accepted(client, world):
     response = await _put(client, world["doctor"], _link(world["centro"]), _link(world["closed"]))
     assert response.status_code == 200, response.text
 

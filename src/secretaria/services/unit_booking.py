@@ -209,13 +209,21 @@ def _own_hours(raw: dict) -> dict:
 
 
 async def unit_options_for(
-    session: AsyncSession, tenant: Any, professionals: Iterable[Any]
+    session: AsyncSession,
+    tenant: Any,
+    professionals: Iterable[Any],
+    *,
+    usable_only: bool = True,
 ) -> dict[UUID, list[UnitOption]]:
     """Each professional's offered units: active link AND active unit of THIS tenant.
 
     One query for the whole roster. A professional without any offered unit is absent from the
     result. Ordered like `professional_units.available_unit_ids` (link sort_order, unit name).
     `professionals` may be ORM rows or the router's snapshots (`id`, `business_hours`).
+
+    `usable_only` (the default - every patient-facing reader, TASK-090 Adendo 1 §A) also drops
+    a unit whose address is incomplete (`professional_units.unit_is_usable`): the patient is
+    never offered it. Only the manager's own screens pass `usable_only=False`.
     """
     by_id = {professional.id: professional for professional in professionals}
     if not by_id:
@@ -233,6 +241,8 @@ async def unit_options_for(
     )
     options: dict[UUID, list[UnitOption]] = {}
     for link, unit in rows.all():
+        if usable_only and not professional_units.unit_is_usable(unit):
+            continue
         professional = by_id[link.professional_id]
         # `is None`, never truthiness: an own `{}` is "closed here", not "inherit".
         hours = (
@@ -247,7 +257,12 @@ async def unit_options_for(
 
 
 async def attach_unit_options(
-    session: AsyncSession, tenant: Any, professional_rows: Iterable[Any], snapshots: Iterable[Any]
+    session: AsyncSession,
+    tenant: Any,
+    professional_rows: Iterable[Any],
+    snapshots: Iterable[Any],
+    *,
+    usable_only: bool = True,
 ) -> None:
     """Put each router snapshot's offered units on it as `units` (one read for the roster).
 
@@ -259,9 +274,13 @@ async def attach_unit_options(
     `service_unit_terms` (`{service_id: {unit_id: UnitTerms}}`, `{}` when none): the per-unit
     price/duration exceptions (TASK-085), also ONE query, tenant-scoped
     (services/service_terms.py::load_terms_for).
+
+    `usable_only=False` (TASK-090 Adendo 1, I1): the units of a doctor hidden from patients -
+    every one of them, complete or not - so his EXISTING consultations keep their unit lines,
+    hours and blocked days; he is never offered for a new booking anyway.
     """
     rows = list(professional_rows)
-    options = await unit_options_for(session, tenant, rows)
+    options = await unit_options_for(session, tenant, rows, usable_only=usable_only)
     marks = await read_marks_for(session, [row.id for row in rows])
     terms = await load_terms_for(session, tenant.id, [row.id for row in rows])
     for snapshot in snapshots:
@@ -453,6 +472,8 @@ async def check_unit(
     professional: Any | None,
     unit_id: UUID,
     service_id: UUID | None = None,
+    *,
+    for_patient: bool = False,
 ) -> Unit:
     """The unit, when it may be written onto a booking of `professional` at this clinic.
 
@@ -465,12 +486,21 @@ async def check_unit(
     the professional does that service only at OTHER units (422 `unit_service_not_offered`).
     `service_id=None` is exactly the rule above. Callers that write for the PATIENT pass it; the
     staff hub only flags the combination (`service_offered_at_unit`).
+
+    `for_patient` (TASK-090 Adendo 1): a booking written for the PATIENT (the AI tools) also
+    refuses a unit whose address is incomplete (422 `unit_address_incomplete`) - patients are
+    never offered one, so only a stale choice could name it. The staff hub keeps booking at
+    any active unit.
     """
     unit = await tenant_unit(session, tenant_id, unit_id)
     if unit is None:
         raise UnitRefused("unit_not_found", "Unidade não encontrada.", 404)
     if not unit.is_active:
         raise UnitRefused("unit_inactive", "Essa unidade está desativada.", 422)
+    if for_patient and not professional_units.unit_is_usable(unit):
+        raise UnitRefused(
+            "unit_address_incomplete", "Essa unidade não está disponível para agendamento.", 422
+        )
     if professional is not None:
         offered = await professional_units.available_unit_ids(session, professional)
         if offered and unit.id not in offered:

@@ -30,6 +30,7 @@ from secretaria.services import reminder_hooks
 from secretaria.services.channel_sender import (
     CHANNEL_BRAIN_MESSAGE,
 )
+from secretaria.services.clinic_region import load_clinic_region
 from secretaria.services.entitlements_client import get_entitlements
 from secretaria.services.flow_router import reactivation_gap_minutes
 from secretaria.services.payments import adjustment_suspension
@@ -60,6 +61,7 @@ from secretaria.workers.shared.price_change_opening import send_price_change_ope
 from secretaria.workers.shared.text import (
     _as_utc,
 )
+from secretaria.workers.shared.unit_gate import reply_blocked_no_usable_unit
 
 logger = get_logger(__name__)
 
@@ -213,6 +215,7 @@ async def _open_brain_message_conversation(
                     patient_ref=external_id,
                     channel=CHANNEL_BRAIN_MESSAGE,
                     sole_professional=await _load_sole_professional(session, tenant.id),
+                    region=await load_clinic_region(session, tenant),
                 )
         except IntegrityError:
             # A concurrent open (or a first inbound) raced us to the
@@ -694,6 +697,17 @@ async def process_brain_message_enter(
             entitlement_unknown=summary is None,
             conversation_id=str(decision.reply.conversation_id),
         )
+        return
+    # TASK-090 Adendo 1 §A: a plain entry opening is the secretária speaking - silent without a
+    # usable unit. An opening tied to an existing appointment (reminder link, price notice)
+    # still goes out: existing appointments are untouched by that rule.
+    if (
+        decision.appointment_id is None
+        and decision.price_change_reminder_id is None
+        and await reply_blocked_no_usable_unit(
+            tenant_uuid, conversation_id=decision.reply.conversation_id
+        )
+    ):
         return
     if not await _claim_event(decision.ledger_key):
         logger.info("brain_message_enter_already_claimed", tenant_id=tenant_id)

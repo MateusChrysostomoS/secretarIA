@@ -23,6 +23,7 @@ from secretaria.ai.graph import (
     run_agent,
     split_handback_intro,
 )
+from secretaria.ai.tools import INSURANCE_PAYMENT_QUESTION
 from secretaria.core.database import async_session_factory
 from secretaria.core.logging import get_logger
 from secretaria.models import (
@@ -40,17 +41,18 @@ from secretaria.services.appointment_edit_flow import apply_ai_edit
 from secretaria.services.booking_hold import refresh_code_hold
 from secretaria.services.booking_scope import (
     booking_topology,
+    everyone_of,
 )
 from secretaria.services.calendar import (
     CalendarService,
 )
 from secretaria.services.entitlements_client import get_entitlements
 from secretaria.services.flow_router import (
+    HUMAN_OFFER_STEPS,
     LABEL_CANCEL_APPT,
     LABEL_MANAGE_APPOINTMENT,
     LABEL_OTHER,
     LABEL_RESCHEDULE,
-    STEP_HUMAN_OFFER,
     FlowRouterResult,
     MenuBubble,
     ai_draft_v2_enabled,
@@ -102,6 +104,9 @@ from secretaria.services.pending_identity import (
     request_code,
     verify_code,
 )
+from secretaria.services.professional_units import (
+    has_usable_units as clinic_has_active_units,
+)
 from secretaria.services.sensitive_claim_guard import guard_reply
 from secretaria.services.service_catalog import (
     load_service_catalog,
@@ -122,7 +127,6 @@ from secretaria.services.turn_safety_net import (
     take_held_intro,
 )
 from secretaria.services.typing_indicator import clear_typing, mark_typing
-from secretaria.services.unit_booking import attach_unit_options
 from secretaria.workers.portal.attachments import (
     _handle_attachment_received,
 )
@@ -179,7 +183,6 @@ from secretaria.workers.shared.flow_runner import (
     _run_flow,
 )
 from secretaria.workers.shared.greeting import (
-    _flow_professionals,
     _flow_tenant_snapshot,
 )
 from secretaria.workers.shared.handover import (
@@ -197,6 +200,7 @@ from secretaria.workers.shared.llm_context import (
     _should_inject_appointment_context,
     _should_inject_post_consult_knowledge,
 )
+from secretaria.workers.shared.patient_roster import build_patient_roster, hidden_ids
 from secretaria.workers.shared.reminder_opening import (
     _send_reminder_opening,
 )
@@ -212,6 +216,7 @@ from secretaria.workers.shared.state_expiry import (
     _write_flow_state,
 )
 from secretaria.workers.shared.text import _render_greeting_template
+from secretaria.workers.shared.unit_gate import reply_blocked_no_usable_unit
 
 logger = get_logger(__name__)
 
@@ -272,6 +277,10 @@ async def _send_turn_fallback(reply: _ReplyContext, redis, *, cause: str) -> Non
                 entitlement_unknown=summary is None,
                 conversation_id=str(reply.conversation_id),
             )
+            return
+        # The same readiness gate as the main path: a deliberate silence (no usable unit)
+        # never becomes an apology.
+        if await reply_blocked_no_usable_unit(tenant.id, conversation_id=reply.conversation_id):
             return
         if not await fallback_allowed(redis, reply.conversation_id):
             logger.warning(
@@ -390,6 +399,12 @@ async def _send_bot_reply_inner(reply: _ReplyContext, redis=None) -> None:
     # roster AND the run_agent prompt-context source), the selected
     # professional's plain snapshot, and their resolved calendar.
     professional_rows: list[Professional] | None = None
+    # TASK-090: units are core, so the unit tools/prompt switch on from the clinic's own data
+    # (>= 1 USABLE unit: active + complete address, Adendo 1 §A).
+    has_active_units = False
+    # The reply gate's answer read in THIS turn's load (Adendo 1 §A + I1): True/False when the
+    # read succeeded, None when it failed or never ran - the gate then reads it itself.
+    clinic_ready: bool | None = None
     flow_professionals: list[SimpleNamespace] | None = None
     selected_professional: SimpleNamespace | None = None
     flow_calendar: CalendarService | None = None
@@ -464,6 +479,26 @@ async def _send_bot_reply_inner(reply: _ReplyContext, redis=None) -> None:
                     # resolves, not only when flows are on: the agent's
                     # professional context + sentinel hand-backs need it too.
                     professional_rows = await list_active_professionals(session, tenant.id)
+                    # Its own try: a failure here only leaves the unit tools off for this turn
+                    # (the legacy toolset) - it must never skip the catalog/insurance/unit-option
+                    # loads and the flow snapshot below. The savepoint keeps a database error
+                    # from aborting the surrounding transaction on Postgres.
+                    # The reply gate's two halves are only trusted together (review M3): the
+                    # unit half here, the "not every doctor hidden" half once the roster is
+                    # built below. A load that fails in between leaves `clinic_ready` None and
+                    # the gate reads both itself (fail open on ITS error, not on half an answer).
+                    units_ready: bool | None = None
+                    try:
+                        async with session.begin_nested():
+                            has_active_units = await clinic_has_active_units(session, tenant.id)
+                        units_ready = has_active_units
+                    except Exception as exc:
+                        has_active_units = False
+                        logger.warning(
+                            "worker_active_units_check_failed",
+                            error=type(exc).__name__,
+                            conversation_id=str(reply.conversation_id),
+                        )
                     # ONE read of the clinic's canonical catalog per turn. Each
                     # professional's entries are resolved through it HERE, so
                     # the pure router downstream sees the clinic's single
@@ -480,21 +515,38 @@ async def _send_bot_reply_inner(reply: _ReplyContext, redis=None) -> None:
                     # clinic's plans and which doctor takes which, so the pure
                     # router can mark doctors without a query of its own.
                     tenant_insurance = await load_tenant_insurance(session, tenant.id)
-                    flow_professionals = _flow_professionals(professional_rows, service_catalog)
-                    # TASK-083 spec §8: each doctor's offered units (one read for the roster),
-                    # so the pure router can ask "which unit?" and use that unit's hours.
-                    await attach_unit_options(
-                        session, tenant, professional_rows, flow_professionals
+                    # TASK-090 Adendo 1 (owner rulings on I1/C1): the roster lists only the
+                    # doctors a patient may be OFFERED for a new booking (not one whose unit
+                    # links are all unusable), while `everyone` - every active doctor - keeps
+                    # the topology (2+ active = multi-doctor paths) and the doctor of every
+                    # EXISTING consultation. TASK-083 spec §8: each doctor's units ride on it.
+                    flow_professionals = await build_patient_roster(
+                        session, tenant, professional_rows, service_catalog
                     )
+                    hidden = hidden_ids(flow_professionals)
+                    if units_ready is not None:
+                        # Every doctor hidden = nobody a patient could book with.
+                        clinic_ready = units_ready and (
+                            not professional_rows or bool(flow_professionals)
+                        )
                     selected_id = conversation.flow_selected_professional_id
+                    if selected_id is not None and selected_id in hidden and not (
+                        conversation.flow_managing_appointment_id is not None
+                        or conversation.flow_state == FlowState.EDIT_BOOKING
+                    ):
+                        # Review M2: a doctor hidden since he was picked for a NEW booking is
+                        # not resumed; the snapshot drops him, so the next write clears it.
+                        selected_id = None
                     if selected_id is not None:
                         selected_row = next(
                             (p for p in professional_rows if p.id == selected_id), None
                         )
-                        if selected_row is not None:
-                            selected_professional = next(
-                                p for p in flow_professionals if p.id == selected_id
-                            )
+                        # Offered doctors first; a hidden one only while his own EXISTING
+                        # consultation is being managed or edited (I1).
+                        selected_professional = next(
+                            (p for p in flow_professionals.everyone if p.id == selected_id), None
+                        )
+                        if selected_row is not None and selected_professional is not None:
                             # The selected doctor's own CalendarService, so the
                             # flow's day/slot/booking hit THEIR agenda.
                             try:
@@ -525,9 +577,7 @@ async def _send_bot_reply_inner(reply: _ReplyContext, redis=None) -> None:
                             flow_selected_type=conversation.flow_selected_type,
                             flow_selected_day=conversation.flow_selected_day,
                             flow_selected_slot=conversation.flow_selected_slot,
-                            flow_selected_professional_id=(
-                                conversation.flow_selected_professional_id
-                            ),
+                            flow_selected_professional_id=selected_id,
                             flow_selected_insurance=conversation.flow_selected_insurance,
                             flow_insurance_auto=getattr(conversation, "flow_insurance_auto", None),
                             flow_selected_unit_id=conversation.flow_selected_unit_id,
@@ -643,6 +693,14 @@ async def _send_bot_reply_inner(reply: _ReplyContext, redis=None) -> None:
             tenant_resolved=tenant is not None,
             conversation_id=str(reply.conversation_id),
         )
+        return
+
+    # TASK-090 Adendo 1 §A: a clinic with no usable unit (active + complete address) is not
+    # served - same silence as the gate above, own log event, fails OPEN on a check error
+    # (workers/shared/unit_gate.py).
+    if await reply_blocked_no_usable_unit(
+        tenant.id, conversation_id=reply.conversation_id, known_servable=clinic_ready
+    ):
         return
 
     # `/menu3` (test clinics only, workers/shared/debug_reset.py): the conversation
@@ -1283,7 +1341,7 @@ async def _send_bot_reply_inner(reply: _ReplyContext, redis=None) -> None:
     if (
         flow_snapshot is not None
         and flow_snapshot[0].flow_state in (FlowState.IDLE, FlowState.MENU, FlowState.LLM)
-        and flow_snapshot[0].flow_step != STEP_HUMAN_OFFER
+        and flow_snapshot[0].flow_step not in HUMAN_OFFER_STEPS
         and flow_snapshot[0].patient_id is not None
         and asks_to_edit_appointment(reply.inbound_body)
     ):
@@ -1334,7 +1392,9 @@ async def _send_bot_reply_inner(reply: _ReplyContext, redis=None) -> None:
         appt for appt in upcoming_appointments or [] if not appt.get("rebook_adjustment_id")
     ]
     if _should_inject_appointment_context(ai_appointments, flow_state, delegated_to_llm):
-        professional_names = {str(p.id): p.name for p in (flow_professionals or [])}
+        professional_names = {
+            str(p.id): p.name for p in everyone_of(flow_professionals or [])
+        }
         appointment_context_text = _appointment_context_text(
             ai_appointments,
             tenant_config.timezone if tenant_config is not None else None,
@@ -1344,14 +1404,16 @@ async def _send_bot_reply_inner(reply: _ReplyContext, redis=None) -> None:
             with_refs=ai_draft_v2_enabled(tenant),
             service_guides=tenant_config.service_guides if tenant_config is not None else None,
             # TASK-083 follow-up A1: unit names come from the roster snapshot (no query).
+            # TASK-090 Adendo 1 (I1): every active doctor - existing consultations of a
+            # doctor hidden from patients keep his name and unit names here.
             unit_names={
                 str(unit.id): str(unit.name)
-                for p in (flow_professionals or [])
+                for p in everyone_of(flow_professionals or [])
                 for unit in flow_units.offered_units(p)
             }
             or None,
             # TASK-085 A13: the owner's per-unit price, from the same snapshot (no query).
-            professionals=flow_professionals,
+            professionals=everyone_of(flow_professionals or []),
         )
 
     # Every LLM turn is either a deliberate escape hatch ("Outro") or a gap in
@@ -1393,7 +1455,11 @@ async def _send_bot_reply_inner(reply: _ReplyContext, redis=None) -> None:
             # The deterministic-flow hand-back tools ride along with the plugin
             # ones, gated on the flow existing at all (and, for
             # start_guided_booking, on the topology) - see _flow_handback_tools.
-            extra_tools=_flow_handback_tools(tenant, turn_topology, agent_tools_for(summary)),
+            extra_tools=_flow_handback_tools(
+                tenant,
+                turn_topology,
+                agent_tools_for(summary, has_active_units=has_active_units),
+            ),
             redis=redis,
             selected_professional=selected_professional,
             # The tenant's REAL shape decides which tools the agent is given at
@@ -1608,6 +1674,20 @@ async def _send_bot_reply_inner(reply: _ReplyContext, redis=None) -> None:
             patient_wa,
             redis=redis,
             waba_token=waba_token,
+        )
+        return
+    if reply_text == HUMAN_HANDOFF_SENTINEL_PREFIX + INSURANCE_PAYMENT_QUESTION:
+        # TASK-090 Adendo 1 (owner, 2026-11-24): no payment rule for the convênio - never a
+        # transfer behind the patient's back; the fixed card asks (✅ Sim / ❌ Não) and the
+        # tap carries the reason to the clinic's e-mail.
+        await _handle_offer_human_handoff(
+            reply,
+            tenant,
+            flow_snapshot,
+            patient_wa,
+            redis=redis,
+            waba_token=waba_token,
+            insurance_payment=True,
         )
         return
     if reply_text.startswith(HUMAN_HANDOFF_SENTINEL_PREFIX):

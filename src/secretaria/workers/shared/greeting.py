@@ -24,6 +24,7 @@ from secretaria.services.booking_details import service_price_text
 from secretaria.services.booking_scope import (
     sole_active_professional,
 )
+from secretaria.services.clinic_region import Region
 from secretaria.services.flow_router import (
     BTN_CHOOSE_PROFESSIONAL,
     LABEL_BOOK,
@@ -111,6 +112,17 @@ def _asks_name_at_first_contact(channel: str, patient: Patient, is_returning_pat
     """
     return policy_for(channel).asks_name_at_first_contact(patient, is_returning_patient)
 
+def greeting_place(tenant: Tenant, region: Region | None) -> tuple[str, str]:
+    """`(name, preposition)` of the place the greeting names: "Campinas"/"em",
+    "Minas Gerais"/"em", "Brasil"/"no". `region` comes from
+    `services/clinic_region.load_clinic_region`, loaded ONCE by the async caller that
+    already holds the tenant. None (not loaded, or nothing to say) falls back to the
+    legacy `tenant.address` city, or no place at all."""
+    if region is not None:
+        return region.name, region.preposition
+    return tenant_city(tenant.address), "em"
+
+
 def _first_contact_reply(
     *,
     tenant: Tenant,
@@ -120,6 +132,7 @@ def _first_contact_reply(
     inbound_body: str = "",
     ask_name: bool = False,
     sole_professional: tuple[str, str | None] | None = None,
+    region: Region | None = None,
 ) -> _ReplyContext:
     """The very first thing a clinic says to a patient who owes consent.
 
@@ -149,6 +162,7 @@ def _first_contact_reply(
     takes the consent notice's slot instead, and the notice follows the answer.
     `_send_bot_reply` moves the state to AWAITING_NAME when it asks.
     """
+    place, preposition = greeting_place(tenant, region)
     return _ReplyContext(
         channel=channel,
         conversation_id=conversation_id,
@@ -157,9 +171,10 @@ def _first_contact_reply(
         inbound_body=inbound_body,
         greeting_override=render_greeting(
             tenant.clinic_name,
-            _fit_clinic_description(tenant, sole_professional),
-            city=tenant_city(tenant.address),
+            _fit_clinic_description(tenant, sole_professional, region),
+            city=place,
             sole_professional=sole_professional,
+            preposition=preposition,
         ),
         greeting_buttons=[],
         send_consent_notice=not ask_name,
@@ -173,6 +188,7 @@ def _select_greeting(
     is_first_contact: bool,
     is_returning_patient: bool,
     sole_professional: tuple[str, str | None] | None = None,
+    region: Region | None = None,
 ) -> str | None:
     """Pick the greeting to send on first contact, or None.
 
@@ -195,12 +211,14 @@ def _select_greeting(
     # The name only ever rides on the Portal: WhatsApp asks for it right AFTER
     # this greeting (AWAITING_NAME), and its 1024-char budget is measured on
     # the no-name frame.
+    place, preposition = greeting_place(tenant, region)
     return render_greeting(
         tenant.clinic_name,
-        _fit_clinic_description(tenant, sole_professional),
+        _fit_clinic_description(tenant, sole_professional, region),
         patient_name=patient.name if policy_for(patient.channel).greets_by_name else None,
-        city=tenant_city(tenant.address),
+        city=place,
         sole_professional=sole_professional,
+        preposition=preposition,
     )
 
 
@@ -213,6 +231,8 @@ async def _load_sole_professional(
     professional's instead of repeating the clinic name already in the line
     above it. Any other roster (none, or two and more) returns None.
     """
+    # Every ACTIVE doctor (TASK-090 Adendo 1, C1): a hidden doctor still makes the clinic a
+    # multi-doctor one, so the greeting never presents it as one doctor's.
     professional = sole_active_professional(await list_active_professionals(session, tenant_id))
     if professional is None or not (professional.name or "").strip():
         return None
@@ -220,7 +240,9 @@ async def _load_sole_professional(
 
 
 def _fit_clinic_description(
-    tenant: Tenant, sole_professional: tuple[str, str | None] | None = None
+    tenant: Tenant,
+    sole_professional: tuple[str, str | None] | None = None,
+    region: Region | None = None,
 ) -> str:
     """The clinic's description, cut to what still fits for THIS clinic.
 
@@ -232,9 +254,8 @@ def _fit_clinic_description(
     truncate, so Meta 400s and the patient receives NOTHING.
     """
     description = (tenant.clinic_description or "").strip()
-    budget = clinic_description_budget(
-        tenant.clinic_name, tenant_city(tenant.address), sole_professional
-    )
+    place, preposition = greeting_place(tenant, region)
+    budget = clinic_description_budget(tenant.clinic_name, place, sole_professional, preposition)
     return truncate_plain(description, budget)
 
 def _greeting_buttons_for(
@@ -359,8 +380,8 @@ def _flow_tenant_snapshot(
     The "exactly one" rule comes from `services/booking_scope.py`, the same
     one `resolve_booking_owner_id` applies to the ROSTER this snapshot travels
     with (``route(professionals=...)``) — so whoever's catalog is rendered
-    here is provably whoever owns the booking that follows. `collect_insurance`
-    / `insurances` stay tenant-level on purpose: they are clinic-wide settings
+    here is provably whoever owns the booking that follows. The convênio
+    settings (`insurances`, mode) stay tenant-level on purpose: they are clinic-wide settings
     and the convênio step asks them regardless of topology (see
     `flow_router._insurance_step_skip_reason`).
 
@@ -394,7 +415,6 @@ def _flow_tenant_snapshot(
         appointment_types=appointment_types,
         appointment_duration_min=tenant.appointment_duration_min,
         business_hours=business_hours,
-        collect_insurance=tenant.collect_insurance,
         insurance_mode=getattr(tenant, "insurance_mode", None),
         insurances=tenant.insurances,
         insurance_plans=insurance.plans if insurance is not None else None,

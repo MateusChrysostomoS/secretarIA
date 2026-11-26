@@ -329,6 +329,7 @@ def effective_tools(
             "list_free_slots_for_professional",
             "request_human_handoff",
             "offer_human_handoff",
+            "get_insurance_payment_rule",
         }
         candidates = [*base_tools_for(topology, toolset_v2=toolset_v2), *extra_tools]
         kept = [
@@ -395,8 +396,9 @@ Um médico ocupado exige horários DAQUELE médico, sem perder o horário atual.
 Nunca afirme que salvou: somente Confirmar no cartão final aplica as mudanças.
 """
         if "list_units" in _turn_tool_names():
-            # Follow-up E1 (D5): only a clinic with units (the multi_unit plugin's
-            # `list_units`) - every other clinic's edit prompt stays byte for byte.
+            # Follow-up E1 (D5): only a clinic with an active unit (the multi_unit plugin's
+            # `list_units`, offered by registry.agent_tools_for(has_active_units=...)) -
+            # every other clinic's edit prompt stays byte for byte.
             prompt += (
                 "Outra unidade: proponha unit com o nome exato da unidade; o sistema confere "
                 "se o serviço é feito lá e, se não for, mostra as unidades certas.\n"

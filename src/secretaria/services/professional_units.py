@@ -19,6 +19,9 @@ and the HTTP shape.
 `available_unit_ids` = the professional's ACTIVE links to ACTIVE units of their own tenant. A
 deactivated unit keeps its links and per-unit hours (reactivating brings them back untouched) but
 stops being offered. No link at all = an agenda without a unit, exactly as before this feature.
+`available_unit_ids` is the STAFF view (hub, staff edits); what a PATIENT is offered is further
+narrowed to USABLE units (`unit_is_usable`: active + complete address, TASK-090 Adendo 1) by
+services/unit_booking.py::unit_options_for and the AI unit tools.
 
 The BUSY time is never per unit (the person is in one place at a time): that is
 services/agenda.py's job, not this module's.
@@ -35,6 +38,7 @@ from secretaria.models import Professional, Tenant
 from secretaria.models.professional_unit import ProfessionalUnit
 from secretaria.models.unit import Unit
 from secretaria.services import tenant_config as cfg
+from secretaria.services.unit_address import address_complete
 
 
 class UnitNotFound(Exception):
@@ -70,6 +74,89 @@ async def active_units(session: AsyncSession, tenant_id: UUID) -> list[Unit]:
         .order_by(Unit.name, Unit.id)
     )
     return list(rows)
+
+
+def unit_is_usable(unit: Unit) -> bool:
+    """A unit a PATIENT may see or book at (TASK-090 Adendo 1 §A): active AND with a complete
+    address (services/unit_address.address_complete - the same test a new unit must pass).
+
+    THE one predicate: every patient-facing reader (flow unit options, AI unit tools, greeting
+    region, the "secretária só atende com unidade completa" gate) goes through it - via
+    `usable_only` / `usable_units` / `has_usable_units` below or a module-attribute call - and
+    never copies it. The manager CRUD keeps showing every unit (with `address_incomplete`).
+    """
+    return bool(unit.is_active) and address_complete(unit)
+
+
+def usable_only(units: Iterable[Unit]) -> list[Unit]:
+    """`units` filtered by `unit_is_usable`, order preserved."""
+    return [unit for unit in units if unit_is_usable(unit)]
+
+
+async def usable_units(session: AsyncSession, tenant_id: UUID) -> list[Unit]:
+    """The tenant's USABLE units (active + complete address), ordered by name."""
+    return usable_only(await active_units(session, tenant_id))
+
+
+async def has_usable_units(session: AsyncSession, tenant_id: UUID) -> bool:
+    """Whether the tenant has at least one USABLE unit.
+
+    Both the switch for the AI unit tools/prompt (`registry.agent_tools_for(has_active_units=)`)
+    and the reply gate (workers/shared/unit_gate.py): a clinic without one is not served.
+    """
+    return any(unit_is_usable(unit) for unit in await active_units(session, tenant_id))
+
+
+async def patient_hidden_professional_ids(
+    session: AsyncSession, tenant_id: UUID, professional_ids: Iterable[UUID]
+) -> set[UUID]:
+    """Professionals a PATIENT must not be offered (TASK-090 Adendo 1, owner ruling on I1):
+    they HAVE unit links (any state) to units of this tenant, but none of them is an active
+    link to a USABLE unit (`unit_is_usable`). A professional with NO link at all is not hidden
+    (the legacy "agenda without a unit"). One query for the whole roster."""
+    ids = list(professional_ids)
+    if not ids:
+        return set()
+    rows = await session.execute(
+        select(ProfessionalUnit, Unit)
+        .join(Unit, Unit.id == ProfessionalUnit.unit_id)
+        .where(ProfessionalUnit.professional_id.in_(ids), Unit.tenant_id == tenant_id)
+    )
+    linked: set[UUID] = set()
+    usable: set[UUID] = set()
+    for link, unit in rows.all():
+        linked.add(link.professional_id)
+        if link.is_active and unit_is_usable(unit):
+            usable.add(link.professional_id)
+    return linked - usable
+
+
+async def patient_visible_professionals(
+    session: AsyncSession, tenant_id: UUID, professionals: Sequence[Professional]
+) -> list[Professional]:
+    """`professionals` minus the ones `patient_hidden_professional_ids` hides, order kept.
+
+    THE filter behind every roster a patient books from: `booking_scope.PatientRoster` (built by
+    workers/shared/patient_roster.build_patient_roster and plugins/multi_professional.
+    _active_professionals) offers these, while its `everyone` keeps every active doctor for the
+    topology and for EXISTING consultations (TASK-090 Adendo 1, I1/C1).
+    """
+    hidden = await patient_hidden_professional_ids(
+        session, tenant_id, [professional.id for professional in professionals]
+    )
+    return [professional for professional in professionals if professional.id not in hidden]
+
+
+async def clinic_servable(session: AsyncSession, tenant_id: UUID) -> bool:
+    """Whether the secretária may answer this clinic at all (Adendo 1 §A + I1): it has a
+    USABLE unit and, when it has active professionals, at least one a patient may book with
+    (a clinic whose every doctor is hidden would otherwise fall back to the clinic agenda)."""
+    if not await has_usable_units(session, tenant_id):
+        return False
+    roster = await cfg.list_active_professionals(session, tenant_id)
+    if not roster:
+        return True
+    return bool(await patient_visible_professionals(session, tenant_id, roster))
 
 
 async def links_by_unit(

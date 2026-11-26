@@ -230,8 +230,8 @@ def _service_refused(
         professional_id = _uuid(scope.get("professional_id"))
         if professional_id is not None:
             professional = fr._find_professional_by_id(professionals, professional_id)
-    elif which == "tenant" and len(professionals) == 1:
-        professional = professionals[0]
+    elif which == "tenant" and len(fr.everyone_of(professionals)) == 1:
+        professional = fr.everyone_of(professionals)[0]
     return fr.service_refused_names(tenant, professional, services, insurance)
 
 
@@ -395,6 +395,8 @@ def card_source(source: OptionSource) -> dict:
 
     A convênio card also says whether any of its plans carries a clinic note
     (`has_clinic_notes`, TASK-085 R U1b); every other card's pointer is unchanged.
+    TASK-090: the notes no longer exist, so that flag is always False (kept only for
+    deploy-window compatibility; follow-up: remove it with the BMF sheet).
     """
     total = len(source.items)
     pointer = {

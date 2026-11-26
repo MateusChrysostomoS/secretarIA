@@ -95,6 +95,8 @@ _HANDBACKS = {
     "set_booking_draft",
     "request_human_handoff",
     "offer_human_handoff",
+    # TASK-090 Adendo 1 (C6): read-only, rides with request_human_handoff.
+    "get_insurance_payment_rule",
     "save_patient_name",
 }
 
@@ -151,9 +153,11 @@ def _staging_tools(tools) -> list:
     return [t for t in tools if getattr(t, "name", None) in _STAGING]
 
 
-def _turn_tools(tenant, topology, *, addons=ALL_ADDONS):
+def _turn_tools(tenant, topology, *, addons=ALL_ADDONS, has_active_units=True):
     """What the worker hands the agent for one turn: `extra_tools` + the v2 flag."""
-    extra = _flow_handback_tools(tenant, topology, reg.agent_tools_for(addons))
+    extra = _flow_handback_tools(
+        tenant, topology, reg.agent_tools_for(addons, has_active_units=has_active_units)
+    )
     return graph.effective_tools(topology, extra, toolset_v2=_ai_toolset_v2(tenant))
 
 
@@ -226,7 +230,7 @@ def _todays_tool_names(topology):
 
 @pytest.mark.parametrize("topology", TOPOLOGIES)
 def test_switch_off_is_exactly_todays_composition(topology):
-    extras = reg.agent_tools_for(ALL_ADDONS)
+    extras = reg.agent_tools_for(ALL_ADDONS, has_active_units=True)
     assert graph.effective_tools(topology, extras) == [*graph.base_tools_for(topology), *extras]
     tools = _turn_tools(TENANT_OFF, topology)
     assert _names(tools) == _todays_tool_names(topology)
@@ -248,7 +252,7 @@ def test_switch_on_swaps_the_busy_readers_for_get_availability_and_the_blind_wri
 @pytest.mark.parametrize("topology", TOPOLOGIES)
 def test_switch_on_strips_a_withheld_or_legacy_tool_even_when_a_caller_passes_it(topology):
     extras = [
-        *reg.agent_tools_for(ALL_ADDONS),
+        *reg.agent_tools_for(ALL_ADDONS, has_active_units=True),
         ai_tools.create_event,
         ai_tools.cancel_event,
         ai_tools.check_availability,
@@ -265,8 +269,24 @@ def test_a_staging_name_passes_only_as_its_blind_variant(topology):
 
 
 def test_without_the_addons_the_v2_set_still_has_the_way_back_to_the_flow():
-    names = _names(_turn_tools(TENANT_ON, BOOKING_TOPOLOGY_SOLE, addons=_summary()))
+    names = _names(
+        _turn_tools(TENANT_ON, BOOKING_TOPOLOGY_SOLE, addons=_summary(), has_active_units=False)
+    )
     assert names == _SCOPE_FREE | _HANDBACKS | _V2_READS_AND_STAGING
+
+
+def test_unit_tools_follow_the_clinics_units_not_an_addon():
+    """TASK-090: `multi_unit` is always entitled; >= 1 active unit switches the unit tools on and a
+    clinic without units keeps exactly the toolset it had without the add-on."""
+    without_units = _names(reg.agent_tools_for(_summary(), has_active_units=False))
+    with_units = _names(reg.agent_tools_for(_summary(), has_active_units=True))
+    assert {"list_units", "create_event_at_unit"}.isdisjoint(without_units)
+    assert with_units - without_units == {"list_units", "create_event_at_unit"}
+    # No add-on in the brain-api summary and no units: still the exact legacy set.
+    for topology in TOPOLOGIES:
+        assert _names(
+            _turn_tools(TENANT_ON, topology, addons=_summary(), has_active_units=False)
+        ).isdisjoint({"list_units", "create_event_at_unit"})
 
 
 @pytest.mark.parametrize("topology", TOPOLOGIES)
@@ -285,7 +305,7 @@ def test_the_v2_tools_are_offered_only_through_the_switch(topology):
 
 
 def test_the_switch_yields_a_distinct_cached_agent_per_set():
-    extras = reg.agent_tools_for(ALL_ADDONS)
+    extras = reg.agent_tools_for(ALL_ADDONS, has_active_units=True)
     v1 = graph.build_agent(extras, BOOKING_TOPOLOGY_SOLE)
     v2 = graph.build_agent(extras, BOOKING_TOPOLOGY_SOLE, toolset_v2=True)
     assert v1 is not v2
@@ -314,7 +334,7 @@ async def test_run_agent_threads_the_switch_and_always_resets_it(monkeypatch):
             "oi",
             context={"conversation_id": str(uuid4())},
             tenant_config=_config(),
-            extra_tools=reg.agent_tools_for(ALL_ADDONS),
+            extra_tools=reg.agent_tools_for(ALL_ADDONS, has_active_units=True),
             booking_topology=BOOKING_TOPOLOGY_SOLE,
             toolset_v2=flag,
         )
@@ -422,7 +442,8 @@ def test_the_retired_list_is_exactly_the_two_older_handbacks():
 
 @pytest.mark.parametrize("topology", TOPOLOGIES)
 def test_switch_on_retires_them_even_when_a_caller_passes_them(topology):
-    extras = [*reg.agent_tools_for(ALL_ADDONS), ai_tools.start_guided_booking]
+    plugin_tools = reg.agent_tools_for(ALL_ADDONS, has_active_units=True)
+    extras = [*plugin_tools, ai_tools.start_guided_booking]
     assert _names(graph.effective_tools(topology, extras, toolset_v2=True)).isdisjoint(_RETIRED)
     # Switch off: today's set, both still there (the v1 prompt names them).
     assert _RETIRED <= _names(graph.effective_tools(topology, extras))

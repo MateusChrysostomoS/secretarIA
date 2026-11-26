@@ -176,6 +176,9 @@ async def _pick_professional(tenant_id: UUID, roster: list, name: str, service: 
                 "Mais de um profissional tem esse nome. Peça uma escolha inequívoca.",
             )
         return matches[0], await _professional_services(tenant_id, matches[0])
+    if not service and len(roster) == 1:
+        # A multi-doctor clinic where only one doctor may be booked (TASK-090 Adendo 1): her.
+        return roster[0], await _professional_services(tenant_id, roster[0])
     if not service:
         raise _Refusal(
             BLOCK_PROFESSIONAL_REQUIRED,
@@ -216,6 +219,9 @@ async def _resolve_target(tenant_id: UUID, professional: str, service: str) -> _
     if topology == BOOKING_TOPOLOGY_MULTI:
         chosen, catalog = await _pick_professional(tenant_id, roster, professional, service)
     elif topology == BOOKING_TOPOLOGY_SOLE:
+        if not roster:
+            # The clinic's only doctor is hidden from patients (TASK-090 Adendo 1).
+            raise _Refusal(BLOCK_NO_PROFESSIONALS, _TEMPORARY_ERROR)
         chosen = roster[0]
         if professional and chosen.name.strip().casefold() != professional.casefold():
             raise _Refusal(

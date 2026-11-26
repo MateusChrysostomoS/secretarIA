@@ -41,9 +41,10 @@ from secretaria.models import (
     Patient,
     Tenant,
 )
-from secretaria.services.greeting_template import render_greeting, tenant_city
+from secretaria.services.clinic_region import Region
+from secretaria.services.greeting_template import render_greeting
 from secretaria.workers.shared.context import _ReplyContext
-from secretaria.workers.shared.greeting import _fit_clinic_description
+from secretaria.workers.shared.greeting import _fit_clinic_description, greeting_place
 
 DEBUG_RESET_COMMAND = "/menu3"
 
@@ -125,7 +126,12 @@ async def reset_conversation_for_debug(
 
 
 def debug_reset_reply(
-    *, tenant: Tenant, conversation_id: UUID, patient_ref: str, channel: str
+    *,
+    tenant: Tenant,
+    conversation_id: UUID,
+    patient_ref: str,
+    channel: str,
+    region: Region | None = None,
 ) -> _ReplyContext:
     """The opening a first contact gets: the frame, button-free, then the LGPD notice.
 
@@ -134,6 +140,7 @@ def debug_reset_reply(
     VERIFIED Portal account's consent and skip the notice, which is exactly the
     screen the founder is resetting to see.
     """
+    place, preposition = greeting_place(tenant, region)
     return _ReplyContext(
         channel=channel,
         conversation_id=conversation_id,
@@ -141,7 +148,10 @@ def debug_reset_reply(
         patient_ref=patient_ref,
         inbound_body="",
         greeting_override=render_greeting(
-            tenant.clinic_name, _fit_clinic_description(tenant), city=tenant_city(tenant.address)
+            tenant.clinic_name,
+            _fit_clinic_description(tenant, None, region),
+            city=place,
+            preposition=preposition,
         ),
         greeting_buttons=[],
         debug_reset=True,

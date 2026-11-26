@@ -146,8 +146,8 @@ class Appointment(Base):
     professional_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("professionals.id", ondelete="SET NULL"), nullable=True, index=True
     )
-    # Which physical location this booking is at (multi_unit addon). NULL for
-    # tenants without the addon. SET NULL so deleting a unit keeps the record.
+    # Which physical location this booking is at. NULL for
+    # tenants without units. SET NULL so deleting a unit keeps the record.
     unit_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("units.id", ondelete="SET NULL"), nullable=True, index=True
     )

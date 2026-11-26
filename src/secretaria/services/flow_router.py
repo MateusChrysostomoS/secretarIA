@@ -97,6 +97,7 @@ from secretaria.services.booking_details import service_price_text
 from secretaria.services.booking_hold import BookingGate
 from secretaria.services.booking_scope import (
     canonical_service_name,
+    everyone_of,
     resolve_booking_owner_id,
 )
 from secretaria.services.calendar import (
@@ -239,7 +240,6 @@ INSURANCE_QUESTION = "Você vai usar convênio? Escolha uma opção:"
 # Structured reasons for `insurance_step_skipped` (see _insurance_step_skip_reason).
 # Count-only observability: which CONFIGURATION silenced the step, never which
 # plan a patient picked.
-INSURANCE_SKIP_DISABLED = "disabled"
 INSURANCE_SKIP_EMPTY_CATALOG = "empty_catalog"
 # TASK-008: the clinic has not chosen one of the three acceptance modes yet
 # (services/tenant_config.py::insurance_mode_configured). Same effective
@@ -388,6 +388,21 @@ HUMAN_OFFER_BOOKING_BODY = (
     "Quer que eu chame nosso atendente humano para te ajudar a marcar? "
     "(Pode demorar alguns minutos)"
 )
+# TASK-090 Adendo 1 (owner, 2026-11-24): a patient asks how payment works with a convênio
+# that has NO payment rule registered (or the rule could not be read). The secretária never
+# transfers behind the patient's back: this FIXED card says so and asks, with the same
+# ✅ Sim / ❌ Não, whether a person should help. Its own step carries the reason through the
+# tap, so "✅ Sim" hands over with `insurance_payment_question` (the clinic's e-mail says
+# why) instead of the generic `could_not_help`. Never names the convênio or any rule.
+STEP_HUMAN_OFFER_INSURANCE = "awaiting_human_offer_insurance"
+HUMAN_OFFER_INSURANCE_BODY = (
+    "Não tenho cadastrada a regra de pagamento desse convênio. Quer que eu chame alguém da "
+    "equipe para te explicar? (Pode demorar alguns minutos)"
+)
+# Every step that holds the Sim / Não card, and the hand-off reason "✅ Sim" carries from it
+# (absent = the generic `could_not_help`).
+HUMAN_OFFER_STEPS = frozenset({STEP_HUMAN_OFFER, STEP_HUMAN_OFFER_INSURANCE})
+HUMAN_OFFER_REASONS = {STEP_HUMAN_OFFER_INSURANCE: "insurance_payment_question"}
 # "❌ Não" keeps the conversation with the AI (owner, 2026-10-07): no menu, so a
 # patient who was mid-booking does not lose what they had chosen.
 HUMAN_OFFER_DECLINED_BODY = (
@@ -1056,6 +1071,10 @@ class FlowRouterResult:
     # (TASK-071 Plan 3 review fix, 2026-10-29): the worker keeps the clinic's calendar alert but
     # offers a person (Sim / Não) instead of handing over. Never persisted.
     deposit_waived_reason: str | None = None
+    # On an action="handover" result: the reason the clinic's hand-off e-mail gives
+    # (services/handoff_notification.py). None = the generic `could_not_help`. Set by the
+    # Sim / Não card from its step (HUMAN_OFFER_REASONS). Never persisted.
+    handover_reason: str | None = None
     # WHICH static config the professional is missing, on an
     # action="professional_config_incomplete" result and nowhere else. WHO it
     # is missing rides on `flow_selected_professional_id` above rather than in
@@ -1093,7 +1112,7 @@ class FlowRouterResult:
     # can re-open the picker) and then sends the Pix; if that send fails it voids the charge.
     # Mutually exclusive with `appointment` and `booking_hold`.
     # {"deposit_id", "amount_cents", "copy_paste", "expires_at", "start_at", "end_at",
-    #  "service", "minutes", "payment_note"}
+    #  "service", "minutes"}
     deposit_request: dict | None = None
     # When set, the matching appointment row should be moved (RESCHEDULED):
     # {"google_event_id", "start_at", "end_at"}.
@@ -1285,7 +1304,7 @@ def flows_enabled(tenant: Tenant) -> bool:
     The flow is not a per-clinic choice: it is the same flow for everyone, and it
     already adapts itself to the clinic's own DATA (2+ active professionals swap the
     menu for the multi-doctor trio and insert the choose-a-doctor step — see
-    `menu_buttons_for` / `_is_multi_professional`; `collect_insurance` inserts the
+    `menu_buttons_for` / `_is_multi_professional`; having convênios inserts the
     convênio step; the services catalog drives the options list). So "which flow"
     is derived, never configured, and the gate had nothing left to gate.
 
@@ -1327,8 +1346,12 @@ def menu_buttons(tenant: Tenant) -> list[str]:
 
 
 def _is_multi_professional(professionals: list | None) -> bool:
-    """2+ active professionals -> the multi-doctor menu replaces the default."""
-    return len(professionals or []) > 1
+    """2+ active professionals -> the multi-doctor menu replaces the default.
+
+    Counted on EVERY active doctor (`booking_scope.everyone_of`): a doctor hidden from patients
+    (TASK-090 Adendo 1) keeps the clinic on the multi-doctor paths - each doctor's own agenda,
+    services and hours - never the clinic's (owner ruling on C1)."""
+    return len(everyone_of(professionals)) > 1
 
 
 def menu_buttons_for(tenant: Tenant, multi_professional: bool) -> list[str]:
@@ -2307,12 +2330,15 @@ def _enter_other(conversation: Conversation | None = None) -> FlowRouterResult:
 
 
 def enter_human_offer(
-    conversation: Conversation | None = None, *, body: str = HUMAN_OFFER_BODY
+    conversation: Conversation | None = None,
+    *,
+    body: str = HUMAN_OFFER_BODY,
+    step: str = STEP_HUMAN_OFFER,
 ) -> FlowRouterResult:
     """The fixed "quer que eu chame nosso atendente humano?" card (TASK-038).
 
-    Waits in LLM mode on STEP_HUMAN_OFFER, keeping the booking answers like any
-    delegation; `_handle_human_offer` reads the tap. `body` is the question
+    Waits in LLM mode on `step` (one of HUMAN_OFFER_STEPS), keeping the booking answers like
+    any delegation; `_handle_human_offer` reads the tap. `body` is the question
     (`HUMAN_OFFER_BOOKING_BODY` in the deposit flow); the mechanics never change.
     """
     result = (
@@ -2322,18 +2348,28 @@ def enter_human_offer(
     )
     result.action = "reply"
     result.bubbles = [MenuBubble(body=body, labels=[LABEL_YES, LABEL_NO])]
-    result.flow_step = STEP_HUMAN_OFFER
+    result.flow_step = step
     return result
+
+
+def enter_insurance_payment_offer(conversation: Conversation | None = None) -> FlowRouterResult:
+    """No payment rule for the convênio asked about (TASK-090 Adendo 1, owner 2026-11-24): the
+    fixed sentence + the ✅ Sim / ❌ Não card on STEP_HUMAN_OFFER_INSURANCE."""
+    return enter_human_offer(
+        conversation, body=HUMAN_OFFER_INSURANCE_BODY, step=STEP_HUMAN_OFFER_INSURANCE
+    )
 
 
 def _handle_human_offer(
     conversation: Conversation, tenant: Tenant, body: str, professionals: list | None
 ) -> FlowRouterResult:
-    """The patient's answer to `enter_human_offer`'s card."""
+    """The patient's answer to `enter_human_offer`'s card (any of HUMAN_OFFER_STEPS)."""
+    reason = HUMAN_OFFER_REASONS.get(getattr(conversation, "flow_step", None))
     if _label_match(body, LABEL_YES):
         logger.info(
             "human_offer_answered",
             accepted=True,
+            reason=reason or "could_not_help",
             conversation_id=str(getattr(conversation, "id", None)),
         )
         # action="handover": workers/shared/flow_runner.py commits the human state and
@@ -2343,6 +2379,7 @@ def _handle_human_offer(
         # (workers/shared/handover.py) - a bare result would erase whom to e-mail.
         result = _delegate_llm_keeping_draft(conversation)
         result.action = "handover"
+        result.handover_reason = reason
         result.bubbles = [TextBubble(body=SCOPED_HELP_ESCALATE_MESSAGE)]
         return result
     if _label_match(body, LABEL_NO):
@@ -2438,7 +2475,7 @@ async def _route(
 
     # The open "quer que eu chame nosso atendente humano?" card (TASK-038). Checked
     # before the sticky LLM branch below, which would otherwise swallow the tap.
-    if state == FlowState.LLM and conversation.flow_step == STEP_HUMAN_OFFER:
+    if state == FlowState.LLM and conversation.flow_step in HUMAN_OFFER_STEPS:
         return _handle_human_offer(conversation, tenant, inbound_body, professionals)
 
     # Once in full LLM mode, stay there until a /menu reset (or the agent's
@@ -2889,12 +2926,19 @@ def _professional_id_from_body(body: str | None) -> UUID | None:
 
 
 def _find_professional_by_id(professionals: list | None, professional_id) -> Any | None:
+    """A doctor the patient may be OFFERED (a new booking's selection, a tap, a draft)."""
     if professional_id is None:
         return None
     for professional in professionals or []:
         if professional.id == professional_id:
             return professional
     return None
+
+
+def _find_owner_by_id(professionals: list | None, professional_id) -> Any | None:
+    """The doctor of an EXISTING consultation: any active doctor, hidden ones included
+    (TASK-090 Adendo 1, owner ruling on I1 - hiding only affects NEW bookings)."""
+    return _find_professional_by_id(everyone_of(professionals), professional_id)
 
 
 def _match_professional(professionals: list, body: str | None) -> Any | None:
@@ -3739,10 +3783,10 @@ def insurance_plan_names(tenant: Tenant) -> list[str]:
 def _insurance_step_skip_reason(tenant: Tenant) -> str | None:
     """Why the convênio step must be skipped for this tenant, or None to ask.
 
-    `collect_insurance` and the clinic's plans are CLINIC-wide settings (the
+    The clinic's acceptance mode and plans are CLINIC-wide settings (the
     hub edits them once for the whole clinic) and the answer never filters
     doctors, services or slots. So the step depends on the clinic's
-    configuration and NOTHING else: zero, one and many active professionals all
+    convênio configuration and NOTHING else: zero, one and many active professionals all
     get the same question - since TASK-088 right before the days, once service,
     doctor and unit are known (`_insurance_gate`).
 
@@ -3751,9 +3795,13 @@ def _insurance_step_skip_reason(tenant: Tenant) -> str | None:
     with a single professional — the common case — could switch the toggle on
     in the hub and never be asked, so the saved setting produced no behaviour
     and the booking lost operational information the clinic had asked for.
+
+    TASK-090 owner decision: the question is IMMUTABLE. It is asked whenever
+    the clinic has at least one convênio (and has chosen an acceptance mode)
+    and never when it has none. The old `tenants.collect_insurance` toggle no
+    longer influences anything: the column stays for compatibility, nothing
+    reads it.
     """
-    if not bool(getattr(tenant, "collect_insurance", False)):
-        return INSURANCE_SKIP_DISABLED
     if getattr(tenant, "insurance_mode", None) is None:
         return INSURANCE_SKIP_NO_MODE
     if not _tenant_insurances(tenant):
@@ -3852,14 +3900,15 @@ INSURANCE_PINNED_ROWS: tuple[tuple[str, str, str | None], ...] = (
 
 
 def insurance_plans_have_clinic_notes(plans: list) -> bool:
-    """Does any of these plans carry the clinic's own note (TASK-085 R U1b)?
+    """Does any of these plans carry the clinic's own payment note (TASK-085 R U1b)?
 
-    The clinic's "Outro" plans and, in `independent` mode, a doctor's own "Outro" carry
-    `note`; catalog plans and legacy names never do. One non-blank note is enough for the
-    Portal to offer "Ver regras de pagamento dos convênios" (owner, 2026-11-18) - the same
-    plans `patient_insurance_overview` then lists.
+    Always False since TASK-090 (owner, 2026-11-22): the "Outro" convênio no longer has a
+    payment text, so the Portal never offers "Ver regras de pagamento dos convênios" - a
+    patient who asks how payment works is handed off to a person instead. Kept (with the
+    `has_clinic_notes` pointer it feeds) so the card's wire shape does not change for the
+    Portal; `plans` is ignored, so even a snapshot taken before the deploy says False.
     """
-    return any(isinstance(plan.get("note"), str) and plan["note"].strip() for plan in plans)
+    return False
 
 
 def portal_insurance_rows(plans: list) -> list[tuple[str, str, str | None]]:
@@ -4218,7 +4267,7 @@ def _insurance_gate(
 ) -> _InsuranceGate:
     """The convênio point of the booking: after the unit, before the days (TASK-088 R5/R8).
 
-    Only where the clinic collects it (`_insurance_step_skip_reason`). The combination is
+    Only where the clinic has convênios (`_insurance_step_skip_reason`). The combination is
     (service, doctor, unit); the plans it accepts are `plans_accepted_for`.
 
     * no answer yet: some accepted -> the filtered list; NONE accepted -> offer other units
@@ -5787,7 +5836,7 @@ def _booking_professional(conversation: Conversation, professionals: list | None
     selected = _find_professional_by_id(professionals, _selected_professional_id(conversation))
     if selected is not None:
         return selected
-    rows = professionals or []
+    rows = everyone_of(professionals)
     return rows[0] if len(rows) == 1 else None
 
 
@@ -6051,9 +6100,9 @@ def _appointment_owner_and_unit_id(
     try:
         unit_id = UUID(str(appt["unit_id"])) if appt.get("unit_id") else None
         if owner_id:
-            owner = _find_professional_by_id(professionals, UUID(str(owner_id)))
+            owner = _find_owner_by_id(professionals, UUID(str(owner_id)))
         else:
-            rows = professionals or []
+            rows = everyone_of(professionals)
             owner = rows[0] if len(rows) == 1 else None
     except (TypeError, ValueError):
         return None
@@ -6868,8 +6917,8 @@ async def enter_guided_booking(
     point that asks them, in that order, for every path that reaches the days.
 
     **It deliberately does NOT skip an unanswered convênio.** The literal
-    ask was "open the day list", but `collect_insurance` is a clinic-wide
-    setting the hub saved on purpose, and `_insurance_step_skip_reason` is the
+    ask was "open the day list", but the convênio question is a clinic-wide
+    rule (asked whenever the clinic has convênios), and `_insurance_step_skip_reason` is the
     single place that decides whether it applies (`_insurance_gate` asks it). Skipping it here
     would mean a booking loses information the clinic asked for on every OTHER booking,
     purely because this patient happened to arrive through the LLM - an
@@ -7174,9 +7223,11 @@ async def _booking_insurance_refusal(
         "onde": f" na unidade {unit_name}" if unit_name else "",
     }
     if _insurance_step_skip_reason(tenant) is not None:
-        # TASK-086 T9 review (minor 6): the clinic no longer asks the convênio, so its list is
-        # never reopened - the "não atende este convênio" step instead (another doctor / another
-        # service; no "Trocar convênio" with the step off), with the same refusal sentence.
+        # TASK-086 T9 review (minor 6): the step is skipped only when the clinic has no
+        # acceptance mode (NO_MODE) or no convênios (EMPTY_CATALOG) - since TASK-090 the old
+        # toggle cannot silence it. The list is then never reopened: the "não atende este
+        # convênio" step opens instead (another doctor / another service; no "Trocar convênio"),
+        # with the same refusal sentence.
         result = _enter_plan_refused(
             conversation,
             tenant,
@@ -7502,7 +7553,6 @@ async def _handle_confirmation(
             )
         if decision.outcome == "awaiting_payment" and decision.payment is not None:
             payment = decision.payment
-            plan = _selected_plan(tenant, insurance)
             return FlowRouterResult(
                 action="reply",
                 flow_state=FlowState.AWAITING_DEPOSIT,
@@ -7527,9 +7577,6 @@ async def _handle_confirmation(
                     "end_at": payment.end_at,
                     "service": payment.service,
                     "minutes": payment.minutes,
-                    "payment_note": (
-                        str(plan["note"]).strip() if plan and plan.get("note") else None
-                    ),
                 },
             )
         if decision.outcome == "commit" and decision.deposit_waived_reason is not None:
@@ -7636,12 +7683,9 @@ async def _handle_confirmation(
     # (stored above as `google_event_link`, and the right link for the clinic)
     # would open a permission error for the patient. See
     # services/calendar.py::build_patient_calendar_link.
-    # TASK-008 §4.3: a custom "Outro" convênio carries its own payment
-    # explanation, shown here right after the patient chose it. Catalog plans
-    # have no patient-facing note (`mechanism`/`note` there are internal
-    # metadata, never product copy - see models/insurance.py).
-    plan = _selected_plan(tenant, insurance)
-    payment_note = str(plan["note"]).strip() if plan and plan.get("note") else None
+    # TASK-090 (owner, 2026-11-22): no convênio payment text here any more - the "Outro"
+    # note is gone, and a patient who asks how payment works is handed off to a person
+    # (ai/tools.py `insurance_payment_question`).
     # TASK-083 follow-up (owner, 2026-11-13): the event the patient adds from the link carries
     # the same details - service, doctor, date, unit and address - in its "Detalhes".
     link_details = build_patient_link_details(
@@ -7666,7 +7710,6 @@ async def _handle_confirmation(
             tz=calendar.tzinfo,
             location=getattr(unit, "location", None) if unit is not None else None,
         )
-        + (f"\n\n💳 Sobre o pagamento do convênio:\n{payment_note}" if payment_note else "")
     )
     return FlowRouterResult(
         action="reply",
@@ -8513,7 +8556,7 @@ def _rebook_event_texts(
     owner = unit = None
     try:
         if appt.get("professional_id"):
-            owner = _find_professional_by_id(professionals, UUID(str(appt["professional_id"])))
+            owner = _find_owner_by_id(professionals, UUID(str(appt["professional_id"])))
         if appt.get("unit_id"):
             unit = flow_units.find_unit(owner, UUID(str(appt["unit_id"])))
     except (TypeError, ValueError):

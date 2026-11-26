@@ -1,5 +1,7 @@
 # CHECKPOINT — Fluxos determinísticos incondicionais (fim do gate `initial_flows.enabled`)
 
+> **Nota TASK-090 (2026-11-22, local):** `collect_insurance` não insere mais a etapa de convênio por conta própria — a etapa aparece sempre que a clínica tem convênio cadastrado e modo escolhido. Ver [CHECKPOINT_contexto_ajustes_finais.md](CHECKPOINT_contexto_ajustes_finais.md).
+
 Built 2026-08-13. Fecha a última porta pela qual uma clínica caía inteira na LLM sem
 ninguém ter escolhido isso. Continuação direta de `CHECKPOINT_fixed_greeting_buttons.md`
 e `CHECKPOINT_trio_gerenciar_scoped_help.md` (mesmo princípio de produto: **a LLM é o
