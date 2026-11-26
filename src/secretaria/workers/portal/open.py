@@ -278,7 +278,19 @@ async def process_brain_message_open(
                 external_id=external_id,
             )
             return
-        await _send_bot_reply(reply, redis=ctx.get("redis"))
+        # TASK-093 (review H1): an opening is proactive - the visitor wrote nothing. An
+        # unpaid (or unreadable) clinic stays silent HERE, before `_send_bot_reply`, whose
+        # entitlement gate answers a patient who WROTE with the neutral payment notice.
+        summary = await get_entitlements(tenant_uuid, ctx.get("redis"))
+        if summary is None or not (summary.active and summary.secretaria_enabled):
+            logger.warning(
+                "bot_reply_suppressed_unentitled",
+                tenant_id=tenant_id,
+                entitlement_unknown=summary is None,
+                source="portal_open",
+            )
+        else:
+            await _send_bot_reply(reply, redis=ctx.get("redis"))
 
     if await _portal_conversation_has(
         tenant_uuid, external_id, direction=MessageDirection.OUTBOUND

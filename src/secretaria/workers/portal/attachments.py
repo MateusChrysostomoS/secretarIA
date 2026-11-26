@@ -9,6 +9,7 @@ from secretaria.services.entitlements_client import get_entitlements
 from secretaria.workers.shared.context import (
     _ReplyContext,
 )
+from secretaria.workers.shared.payment_notice import send_payment_notice_once
 from secretaria.workers.shared.sender import (
     _reply_sender,
     _send_simple_text,
@@ -43,6 +44,10 @@ async def _handle_attachment_received(reply: _ReplyContext, redis=None) -> None:
             "bot_reply_suppressed_unentitled",
             tenant_id=str(tenant.id),
             status=summary.status if summary is not None else None,
+        )
+        # TASK-093: o anexo é mensagem do paciente - recebe só o aviso neutro (1 por dia).
+        await send_payment_notice_once(
+            reply, tenant=tenant, waba_token=None, summary=summary, redis=redis
         )
         return
     if await reply_blocked_no_usable_unit(tenant.id, conversation_id=reply.conversation_id):
