@@ -22,7 +22,9 @@ PUT     /tenants/me/professionals/{id}/insurance-plans/{plan_id}/active
 "Outro" ON/OFF (TASK-090 Adendo 1, contract C7, owner 2026-11-24): a typed-by-hand convênio can
 be switched OFF without losing it (row, name and payment rule stay); it then reaches no patient
 and no AI tool, and every read here returns it with `is_active=false`. Same role gate as creating
-an "Outro" (any staff role); switching ON is held to the convênio cap (only ACTIVE lines count),
+an "Outro" (junção 090+091, the more restrictive rule: the clinic's by the manager only, a
+doctor's by the manager or that doctor himself - TASK-091 T4); switching ON is held to the
+convênio cap (only ACTIVE lines count),
 switching OFF never is. A catalog line answers 422 `not_custom_plan` (OFF deletes a catalog line).
 
 Payment rule (TASK-090 Adendo 1, contract C6): every line (catalog or "Outro", clinic or doctor)
@@ -195,7 +197,7 @@ def _payment_note(raw: str | None) -> str | None:
 
 def _ensure_manager_writes_note(request: Request, note: str | None) -> None:
     """A custom POST that carries a rule: only a clinic manager writes a payment rule (C6).
-    Without a rule the POST keeps its old, role-blind gate."""
+    Without a rule the POST keeps the route's own gate (the manager only, TASK-091 T4)."""
     if note is None:
         return
     claim: SubscriptionClaim | None = getattr(request.state, "staff_subscription_claim", None)
@@ -480,6 +482,7 @@ async def put_tenant_insurance_plan_payment_note(
 @router.put(
     "/insurance-plans/{plan_id}/active",
     response_model=TenantInsurancePlanRead,
+    dependencies=[Depends(manager_only)],
 )
 async def put_tenant_insurance_plan_active(
     plan_id: str,
@@ -831,6 +834,7 @@ async def put_professional_insurance_plan_payment_note(
 @router.put(
     "/professionals/{professional_id}/insurance-plans/{plan_id}/active",
     response_model=TenantInsurancePlanRead,
+    dependencies=[Depends(professional_writer)],
 )
 async def put_professional_insurance_plan_active(
     professional_id: str,

@@ -159,7 +159,7 @@ async def hub(db, monkeypatch):
             role=claim["role"],
             is_owner=claim["is_owner"],
             is_manager=claim["is_manager"],
-            professional_id=None,
+            professional_id=claim.get("professional_id"),
         )
 
     app.dependency_overrides[get_session] = _session
@@ -269,17 +269,19 @@ async def test_switching_to_the_value_it_has_is_a_200_no_op(client, hub):
     ("role", "is_owner", "is_manager"),
     [("doctor", False, False), ("secretary", False, False)],
 )
-async def test_any_staff_role_that_may_create_an_outro_may_switch_it(
+async def test_a_non_manager_neither_creates_nor_switches_the_clinics_outro(
     client, hub, role, is_owner, is_manager
 ):
-    """Same gate as `POST /insurance-plans/custom` (role-blind `get_current_tenant`)."""
+    """Same gate as `POST /insurance-plans/custom`, which TASK-091 T4 closed to the manager
+    (junção 090+091: the more restrictive rule wins). Nothing changes."""
     hub.claim.update(role=role, is_owner=is_owner, is_manager=is_manager)
     created = await client.post(
         "/tenants/me/insurance-plans/custom", json={"custom_name": "Saúde Caixa"}, headers=HEADERS
     )
-    assert created.status_code == 201
+    assert created.status_code == 403
     switched = await client.put(_url(hub.geap.id), json={"is_active": False}, headers=HEADERS)
-    assert switched.status_code == 200
+    assert switched.status_code == 403
+    assert (await _row(hub.db, TenantInsurancePlan, hub.geap.id)).is_active is True
 
 
 async def test_without_a_staff_token_the_switch_is_refused(client, hub):
@@ -471,7 +473,14 @@ async def test_doctor_route_role_gate_is_the_custom_posts(client, hub):
         )
         session.add(own)
         await session.commit()
+    # Junção 090+091 (the more restrictive rule): the manager or that doctor himself (TASK-091
+    # T4) - never a secretary.
     w.claim.update(role="secretary", is_owner=False, is_manager=False)
+    resp = await client.put(
+        _doctor_url(doctor.id, own.id), json={"is_active": False}, headers=HEADERS
+    )
+    assert resp.status_code == 403
+    w.claim.update(role="doctor", is_owner=False, is_manager=False, professional_id=doctor.id)
     resp = await client.put(
         _doctor_url(doctor.id, own.id), json={"is_active": False}, headers=HEADERS
     )

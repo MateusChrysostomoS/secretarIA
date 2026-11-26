@@ -643,7 +643,12 @@ async def post_professional_matrix_copy(
     return await _copy(session, tenant, professional, body)
 
 
-@router.put("/professionals/{professional_id}/insurance-acceptance/plan-order")
+@router.put(
+    "/professionals/{professional_id}/insurance-acceptance/plan-order",
+    # Junção 090+091: the clinic's ONE convênio order is clinic data - the manager only, even
+    # through a doctor's own matrix (TASK-091 T4: a self-only doctor writes nothing of it).
+    dependencies=[Depends(manager_only)],
+)
 async def put_professional_plan_order(
     professional_id: str,
     body: PlanOrderUpdate,

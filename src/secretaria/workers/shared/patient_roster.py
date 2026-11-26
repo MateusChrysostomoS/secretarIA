@@ -4,7 +4,8 @@ One builder for every patient path that hands `route()` / the draft resolver a r
 
 * the LIST holds the doctors a patient may be OFFERED for a NEW booking - every active doctor
   minus the ones `services/professional_units.patient_hidden_professional_ids` hides (unit links,
-  none usable); their units are the usable ones only;
+  none usable) and minus a flagged invitee not ready to book (TASK-091); their units are the
+  usable ones only;
 * `everyone` (`services/booking_scope.PatientRoster`) holds every active doctor, hidden ones
   included, with ALL their active units: it decides the topology (a clinic with 2+ active
   doctors stays multi-doctor even with one visible) and resolves the doctor of an EXISTING
@@ -42,6 +43,10 @@ async def build_patient_roster(
             [snapshot for snapshot in everyone if snapshot.id in hidden],
             usable_only=False,
         )
+    # TASK-091 (junção 090+091): a flagged invitee who is not ready to book is never OFFERED
+    # either. He stays in `everyone` (units attached above), so his existing consultations
+    # still resolve, and `booking_scope.topology_roster` leaves him out of the shape.
+    offered = [snapshot for snapshot in offered if not getattr(snapshot, "booking_blocked", False)]
     return PatientRoster(offered, everyone=everyone)
 
 

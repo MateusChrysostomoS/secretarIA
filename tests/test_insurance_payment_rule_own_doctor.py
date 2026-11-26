@@ -262,8 +262,9 @@ async def test_custom_post_with_a_rule_by_anyone_else_is_403(client, world, who)
         headers=HEADERS,
     )
     assert with_rule.status_code == 403
-    # Without a rule the POST keeps its old, role-blind gate.
+    # Without a rule a doctor's "Outro" is still his or the manager's (TASK-091 T4; junção
+    # 090+091: the more restrictive rule wins).
     plain = await client.post(
         _custom_url(w.ana.id), json={"custom_name": "Plano sem regra"}, headers=HEADERS
     )
-    assert plain.status_code == 201
+    assert plain.status_code == 403

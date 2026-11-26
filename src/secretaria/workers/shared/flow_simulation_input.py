@@ -79,6 +79,7 @@ async def load_simulation_inputs(
     # TASK-090 Adendo 1: the simulation and the Portal options OFFER only the doctors a patient
     # may book with; every active doctor still decides the topology (owner rulings, I1/C1).
     hidden = await patient_hidden_professional_ids(session, tenant.id, [p.id for p in rows])
+    blocked = {p.id for p in rows if getattr(p, "booking_blocked", False)}
     catalog = await load_service_catalog(session, tenant.id)
     insurance = await load_tenant_insurance(session, tenant.id)
 
@@ -103,11 +104,15 @@ async def load_simulation_inputs(
                 else p.appointment_types
             ),
             business_hours=p.business_hours,  # verbatim: NULL means "inherits the clinic's hours"
+            # TASK-091: the column copies lose the readiness mark `list_active_professionals` set.
+            booking_blocked=p.id in blocked,
         )
         for p in professional_views
     ]
+    # Junção 090+091: neither a hidden doctor nor an unready invitee is OFFERED; the shape is
+    # `booking_scope.topology_roster` (the hidden doctor counts, the invitee does not).
     flow_professionals = PatientRoster(
-        [p for p in everyone if p.id not in hidden], everyone=everyone
+        [p for p in everyone if p.id not in hidden and not p.booking_blocked], everyone=everyone
     )
     by_id = {str(p.id): p for p in professional_views}
 

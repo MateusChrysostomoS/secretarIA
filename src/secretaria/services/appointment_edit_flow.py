@@ -471,11 +471,11 @@ async def _inside_buffer(
     if not professionals:
         return False
     owner_id = _uuid(professional_id)
-    everyone = fr.everyone_of(professionals)
+    shape = fr.topology_roster(professionals)
     doctor = (
         fr._find_owner_by_id(professionals, owner_id)
         if owner_id is not None
-        else (everyone[0] if len(everyone) == 1 else None)
+        else (shape[0] if len(shape) == 1 else None)
     )
     return await fr._inside_buffer(
         calendar,

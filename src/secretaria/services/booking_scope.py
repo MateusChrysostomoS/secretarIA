@@ -91,6 +91,18 @@ def everyone_of(professionals: Sequence[Any] | None) -> list:
     return items
 
 
+def topology_roster(professionals: Sequence[Any] | None) -> list:
+    """The doctors that make the clinic's SHAPE (one doctor vs several) - one rule, everywhere.
+
+    Every active doctor (`everyone_of`): a doctor hidden from patients because none of his units
+    is usable still counts (TASK-090 Adendo 1, owner ruling on C1). Minus a flagged invitee who is
+    not ready to book (`booking_blocked`, TASK-091): "one ready doctor + one incomplete invitee"
+    is still a single-doctor clinic. Looking a doctor up by id (an existing consultation) keeps
+    using `everyone_of`, which still holds that invitee (junção 090+091).
+    """
+    return [p for p in everyone_of(professionals) if not getattr(p, "booking_blocked", False)]
+
+
 BOOKING_TOPOLOGY_UNKNOWN = "unknown"
 BOOKING_TOPOLOGY_NONE = "none"
 BOOKING_TOPOLOGY_SOLE = "sole"
@@ -107,7 +119,7 @@ def booking_topology(professionals: Sequence[Any] | None) -> str:
     """
     if professionals is None:
         return BOOKING_TOPOLOGY_UNKNOWN
-    count = len(everyone_of(professionals))  # hidden doctors count (TASK-090 Adendo 1, C1)
+    count = len(topology_roster(professionals))  # hidden doctors count, unready invitees not
     if count == 0:
         return BOOKING_TOPOLOGY_NONE
     if count == 1:
@@ -125,15 +137,11 @@ def sole_active_professional(professionals: Sequence[Any] | None) -> Any | None:
     (`resolve_booking_owner_id` below) can never be resolved from different
     professionals.
 
-    Counted on EVERY active doctor (`everyone_of`): a doctor hidden from patients still makes
-    the clinic a multi-doctor one (TASK-090 Adendo 1, owner ruling on C1).
+    Counted on `topology_roster`: every active doctor - a doctor hidden from patients still
+    makes the clinic a multi-doctor one (TASK-090 Adendo 1, owner ruling on C1) - minus a
+    flagged invitee who is not ready to book (TASK-091).
     """
-    # TASK-091: a flagged invitee who is not ready to book is not part of the clinic the
-    # patient sees, so "one ready doctor + one incomplete invitee" is still a single-doctor
-    # clinic; a doctor hidden for his units still counts (TASK-090 Adendo 1, C1).
-    roster = [
-        p for p in everyone_of(professionals) if not getattr(p, "booking_blocked", False)
-    ]
+    roster = topology_roster(professionals)
     return roster[0] if len(roster) == 1 else None
 
 

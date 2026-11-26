@@ -276,11 +276,12 @@ async def test_only_a_manager_writes_a_rule(client, hub, role, is_owner, is_mana
         headers=HEADERS,
     )
     assert post.status_code == 403
-    # Without a rule the custom POST keeps its old, role-blind gate.
+    # Without a rule the clinic's "Outro" is still the manager's (TASK-091 T4; junção 090+091:
+    # the more restrictive rule wins).
     plain = await client.post(
         "/tenants/me/insurance-plans/custom", json={"custom_name": "GEAP"}, headers=HEADERS
     )
-    assert plain.status_code == 201
+    assert plain.status_code == 403
     assert await _stored(w, TenantInsurancePlan, w["unimed"].id) is None
 
 

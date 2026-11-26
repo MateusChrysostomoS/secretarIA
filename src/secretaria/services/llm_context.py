@@ -232,9 +232,10 @@ def _services_by_unit(professional, tenant) -> str | None:
 def _topology_lines(tenant, professionals) -> list[str]:
     # The doctors LISTED are the ones a patient may book with; how many doctors the clinic has
     # is counted on every active one (TASK-090 Adendo 1, C1): a clinic with a doctor hidden
-    # from patients is never described as "um só médico".
+    # from patients is never described as "um só médico"; a flagged invitee not ready to book
+    # does not count (TASK-091, `booking_scope.topology_roster`).
     roster = list(professionals or [])
-    multi = len(fr.everyone_of(professionals)) > 1
+    multi = len(fr.topology_roster(professionals)) > 1
     if tenant is None or not hasattr(tenant, "appointment_types"):
         return []
     units_line = _units_line(roster)

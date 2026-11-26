@@ -99,6 +99,7 @@ from secretaria.services.booking_scope import (
     canonical_service_name,
     everyone_of,
     resolve_booking_owner_id,
+    topology_roster,
 )
 from secretaria.services.calendar import (
     CalendarService,
@@ -1357,11 +1358,11 @@ def _bookable(professionals: list | None) -> list:
 def _is_multi_professional(professionals: list | None) -> bool:
     """2+ professionals -> the multi-doctor menu replaces the default.
 
-    Counted on EVERY active doctor (`booking_scope.everyone_of`): a doctor hidden from
-    patients (TASK-090 Adendo 1) keeps the clinic on the multi-doctor paths - each doctor's
-    own agenda, services and hours - never the clinic's (owner ruling on C1). A flagged
-    invitee who is not ready to book does not count (TASK-091, `_bookable`)."""
-    return len(_bookable(everyone_of(professionals))) > 1
+    Counted on `booking_scope.topology_roster`: a doctor hidden from patients (TASK-090
+    Adendo 1) keeps the clinic on the multi-doctor paths - each doctor's own agenda, services
+    and hours - never the clinic's (owner ruling on C1); a flagged invitee who is not ready
+    to book does not count (TASK-091)."""
+    return len(topology_roster(professionals)) > 1
 
 
 def menu_buttons_for(tenant: Tenant, multi_professional: bool) -> list[str]:
@@ -5848,7 +5849,7 @@ def _booking_professional(conversation: Conversation, professionals: list | None
     selected = _find_professional_by_id(professionals, _selected_professional_id(conversation))
     if selected is not None:
         return selected
-    rows = everyone_of(professionals)
+    rows = topology_roster(professionals)
     return rows[0] if len(rows) == 1 else None
 
 
@@ -6114,7 +6115,7 @@ def _appointment_owner_and_unit_id(
         if owner_id:
             owner = _find_owner_by_id(professionals, UUID(str(owner_id)))
         else:
-            rows = everyone_of(professionals)
+            rows = topology_roster(professionals)
             owner = rows[0] if len(rows) == 1 else None
     except (TypeError, ValueError):
         return None
