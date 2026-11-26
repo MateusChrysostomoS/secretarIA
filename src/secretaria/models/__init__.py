@@ -52,6 +52,7 @@ from secretaria.models.service import Service
 from secretaria.models.tenant import Tenant
 from secretaria.models.tenant_credentials import TenantCredentials
 from secretaria.models.unit import Unit
+from secretaria.models.whatsapp_connection_attempt import WhatsAppConnectionAttempt
 
 __all__ = [
     "LIVE_APPOINTMENT_STATUSES",
@@ -104,4 +105,5 @@ __all__ = [
     "TenantCredentials",
     "TenantInsurancePlan",
     "Unit",
+    "WhatsAppConnectionAttempt",
 ]

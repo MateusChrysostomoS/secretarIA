@@ -43,6 +43,7 @@ from secretaria.api.hub import (
     services,
     simulation,
     units,
+    whatsapp,
 )
 from secretaria.config import get_settings
 from secretaria.core.build_info import (
@@ -167,6 +168,9 @@ def create_app() -> FastAPI:
     app.include_router(conversations.router)
     # analytics_bi addon: booking-count summary (entitlement gated in the router).
     app.include_router(analytics.router)
+    # WhatsApp connection by the secretarIA backend (TASK-093 Plano 3): 404 until
+    # WHATSAPP_CONNECT_BACKEND_ENABLED; no Portal screen yet.
+    app.include_router(whatsapp.router)
     return app
 
 

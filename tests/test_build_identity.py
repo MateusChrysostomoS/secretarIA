@@ -388,6 +388,7 @@ def test_worker_registry_is_complete() -> None:
         "cron:reconcile_appointment_reminders",
         "cron:process_confirmation_warnings",
         "cron:run_onboarding_nudges",
+        "cron:retry_whatsapp_connected_notices",
         "cron:run_patient_usage_metering",
         "cron:check_deploy_parity_cron",
         "cron:run_payment_expiry",
@@ -413,7 +414,7 @@ async def test_worker_startup_logs_identity_and_registry(
         assert event == "worker_started"
         assert {"build_sha", "built_at", "alembic_head", "source_fingerprint"} <= set(fields)
         assert len(fields["functions"]) == 22
-        assert len(fields["cron_jobs"]) == 15
+        assert len(fields["cron_jobs"]) == 16
 
         rendered = json.dumps(fields, default=str)
         for secret in configured_secrets():

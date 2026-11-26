@@ -26,6 +26,8 @@ from secretaria.workers.calendar_sync import sync_local_calendar_to_google
 from secretaria.workers.confirmation_warnings import process_confirmation_warnings
 from secretaria.workers.deploy_parity import check_deploy_parity_cron
 from secretaria.workers.onboarding_cron import (
+    WHATSAPP_NOTICE_MINUTES,
+    retry_whatsapp_connected_notices,
     run_onboarding_nudges,
     run_patient_usage_metering,
 )
@@ -231,6 +233,9 @@ class WorkerSettings:
         # address). Every minute; the atomic claim makes an overlapping tick harmless.
         cron(process_confirmation_warnings, minute=set(range(60))),
         cron(run_onboarding_nudges, minute={10}),
+        # TASK-093 Plano 3: resend "WhatsApp connected" to brain-api when the notice right
+        # after a connection failed (workers/onboarding_cron.py). No-op with the flag off.
+        cron(retry_whatsapp_connected_notices, minute=WHATSAPP_NOTICE_MINUTES),
         cron(run_patient_usage_metering, hour={3}, minute={30}),
         cron(check_deploy_parity_cron, minute={7}),
         # Payment provider core (services/payments/jobs.py): void expired `before` charges,
