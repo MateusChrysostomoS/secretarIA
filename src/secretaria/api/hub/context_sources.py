@@ -28,7 +28,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.requests import ClientDisconnect
 
 from secretaria.api.attachment_http import CappedReceive, read_json_body
-from secretaria.api.hub.deps import get_current_tenant
+from secretaria.api.hub.deps import get_current_tenant, manager_only
 from secretaria.config import get_settings
 from secretaria.core.database import get_session
 from secretaria.core.logging import get_logger
@@ -230,7 +230,7 @@ async def _get_source(session: AsyncSession, tenant: Tenant, source_id: str) -> 
     return source
 
 
-@router.post("", status_code=status.HTTP_202_ACCEPTED)
+@router.post("", status_code=status.HTTP_202_ACCEPTED, dependencies=[Depends(manager_only)])
 async def create_source(
     request: Request,
     tenant: Tenant = Depends(get_current_tenant),
@@ -251,7 +251,7 @@ async def create_source(
     )
 
 
-@router.post("/file", status_code=status.HTTP_202_ACCEPTED)
+@router.post("/file", status_code=status.HTTP_202_ACCEPTED, dependencies=[Depends(manager_only)])
 async def create_source_from_file(
     request: Request,
     tenant: Tenant = Depends(get_current_tenant),
@@ -296,7 +296,9 @@ async def get_source(
     return body
 
 
-@router.delete("/{source_id}", status_code=status.HTTP_204_NO_CONTENT)
+@router.delete(
+    "/{source_id}", status_code=status.HTTP_204_NO_CONTENT, dependencies=[Depends(manager_only)]
+)
 async def delete_source(
     source_id: str,
     tenant: Tenant = Depends(get_current_tenant),

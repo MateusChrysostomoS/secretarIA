@@ -185,6 +185,35 @@ async def get_config_status(session: AsyncSession, tenant: Tenant) -> ConfigStat
     )
 
 
+async def new_professional_fields(
+    session: AsyncSession, tenant_id: UUID, *, invited: bool | None = None
+) -> dict:
+    """The starting configuration of a NEW professional row (the invite and the hub POST share it).
+
+    TASK-089/091: a professional added to a clinic that already has ACTIVE professionals is an
+    invitee. They come with NOTHING of their own - `appointment_types=[]` and `business_hours={}`,
+    not NULL: NULL means "inherit the clinic's whole catalog/hours" and would offer the newcomer
+    to patients before anything is configured - and with `requires_self_setup` set, so the
+    patient flow hides them until `professional_readiness` says they can be booked. No unit link
+    and no own convênio list is ever created here. The clinic's first professional keeps
+    inheriting (a single-doctor clinic's catalog IS the clinic's), and so does one added to a
+    clinic whose only professionals are inactive (nobody else to book).
+
+    `invited=None` derives it from the clinic; `True`/`False` is the caller's explicit decision.
+    """
+    if invited is None:
+        invited = bool(
+            await session.scalar(
+                select(func.count())
+                .select_from(Professional)
+                .where(Professional.tenant_id == tenant_id, Professional.is_active.is_(True))
+            )
+        )
+    if not invited:
+        return {}
+    return {"appointment_types": [], "business_hours": {}, "requires_self_setup": True}
+
+
 async def create_or_attach_professional(
     session: AsyncSession,
     *,
@@ -193,6 +222,7 @@ async def create_or_attach_professional(
     specialty: str | None,
     about: str | None,
     interactive: bool = False,
+    invited: bool | None = None,
 ) -> tuple[Professional, bool] | None:
     """Case-insensitive attach-by-name, else create (contract endpoint 4).
 
@@ -216,24 +246,12 @@ async def create_or_attach_professional(
 
     if interactive:
         await require_professional_capacity(session, tenant)
-    # TASK-089: a professional added to a clinic that already has ACTIVE professionals (the invite)
-    # comes with NO services of their own (`[]`), not NULL: NULL means "inherit the clinic's whole
-    # catalog" and would offer the newcomer to patients before anything is configured. The clinic's
-    # first professional keeps inheriting (the single-doctor clinic's catalog is the clinic's), and
-    # so does one added to a clinic whose only professionals are inactive (nobody else to book).
-    already_has_professionals = bool(
-        await session.scalar(
-            select(func.count())
-            .select_from(Professional)
-            .where(Professional.tenant_id == tenant_id, Professional.is_active.is_(True))
-        )
-    )
     professional = Professional(
         tenant_id=tenant_id,
         name=name,
         specialty=specialty,
         about=about,
-        appointment_types=[] if already_has_professionals else None,
+        **await new_professional_fields(session, tenant_id, invited=invited),
     )
     session.add(professional)
     await session.flush()

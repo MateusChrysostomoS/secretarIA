@@ -34,7 +34,12 @@ from sqlalchemy import delete, func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from secretaria.api.hub.deps import get_current_tenant
+from secretaria.api.hub.deps import (
+    get_current_tenant,
+    manager_only,
+    professional_reader,
+    professional_writer,
+)
 from secretaria.core.database import get_session
 from secretaria.core.logging import get_logger
 from secretaria.models import Professional, Service, Tenant, Unit
@@ -559,7 +564,11 @@ async def get_clinic_matrix(
     return await _read(session, tenant.id, await _clinic_scope(session, tenant))
 
 
-@router.put("/insurance-acceptance/clinic/units/{unit_key}", response_model=InsuranceMatrixRead)
+@router.put(
+    "/insurance-acceptance/clinic/units/{unit_key}",
+    response_model=InsuranceMatrixRead,
+    dependencies=[Depends(manager_only)],
+)
 async def put_clinic_matrix_slice(
     unit_key: str,
     body: InsuranceMatrixSliceUpdate,
@@ -570,7 +579,11 @@ async def put_clinic_matrix_slice(
     return await _put(session, tenant, None, unit_key, body)
 
 
-@router.post("/insurance-acceptance/clinic/copy", response_model=InsuranceMatrixRead)
+@router.post(
+    "/insurance-acceptance/clinic/copy",
+    response_model=InsuranceMatrixRead,
+    dependencies=[Depends(manager_only)],
+)
 async def post_clinic_matrix_copy(
     body: InsuranceMatrixCopy,
     tenant: Tenant = Depends(get_current_tenant),
@@ -585,7 +598,10 @@ async def post_clinic_matrix_copy(
 # ---------------------------------------------------------------------------
 
 
-@router.get("/professionals/{professional_id}/insurance-acceptance")
+@router.get(
+    "/professionals/{professional_id}/insurance-acceptance",
+    dependencies=[Depends(professional_reader)],
+)
 async def get_professional_matrix(
     professional_id: str,
     tenant: Tenant = Depends(get_current_tenant),
@@ -596,7 +612,10 @@ async def get_professional_matrix(
     return await _read(session, tenant.id, await _professional_scope(session, tenant, professional))
 
 
-@router.put("/professionals/{professional_id}/insurance-acceptance/units/{unit_key}")
+@router.put(
+    "/professionals/{professional_id}/insurance-acceptance/units/{unit_key}",
+    dependencies=[Depends(professional_writer)],
+)
 async def put_professional_matrix_slice(
     professional_id: str,
     unit_key: str,
@@ -609,7 +628,10 @@ async def put_professional_matrix_slice(
     return await _put(session, tenant, professional, unit_key, body)
 
 
-@router.post("/professionals/{professional_id}/insurance-acceptance/copy")
+@router.post(
+    "/professionals/{professional_id}/insurance-acceptance/copy",
+    dependencies=[Depends(professional_writer)],
+)
 async def post_professional_matrix_copy(
     professional_id: str,
     body: InsuranceMatrixCopy,

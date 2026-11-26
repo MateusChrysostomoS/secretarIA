@@ -93,10 +93,12 @@ logger = get_logger(__name__)
 
 
 async def _active_professionals(tenant_id: UUID) -> list:
-    """The professionals a PATIENT may book with for `tenant_id`, ordered by name: active, and
-    not a doctor whose unit links are all unusable (TASK-090 Adendo 1). A
-    `booking_scope.PatientRoster`: its `everyone` (every active doctor) decides the topology,
-    so hiding never turns a multi-doctor clinic into a one-doctor one (owner ruling, C1)."""
+    """The professionals a PATIENT may book with for `tenant_id`, ordered by name: active, not
+    a flagged invitee who is not ready to book (TASK-091), and not a doctor whose unit links
+    are all unusable (TASK-090 Adendo 1). A `booking_scope.PatientRoster`: its `everyone`
+    (every active doctor, with the TASK-091 `booking_blocked` mark) decides the topology, so
+    hiding never turns a multi-doctor clinic into a one-doctor one (owner ruling, C1), and
+    resolves the doctor of an EXISTING consultation."""
     # Imported lazily, same rationale as ai/tools.py's _persist_appointment:
     # keeps this module importable without a DB/ORM in dev scripts, and avoids
     # an import cycle through models -> services.
@@ -105,9 +107,14 @@ async def _active_professionals(tenant_id: UUID) -> list:
     from secretaria.services.professional_units import patient_visible_professionals
     from secretaria.services.tenant_config import list_active_professionals
 
+    # TASK-091: this is the agent's "who can the patient book with?" - a flagged invitee who is not
+    # ready to book is not offered, exactly as in the deterministic flow.
     async with async_session_factory() as session:
         everyone = await list_active_professionals(session, tenant_id)
         offered = await patient_visible_professionals(session, tenant_id, everyone)
+    # TASK-091: a flagged invitee who is not ready to book is never OFFERED either (he stays
+    # in `everyone`, where his existing consultations are looked up).
+    offered = [p for p in offered if not getattr(p, "booking_blocked", False)]
     return PatientRoster(offered, everyone=everyone)
 
 

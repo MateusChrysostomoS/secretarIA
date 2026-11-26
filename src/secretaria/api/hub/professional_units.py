@@ -3,7 +3,8 @@
 GET /tenants/me/professionals/{professional_id}/units
     Every ACTIVE unit of the clinic with `linked` (does this professional attend it) and the
     link's own `business_hours` (null = inherits the professional's, {} = closed all week).
-    Readable by ANY staff member of the tenant: the secretary needs it when booking.
+    Readable by any staff member of the tenant (the secretary needs it when booking), except a
+    doctor who is not the manager: he reads only his own (TASK-091 T4).
 
 PUT /tenants/me/professionals/{professional_id}/units
     Body `{"links": [{"unit_id", "business_hours"}]}`: REPLACES the professional's set of links to
@@ -45,6 +46,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from secretaria.api.hub.deps import (
     ensure_clinic_manager_or_own_professional,
     get_current_tenant,
+    professional_reader,
 )
 from secretaria.core.database import get_session
 from secretaria.core.logging import get_logger
@@ -159,7 +161,11 @@ async def _require_marked_units_in_clinic(
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Unit not found")
 
 
-@router.get("/{professional_id}/units", response_model=ProfessionalUnitsRead)
+@router.get(
+    "/{professional_id}/units",
+    response_model=ProfessionalUnitsRead,
+    dependencies=[Depends(professional_reader)],
+)
 async def get_professional_units(
     professional_id: str,
     tenant: Tenant = Depends(get_current_tenant),

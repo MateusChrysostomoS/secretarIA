@@ -1,5 +1,10 @@
 """Doctor hub — professionals CRUD (multi_professional addon).
 
+Roles (TASK-091 T4): creating a professional, turning one on/off (`is_active`) and the
+bulk calendar setup are the clinic manager's; the per-professional writes (PATCH name /
+calendar id, PUT config incl. own price/duration per unit, POST calendar) are the
+manager's or the doctor's own; a doctor who is not the manager lists only himself.
+
 GET   /tenants/me/professionals        - list (always allowed, even when the
                                           addon is disabled — a tenant that lost
                                           the addon can still see what it had).
@@ -63,10 +68,19 @@ from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from secretaria.api.hub.deps import get_current_tenant
+from secretaria.api.hub.deps import (
+    ensure_clinic_manager,
+    ensure_may_set_calendar_id,
+    get_current_tenant,
+    get_staff_claim,
+    is_self_only_doctor,
+    manager_only,
+    professional_writer,
+)
 from secretaria.core.catalog_limits import CatalogLimitExceeded
 from secretaria.core.database import get_session
 from secretaria.core.logging import get_logger
+from secretaria.core.subscription import SubscriptionClaim
 from secretaria.models import Tenant
 from secretaria.models.professional import Professional
 from secretaria.schemas.professional import (
@@ -79,7 +93,7 @@ from secretaria.schemas.professional import (
     ProfessionalRead,
     ProfessionalUpdate,
 )
-from secretaria.services import hub_configuration as hubcfg
+from secretaria.services import hub_configuration as hubcfg, provisioning
 from secretaria.services.calendar import (
     CalendarUnavailableError,
     GoogleScopeInsufficientError,
@@ -157,6 +171,16 @@ async def _get_professional(
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Professional not found") from None
 
 
+async def _check_calendar_id_free(
+    session: AsyncSession, tenant: Tenant, professional: Professional, data: dict
+) -> None:
+    """409 `calendar_in_use` (TASK-091 review M1), before any mutation."""
+    try:
+        await hubcfg.check_calendar_id_free(session, tenant, professional, data)
+    except hubcfg.CalendarIdInUse as exc:
+        raise HTTPException(status.HTTP_409_CONFLICT, detail=exc.detail()) from None
+
+
 async def _count_active(session: AsyncSession, tenant_id: UUID) -> int:
     result = await session.scalar(
         select(func.count())
@@ -181,15 +205,25 @@ async def _require_entitled_within_limit(session: AsyncSession, tenant: Tenant) 
 @router.get("", response_model=list[ProfessionalListItem])
 async def list_professionals(
     tenant: Tenant = Depends(get_current_tenant),
+    claim: SubscriptionClaim = Depends(get_staff_claim),
     session: AsyncSession = Depends(get_session),
 ) -> list[ProfessionalListItem]:
-    rows = await session.scalars(
-        select(Professional).where(Professional.tenant_id == tenant.id).order_by(Professional.name)
-    )
+    query = select(Professional).where(Professional.tenant_id == tenant.id)
+    if is_self_only_doctor(claim):
+        # TASK-091 T4: a doctor who is not the manager sees only himself (no linked row = none).
+        if claim.professional_id is None:
+            return []
+        query = query.where(Professional.id == claim.professional_id)
+    rows = await session.scalars(query.order_by(Professional.name))
     return [await _list_item(session, p, tenant) for p in rows]
 
 
-@router.post("", response_model=ProfessionalRead, status_code=status.HTTP_201_CREATED)
+@router.post(
+    "",
+    response_model=ProfessionalRead,
+    status_code=status.HTTP_201_CREATED,
+    dependencies=[Depends(manager_only)],
+)
 async def create_professional(
     body: ProfessionalCreate,
     tenant: Tenant = Depends(get_current_tenant),
@@ -203,6 +237,9 @@ async def create_professional(
         name=body.name,
         google_calendar_id=body.google_calendar_id,
         is_active=body.is_active,
+        # TASK-091: the same starting point as the invite (nothing inherited when the clinic
+        # already has professionals).
+        **await provisioning.new_professional_fields(session, tenant.id),
     )
     session.add(professional)
     await session.commit()
@@ -215,15 +252,25 @@ async def create_professional(
     return _read_model(professional)
 
 
-@router.patch("/{professional_id}", response_model=ProfessionalRead)
+@router.patch(
+    "/{professional_id}",
+    response_model=ProfessionalRead,
+    dependencies=[Depends(professional_writer)],
+)
 async def update_professional(
     professional_id: str,
     body: ProfessionalUpdate,
     tenant: Tenant = Depends(get_current_tenant),
+    claim: SubscriptionClaim = Depends(get_staff_claim),
     session: AsyncSession = Depends(get_session),
 ) -> ProfessionalRead:
-    professional = await _get_professional(session, tenant, professional_id)
     data = body.model_dump(exclude_unset=True)
+    if "is_active" in data:
+        # TASK-091 T4: turning a professional on or off spends/frees a seat of the clinic's plan.
+        ensure_clinic_manager(claim)
+    ensure_may_set_calendar_id(claim, data)
+    professional = await _get_professional(session, tenant, professional_id)
+    await _check_calendar_id_free(session, tenant, professional, data)
 
     activating = data.get("is_active") is True and not professional.is_active
     if activating:
@@ -246,12 +293,17 @@ async def update_professional(
     return _read_model(professional)
 
 
-@router.put("/{professional_id}/config", response_model=ProfessionalListItem)
+@router.put(
+    "/{professional_id}/config",
+    response_model=ProfessionalListItem,
+    dependencies=[Depends(professional_writer)],
+)
 async def update_professional_config(
     professional_id: str,
     body: ProfessionalConfigUpdate,
     request: Request,
     tenant: Tenant = Depends(get_current_tenant),
+    claim: SubscriptionClaim = Depends(get_staff_claim),
     session: AsyncSession = Depends(get_session),
 ) -> ProfessionalListItem:
     """Per-professional config save — NEVER gated by entitlements/limits/activation
@@ -268,8 +320,10 @@ async def update_professional_config(
     and `{}` / `[]` writes an empty OWN override that inherits nothing (see
     ProfessionalConfigUpdate).
     """
-    professional = await _get_professional(session, tenant, professional_id)
     data = body.model_dump(exclude_unset=True)
+    ensure_may_set_calendar_id(claim, data)
+    professional = await _get_professional(session, tenant, professional_id)
+    await _check_calendar_id_free(session, tenant, professional, data)
 
     try:
         await hubcfg.check_appointment_type_service_ids(session, tenant, data)
@@ -320,7 +374,11 @@ async def update_professional_config(
     return await _list_item(session, professional, tenant)
 
 
-@router.post("/calendars", response_model=ProfessionalCalendarBulkResult)
+@router.post(
+    "/calendars",
+    response_model=ProfessionalCalendarBulkResult,
+    dependencies=[Depends(manager_only)],
+)
 async def create_professional_calendars(
     tenant: Tenant = Depends(get_current_tenant),
     session: AsyncSession = Depends(get_session),
@@ -452,7 +510,11 @@ async def create_professional_calendars(
     )
 
 
-@router.post("/{professional_id}/calendar", response_model=ProfessionalCalendarConnect)
+@router.post(
+    "/{professional_id}/calendar",
+    response_model=ProfessionalCalendarConnect,
+    dependencies=[Depends(professional_writer)],
+)
 async def create_professional_calendar(
     professional_id: str,
     tenant: Tenant = Depends(get_current_tenant),

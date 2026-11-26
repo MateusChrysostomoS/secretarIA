@@ -12,7 +12,7 @@ import pytest
 import pytest_asyncio
 from httpx import AsyncClient
 
-from secretaria.api.hub.deps import get_current_tenant
+from secretaria.api.hub.deps import get_current_tenant, get_hub_claim, get_staff_claim
 from secretaria.core.database import get_session
 from secretaria.models import Tenant
 from secretaria.services.payments import registry
@@ -70,6 +70,7 @@ def _gate(monkeypatch):
 
     app.dependency_overrides.pop(get_session, None)
     app.dependency_overrides.pop(get_current_tenant, None)
+    app.dependency_overrides.pop(get_staff_claim, None)
 
 
 async def _world(db):
@@ -89,6 +90,8 @@ async def _world(db):
 
     app.dependency_overrides[get_session] = _session
     app.dependency_overrides[get_current_tenant] = _tenant  # tenant only; the ROLE is real
+    # TASK-091 T4: the role is judged from the claim; read it from the request's REAL token.
+    app.dependency_overrides[get_staff_claim] = get_hub_claim
     return world
 
 
@@ -157,11 +160,24 @@ async def test_a_manager_saves_the_payment_fields(client: AsyncClient, db, role,
     assert (await _stored(db, world)).deposit_hold_ttl_minutes == 60
 
 
-async def test_a_save_that_touches_no_payment_field_needs_no_manager(client: AsyncClient, db):
+@pytest.mark.parametrize("legacy", [False, True], ids=["configuration", "config"])
+async def test_a_clinic_field_that_is_not_financial_is_the_managers_too(
+    client: AsyncClient, db, legacy
+):
+    """TASK-091 T4 replaced the TASK-020 rule "a save touching no payment field needs no
+    manager": EVERY write of the clinic's data is now the manager's. A secretary or a doctor who
+    is not the manager is refused; the manager saves it."""
     world = await _world(db)
-    # `clinic_description` is a clinic setting that is NOT financial (spec 12.2: the other fields of
-    # the envelope keep their rule): a secretary still saves it.
-    response = await _put(client, world, "secretary", {"clinic_description": "Clínica de olhos."})
+    for role in ("secretary", "doctor"):
+        response = await _put(
+            client, world, role, {"clinic_description": "Clínica de olhos."}, legacy=legacy
+        )
+        assert response.status_code == 403
+        assert response.json()["detail"]["code"] == "forbidden_role"
+    assert (await _stored(db, world)).clinic_description != "Clínica de olhos."
+    response = await _put(
+        client, world, "manager", {"clinic_description": "Clínica de olhos."}, legacy=legacy
+    )
     assert response.status_code == 200
     assert (await _stored(db, world)).clinic_description == "Clínica de olhos."
 

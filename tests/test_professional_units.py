@@ -192,9 +192,20 @@ async def test_get_never_calls_entitlements(client, world):
     assert response.status_code == 200
 
 
-@pytest.mark.parametrize("role", ["secretary", "doctor", "manager"])
+@pytest.mark.parametrize("role", ["secretary", "manager"])
 async def test_get_is_readable_by_any_staff_member(client, world, role):
     world["claim"]["role"] = role
+    assert (await client.get(_url(world["doctor"]), headers=HEADERS)).status_code == 200
+
+
+async def test_a_doctor_who_is_not_the_manager_reads_only_himself(client, world):
+    """TASK-091 T4: the desk reads every doctor's units to book; a non-manager doctor, only his."""
+    world["claim"]["role"] = "doctor"
+    world["claim"]["professional_id"] = None
+    other = await client.get(_url(world["doctor"]), headers=HEADERS)
+    assert other.status_code == 403
+    assert other.json()["detail"]["code"] == "forbidden_role"
+    world["claim"]["professional_id"] = world["doctor"].id
     assert (await client.get(_url(world["doctor"]), headers=HEADERS)).status_code == 200
 
 

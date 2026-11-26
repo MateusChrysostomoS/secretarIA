@@ -25,8 +25,10 @@ from sqlalchemy.ext.asyncio import (  # noqa: E402
 )
 from sqlalchemy.pool import StaticPool  # noqa: E402
 
-from secretaria.api.hub.config import _claim_if_authenticated  # noqa: E402
-from secretaria.api.hub.deps import get_current_tenant  # noqa: E402
+from secretaria.api.hub.deps import (
+    get_current_tenant,  # noqa: E402
+    get_staff_claim,  # noqa: E402
+)
 from secretaria.core.database import Base, get_session  # noqa: E402
 from secretaria.core.subscription import SubscriptionClaim  # noqa: E402
 from secretaria.models import Tenant  # noqa: E402
@@ -79,13 +81,13 @@ def _override(db, tenant):
     # The deposit switch and policy are manager-only since spec 12.2 (R12); these tests are about
     # the VALUES (ranges, partial updates), so the caller is a manager. The role gate itself is
     # proved with real tokens in tests/test_payment_settings_roles.py.
-    app.dependency_overrides[_claim_if_authenticated] = lambda: SubscriptionClaim(
+    app.dependency_overrides[get_staff_claim] = lambda: SubscriptionClaim(
         tenant_id=tenant.id, active=True, role="manager", is_manager=True
     )
     yield
     app.dependency_overrides.pop(get_session, None)
     app.dependency_overrides.pop(get_current_tenant, None)
-    app.dependency_overrides.pop(_claim_if_authenticated, None)
+    app.dependency_overrides.pop(get_staff_claim, None)
 
 
 # --------------------------------------------------------------------------

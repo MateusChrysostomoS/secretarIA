@@ -128,7 +128,12 @@ def sole_active_professional(professionals: Sequence[Any] | None) -> Any | None:
     Counted on EVERY active doctor (`everyone_of`): a doctor hidden from patients still makes
     the clinic a multi-doctor one (TASK-090 Adendo 1, owner ruling on C1).
     """
-    roster = everyone_of(professionals)
+    # TASK-091: a flagged invitee who is not ready to book is not part of the clinic the
+    # patient sees, so "one ready doctor + one incomplete invitee" is still a single-doctor
+    # clinic; a doctor hidden for his units still counts (TASK-090 Adendo 1, C1).
+    roster = [
+        p for p in everyone_of(professionals) if not getattr(p, "booking_blocked", False)
+    ]
     return roster[0] if len(roster) == 1 else None
 
 

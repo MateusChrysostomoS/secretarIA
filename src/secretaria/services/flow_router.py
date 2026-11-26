@@ -1345,13 +1345,23 @@ def menu_buttons(tenant: Tenant) -> list[str]:
     return [str(b) for b in buttons][:3]
 
 
-def _is_multi_professional(professionals: list | None) -> bool:
-    """2+ active professionals -> the multi-doctor menu replaces the default.
+def _bookable(professionals: list | None) -> list:
+    """The roster a PATIENT may choose from (TASK-091): drops a flagged invitee who is not ready.
 
-    Counted on EVERY active doctor (`booking_scope.everyone_of`): a doctor hidden from patients
-    (TASK-090 Adendo 1) keeps the clinic on the multi-doctor paths - each doctor's own agenda,
-    services and hours - never the clinic's (owner ruling on C1)."""
-    return len(everyone_of(professionals)) > 1
+    Applied only where the patient chooses (the doctor lists, "Outro médico", the several-doctors
+    decision, the clinic's service union). Looking a doctor up by id - an existing appointment, a
+    rebooking that keeps the doctor - goes through the full roster on purpose."""
+    return [p for p in professionals or [] if not getattr(p, "booking_blocked", False)]
+
+
+def _is_multi_professional(professionals: list | None) -> bool:
+    """2+ professionals -> the multi-doctor menu replaces the default.
+
+    Counted on EVERY active doctor (`booking_scope.everyone_of`): a doctor hidden from
+    patients (TASK-090 Adendo 1) keeps the clinic on the multi-doctor paths - each doctor's
+    own agenda, services and hours - never the clinic's (owner ruling on C1). A flagged
+    invitee who is not ready to book does not count (TASK-091, `_bookable`)."""
+    return len(_bookable(everyone_of(professionals))) > 1
 
 
 def menu_buttons_for(tenant: Tenant, multi_professional: bool) -> list[str]:
@@ -3095,9 +3105,9 @@ def insurance_plans_for_service(
     exc = snapshot_exceptions(tenant)
     if not service_name or not has_exceptions(exc) or not professionals:
         return list(plans)
-    roster = list(professionals)
+    roster = _bookable(professionals)
     if professional_id is not None:
-        doctor = _find_professional_by_id(roster, professional_id)
+        doctor = _find_professional_by_id(professionals, professional_id)
         if doctor is None:
             return list(plans)
         candidates = [doctor]
@@ -3285,6 +3295,7 @@ def _enter_professional_list(
     S4: `page`). The Portal pointer is the whole roster on every page.
     `service_name` (TASK-086): the service already chosen, for the convênio marks.
     """
+    professionals = _bookable(professionals)
     shown, more = professional_page(
         professionals, page, fixed_rows=1, event="flow_professional_list_truncated"
     )
@@ -3346,7 +3357,7 @@ def _clinic_service_catalog(
     """
     seen: set[str] = set()
     union: list[dict] = []
-    for professional in professionals or []:
+    for professional in _bookable(professionals):
         for service in professional_appointment_types(professional, tenant, services):
             name = str(service.get("name", "")).strip()
             key = _norm(name)
@@ -3363,7 +3374,7 @@ def _professionals_offering(
     """The active professionals whose own catalog contains `service_name`."""
     return [
         professional
-        for professional in professionals or []
+        for professional in _bookable(professionals)
         if canonical_service_name(
             professional_appointment_types(professional, tenant, services), service_name
         )
@@ -3445,6 +3456,7 @@ def _enter_service_professional_list(
 
     Pages like every doctor list (`page`, TASK-082 S4).
     """
+    professionals = _bookable(professionals)
     offering = _professionals_offering(tenant, professionals, service_name) or list(professionals)
     shown, more = professional_page(
         offering, page, fixed_rows=0, event="flow_service_professional_list_truncated"
@@ -9226,7 +9238,7 @@ def rebooking_candidates(
     # rebook with, not even as the "full roster" fallback below.
     others = [
         p
-        for p in professionals
+        for p in _bookable(professionals)
         if p.id != cancelled_professional_id and getattr(p, "appointment_types", None) != []
     ]
     if not others:

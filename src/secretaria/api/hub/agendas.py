@@ -17,7 +17,11 @@ from pydantic import BaseModel, ConfigDict
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from secretaria.api.hub.deps import get_current_tenant, require_clinic_manager
+from secretaria.api.hub.deps import (
+    get_current_tenant,
+    professional_reader,
+    require_clinic_manager,
+)
 from secretaria.core.database import get_session
 from secretaria.models import Tenant
 from secretaria.models.professional import Professional
@@ -54,7 +58,11 @@ async def sync_agendas(
     return AgendaSyncOut(linked=result.linked, shared=result.shared)
 
 
-@router.get("/professionals/{professional_id}/agenda", response_model=ProfessionalAgendaOut)
+@router.get(
+    "/professionals/{professional_id}/agenda",
+    response_model=ProfessionalAgendaOut,
+    dependencies=[Depends(professional_reader)],
+)
 async def professional_agenda(
     professional_id: str,
     tenant: Tenant = Depends(get_current_tenant),

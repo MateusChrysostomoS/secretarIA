@@ -23,8 +23,7 @@ import pytest_asyncio
 from httpx import AsyncClient
 from sqlalchemy import select
 
-from secretaria.api.hub.config import _claim_if_authenticated
-from secretaria.api.hub.deps import get_current_tenant
+from secretaria.api.hub.deps import get_current_tenant, get_staff_claim
 from secretaria.core.database import get_session
 from secretaria.core.subscription import SubscriptionClaim
 from secretaria.models import Appointment, AppointmentStatus, BookingHold, PixDeposit, Tenant
@@ -86,7 +85,7 @@ def _cleanup():
     yield
     from secretaria.main import app
 
-    for dep in (get_session, get_current_tenant, _claim_if_authenticated):
+    for dep in (get_session, get_current_tenant, get_staff_claim):
         app.dependency_overrides.pop(dep, None)
 
 
@@ -123,7 +122,7 @@ def _wire_manager(db, tenant_id):
 
     app.dependency_overrides[get_session] = _session
     app.dependency_overrides[get_current_tenant] = _tenant
-    app.dependency_overrides[_claim_if_authenticated] = lambda: SubscriptionClaim(
+    app.dependency_overrides[get_staff_claim] = lambda: SubscriptionClaim(
         tenant_id=tenant_id, active=True, role="manager", is_manager=True
     )
 

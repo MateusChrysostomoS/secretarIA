@@ -14,8 +14,7 @@ import pytest
 import pytest_asyncio
 from httpx import AsyncClient
 
-from secretaria.api.hub.config import _claim_if_authenticated
-from secretaria.api.hub.deps import get_current_tenant
+from secretaria.api.hub.deps import get_current_tenant, get_staff_claim
 from secretaria.core.database import get_session
 from secretaria.core.subscription import SubscriptionClaim
 from secretaria.models import PixDeposit, Tenant
@@ -65,7 +64,7 @@ def _wire(db, tenant_id):
     app.dependency_overrides[get_current_tenant] = _tenant
     # These tests are about the payment rules, so the caller is a manager. The ROLE gate itself is
     # proved with real tokens in `tests/test_payment_settings_roles.py`.
-    app.dependency_overrides[_claim_if_authenticated] = lambda: SubscriptionClaim(
+    app.dependency_overrides[get_staff_claim] = lambda: SubscriptionClaim(
         tenant_id=tenant_id, active=True, role="manager", is_manager=True
     )
 
@@ -77,7 +76,7 @@ def _cleanup():
 
     app.dependency_overrides.pop(get_session, None)
     app.dependency_overrides.pop(get_current_tenant, None)
-    app.dependency_overrides.pop(_claim_if_authenticated, None)
+    app.dependency_overrides.pop(get_staff_claim, None)
 
 
 async def _world(db, **kw):

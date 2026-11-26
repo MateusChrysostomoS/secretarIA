@@ -124,8 +124,17 @@ async def test_another_clinic_cannot_read_list_or_delete_a_source(client, world)
     assert intact.deleted_at is None and intact.proposal == {"fields": [], "services": []}
 
 
-@pytest.mark.parametrize("role", ["manager", "doctor", "secretary"])
-async def test_every_staff_role_that_can_save_the_context_can_submit_a_source(client, world, role):
-    world["caller"]["claim"] = SubscriptionClaim(tenant_id=world["a"], active=True, role=role)
+async def test_the_manager_submits_a_source(client, world):
+    world["caller"]["claim"] = SubscriptionClaim(tenant_id=world["a"], active=True, role="manager")
     response = await client.post(BASE, json={"kind": "text", "text": TEXT}, headers=HEADERS)
     assert response.status_code == 202
+
+
+@pytest.mark.parametrize("role", ["doctor", "secretary"])
+async def test_only_the_manager_submits_a_source(client, world, role):
+    """TASK-091 T4: the clinic's context is the clinic's data - a doctor who is not the manager
+    (and the desk) read it but never feed it."""
+    world["caller"]["claim"] = SubscriptionClaim(tenant_id=world["a"], active=True, role=role)
+    response = await client.post(BASE, json={"kind": "text", "text": TEXT}, headers=HEADERS)
+    assert response.status_code == 403
+    assert response.json()["detail"]["code"] == "forbidden_role"
